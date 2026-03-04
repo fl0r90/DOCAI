@@ -1,0 +1,25 @@
+# Modele AI masive (Portate manual)
+models/
+ocr_cache/
+
+# Date persistente (Baze de date)
+data/
+backend/uploads/
+frontend/.next/
+node_modules/
+
+# Pachete de export
+*.tar
+*.tar.gz
+
+# Secrete si Configuratii locale
+.env
+__pycache__/
+*.pyc
+.DS_Store
+.venv/
+env/
+
+# Fisiere temporare de diagnostic
+WhiteSpaceConflict/
+*Conflict*

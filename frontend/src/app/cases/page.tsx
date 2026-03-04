@@ -1,0 +1,178 @@
+'use client';
+import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import api from '../../lib/api';
+import Cookies from 'js-cookie';
+import { 
+  Shield, Folder, Plus, Search, Filter, Loader2, 
+  ChevronRight, Calendar, Users, FileText, LayoutGrid, List, Brain
+} from 'lucide-react';
+
+export default function Cases() {
+  const router = useRouter();
+  const [cases, setCases] = useState<any[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isCreating, setIsCreating] = useState(false);
+  const [activeModel, setActiveModel] = useState<string>('...');
+  const [newCase, setNewCase] = useState({ name: '', description: '' });
+  const token = Cookies.get('token');
+
+  const fetchData = async () => {
+    try {
+      const [casesRes, modelRes] = await Promise.all([
+        api.get('/cases'),
+        api.get('/system/models/active')
+      ]);
+      setCases(casesRes.data);
+      setActiveModel(modelRes.data.active_model);
+    } catch (err) {
+      router.push('/login');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!token) { router.push('/login'); return; }
+    fetchData();
+  }, []);
+
+  const handleCreateCase = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await api.post('/cases', newCase);
+      setNewCase({ name: '', description: '' });
+      setIsCreating(false);
+      fetchData();
+    } catch (err) {
+      alert("Eroare la crearea dosarului.");
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-200 font-sans">
+      {/* HEADER */}
+      <div className="bg-slate-900/50 border-b border-white/5 sticky top-0 z-50 backdrop-blur-md">
+        <div className="max-w-[1600px] mx-auto px-8 h-20 flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <div className="p-2 bg-blue-600 rounded-xl">
+              <Shield className="w-6 h-6 text-white" />
+            </div>
+            <div>
+              <h1 className="text-xl font-black text-white tracking-tight uppercase leading-none">DocAI</h1>
+              <span className="text-[9px] font-black text-blue-500 uppercase tracking-[0.2em] mt-1 block">v0.1 BETA</span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-6">
+            <div className="flex items-center gap-2 px-3 py-1.5 bg-blue-500/10 border border-blue-500/20 rounded-lg">
+              <Brain className="w-3.5 h-3.5 text-blue-400" />
+              <span className="text-[10px] font-black text-blue-400 uppercase tracking-widest">Model Activ: {activeModel}</span>
+            </div>
+            <button 
+              onClick={() => setIsCreating(true)}
+              className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 hover:bg-blue-500 rounded-xl text-xs font-black uppercase tracking-widest transition-all shadow-lg shadow-blue-900/20"
+            >
+              <Plus className="w-4 h-4" /> Dosar Nou
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="max-w-[1600px] mx-auto px-8 py-12">
+        {isLoading ? (
+          <div className="h-64 flex flex-col items-center justify-center gap-4 opacity-50">
+            <Loader2 className="w-10 h-10 animate-spin text-blue-500" />
+            <p className="text-xs font-black uppercase tracking-widest">Se încarcă arhiva...</p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {cases.map((c) => (
+              <div 
+                key={c.id} 
+                onClick={() => router.push(`/cases/${c.id}`)}
+                className="group bg-slate-900/40 border border-white/5 rounded-3xl p-8 hover:bg-slate-900/60 hover:border-blue-500/30 transition-all cursor-pointer relative overflow-hidden"
+              >
+                <div className="absolute top-0 right-0 p-6 opacity-5 group-hover:opacity-10 transition-opacity">
+                  <Folder className="w-24 h-24 text-white" />
+                </div>
+                
+                <div className="flex items-center gap-3 mb-6">
+                  <div className="p-3 bg-blue-500/10 rounded-2xl group-hover:bg-blue-500/20 transition-colors">
+                    <Folder className="w-6 h-6 text-blue-400" />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-black text-white uppercase tracking-tight">{c.name}</h3>
+                    <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">ID Dosar: #{c.id}</p>
+                  </div>
+                </div>
+
+                <p className="text-sm text-slate-400 font-medium mb-8 line-clamp-2 h-10">{c.description || 'Nicio descriere adăugată.'}</p>
+
+                <div className="flex items-center justify-between pt-6 border-t border-white/5">
+                  <div className="flex items-center gap-4">
+                    <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-500 uppercase tracking-tighter">
+                      <FileText className="w-3.5 h-3.5" /> {c.document_count} documente
+                    </div>
+                    <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-500 uppercase tracking-tighter">
+                      <Calendar className="w-3.5 h-3.5" /> {new Date(c.created_at).toLocaleDateString()}
+                    </div>
+                  </div>
+                  <ChevronRight className="w-5 h-5 text-slate-700 group-hover:text-blue-500 group-hover:translate-x-1 transition-all" />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* MODAL CREARE DOSAR */}
+      {isCreating && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-slate-950/80 backdrop-blur-md">
+          <div className="w-full max-w-lg bg-slate-900 border border-white/10 rounded-3xl p-8 shadow-2xl animate-in zoom-in-95 duration-200">
+            <div className="flex justify-between items-center mb-8">
+              <h2 className="text-2xl font-black text-white uppercase tracking-tighter">Creează Dosar Nou</h2>
+              <button onClick={() => setIsCreating(false)} className="p-2 hover:bg-white/5 rounded-full text-slate-500 transition-colors">
+                <X className="w-6 h-6" />
+              </button>
+            </div>
+            <form onSubmit={handleCreateCase} className="space-y-6">
+              <div>
+                <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Nume Investigație</label>
+                <input 
+                  autoFocus
+                  required
+                  value={newCase.name}
+                  onChange={(e) => setNewCase({...newCase, name: e.target.value})}
+                  className="w-full bg-slate-950 border border-white/5 rounded-xl px-4 py-3.5 text-sm font-bold focus:outline-none focus:border-blue-500/50 transition-all"
+                  placeholder="Ex: Control Fiscal Octombrie 2024"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Descriere / Obiective</label>
+                <textarea 
+                  value={newCase.description}
+                  onChange={(e) => setNewCase({...newCase, description: e.target.value})}
+                  className="w-full bg-slate-950 border border-white/5 rounded-xl px-4 py-3.5 text-sm font-bold focus:outline-none focus:border-blue-500/50 transition-all h-32 resize-none"
+                  placeholder="Detalii despre scopul analizei..."
+                />
+              </div>
+              <button 
+                type="submit"
+                className="w-full py-4 bg-blue-600 hover:bg-blue-500 rounded-xl text-sm font-black uppercase tracking-widest transition-all shadow-lg shadow-blue-900/20"
+              >
+                Lansează Dosarul
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function X({ className }: { className?: string }) {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+  );
+}

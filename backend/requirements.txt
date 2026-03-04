@@ -1,0 +1,17 @@
+fastapi==0.109.2
+uvicorn==0.27.1
+sqlalchemy==2.0.27
+psycopg2-binary==2.9.9
+requests>=2.32.3
+python-multipart==0.0.9
+docling>=2.0.0
+pydantic-settings>=2.3.0
+python-dotenv==1.0.1
+psutil==5.9.8
+passlib[bcrypt]==1.7.4
+python-jose[cryptography]==3.3.0
+pynvml==11.5.0
+docker>=7.1.0
+redis
+pgvector
+neo4j
