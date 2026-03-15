@@ -72,6 +72,38 @@ def get_metrics(admin: User = Depends(check_admin)):
         "disk": {"percent": usage.percent, "total": round(usage.total / (1024**3), 1), "free": round(usage.free / (1024**3), 1)}
     }
 
+@router.get("/logs/live")
+def get_live_logs(admin: User = Depends(check_admin)):
+    try:
+        client = docker.from_env()
+        containers = {
+            "v2-worker": "WORKER",
+            "v2-backend": "BACKEND",
+            "v2-llm-1": "LLM"
+        }
+        
+        all_logs = []
+        for c_name, label in containers.items():
+            try:
+                container = client.containers.get(c_name)
+                # Preluăm ultimele 15 linii
+                raw_logs = container.logs(tail=15).decode('utf-8', errors='ignore').split('\n')
+                for line in raw_logs:
+                    if line.strip():
+                        # Filtrăm doar mesajele relevante de procesare
+                        if any(x in line for x in ["[*]", "[+]", "[!]", "INFO", "ERROR", "Segment", "Docling"]):
+                            all_logs.append({
+                                "service": label,
+                                "message": line.strip(),
+                                "timestamp": time.time()
+                            })
+            except: continue
+            
+        # Returnăm logurile sortate aproximativ cronologic
+        return sorted(all_logs, key=lambda x: x['timestamp'])[-30:]
+    except Exception as e:
+        return [{"service": "SYSTEM", "message": f"Eroare: {str(e)}"}]
+
 @router.get("/docs/count")
 def get_docs_count(admin: User = Depends(check_admin), db: Session = Depends(get_db)):
     return {"count": db.query(models.Document).count()}

@@ -1,25 +1,33 @@
 import os
-import sys
-
-# Setăm cache-ul înainte de orice import care ar putea inițializa HF
-HF_HOME = os.getenv("HF_HOME", "/app/ocr_cache/huggingface")
-os.environ["HF_HOME"] = HF_HOME
-os.makedirs(HF_HOME, exist_ok=True)
-
 from docling.document_converter import DocumentConverter
+from docling.datamodel.pipeline_options import PdfPipelineOptions, RapidOcrOptions
 
-def preload():
-    print(f"[*] Începe pre-încărcarea modelelor OCR în {HF_HOME}...")
+# Setari environment pentru OFFLINE
+os.environ['HF_HUB_OFFLINE'] = '1'
+os.environ['TRANSFORMERS_OFFLINE'] = '1'
+os.environ['RAPIDOCR_CACHE'] = '/app/ocr_cache/rapidocr'
+
+def test_ocr():
+    test_pdf = "/app/uploads/Nota de plată.pdf"
+    if not os.path.exists(test_pdf):
+        print(f"[-] Fisierul de test nu exista la {test_pdf}")
+        return
+
+    print(f"[*] Testare OCR OFFLINE pentru: {test_pdf}")
     
+    pipeline_options = PdfPipelineOptions()
+    pipeline_options.do_ocr = True
+    
+    ocr_options = RapidOcrOptions()
+    pipeline_options.ocr_options = ocr_options
+
     try:
-        # Inițializarea converter-ului forțează download-ul modelelor implicite
-        # Docling va folosi HF_HOME setat mai sus
-        converter = DocumentConverter()
-        print("[+] Modelele Docling/HuggingFace au fost încărcate cu succes.")
-        
+        converter = DocumentConverter(pipeline_options=pipeline_options)
+        result = converter.convert(test_pdf)
+        text = result.document.export_to_markdown()
+        print(f"[+] Succes! Text extras (primele 200 caractere):\n{text[:200]}")
     except Exception as e:
-        print(f"[-] Eroare la pre-încărcare: {e}")
-        sys.exit(1)
+        print(f"[!] EROARE TEST OCR: {e}")
 
 if __name__ == "__main__":
-    preload()
+    test_ocr()

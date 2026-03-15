@@ -124,6 +124,7 @@ export default function ForensicDashboard() {
         <div className="flex items-center gap-3">
           <Shield className="w-8 h-8 text-blue-500" />
           <h1 className="text-2xl font-black tracking-tighter uppercase">Doc<span className="text-blue-500">AI</span></h1>
+          <span title="Codat (prost) de Gemini ✨ si cfp90" className="cursor-help text-[10px] font-black text-blue-500/50 uppercase tracking-widest mt-1 ml-2">v0.1 ALPHA</span>
         </div>
         <div className="text-right hidden md:block">
           {currentUser && (

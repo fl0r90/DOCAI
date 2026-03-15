@@ -1,4 +1,5 @@
 import os
+import re
 from neo4j import GraphDatabase
 
 NEO4J_URI = os.getenv("NEO4J_URI", "bolt://neo4j:7687")
@@ -17,88 +18,95 @@ class GraphService:
         if self.driver:
             self.driver.close()
 
-    def sync_document_to_graph(self, doc_id: int, filename: str, case_id: int, extracted_data: dict, master_id: int = None):
-        """Maprează documentul și relațiile sale specifice (Tranzacții, Contracte)."""
+    def delete_document(self, doc_id: int):
         if not self.driver: return
+        with self.driver.session() as session:
+            session.run("MATCH (d:Document) WHERE d.doc_id = $id OR d.id = $id_num DETACH DELETE d", 
+                        id=str(doc_id), id_num=doc_id)
+            session.run("MATCH (e) WHERE (e:Persoana OR e:Firma OR e:Telefon OR e:Crypto OR e:IBAN OR e:Entitate) AND NOT (e)--() DELETE e")
 
-        doc_type = extracted_data.get("doc_type")
-        metadata = extracted_data.get("metadata", {})
+    def sync_document_to_graph(self, doc_id: int, filename: str, case_id: int, extracted_data: dict, master_id: int = None):
+        if not self.driver: return
+        self.delete_document(doc_id)
+
+        date_graph = extracted_data.get("graph_data") 
+        if not date_graph:
+            date_graph = {
+                "entitati": extracted_data.get("entitati", []),
+                "relatii": extracted_data.get("relatii", [])
+            }
+
+        if not date_graph.get("entitati") and not date_graph.get("relatii"):
+            return
 
         with self.driver.session() as session:
-            # 1. Noduri de bază (Case și Document)
-            session.execute_write(self._create_base_nodes, case_id, doc_id, filename, master_id)
-
-            # 2. Logică specializată pe tip de document
-            if doc_type == "FACTURA":
-                # Tranzacție: Furnizor -> Client
-                f = metadata.get("furnizor", {})
-                c = metadata.get("client", {})
-                if f.get("nume") and c.get("nume"):
-                    session.execute_write(self._create_transaction, 
-                        f["nume"], f.get("cui"), 
-                        c["nume"], c.get("cui"), 
-                        metadata.get("total", 0), "FACTURA", doc_id
-                    )
-
-            elif doc_type == "OP":
-                # Tranzacție: Plătitor -> Beneficiar
-                p = metadata.get("platitor", {})
-                b = metadata.get("beneficiar", {})
-                if p.get("nume") and b.get("nume"):
-                    session.execute_write(self._create_transaction, 
-                        p["nume"], p.get("iban"), 
-                        b["nume"], b.get("iban"), 
-                        metadata.get("suma", 0), "ORDIN_PLATA", doc_id
-                    )
-
-            elif doc_type == "CONTRACT":
-                parti = metadata.get("parti", [])
-                for p in parti:
-                    if p.get("nume"):
-                        session.execute_write(self._create_entity_relationship, doc_id, p["nume"], p.get("cui"), p.get("rol", "PARTE"))
+            session.execute_write(self._insereaza_extractia_optimizata, doc_id, filename, case_id, date_graph, master_id)
 
     @staticmethod
-    def _create_base_nodes(tx, case_id, doc_id, filename, master_id):
-        # Nodul Dosar (Case)
+    def _insereaza_extractia_optimizata(tx, doc_id, nume_fisier, case_id, date_json, master_id):
+        # 1. Ancora
+        tx.run("MERGE (c:Case {id: $case_id}) SET c.master_id = $m_id", case_id=case_id, m_id=master_id)
         tx.run("""
-            MERGE (c:Case {id: $case_id})
-            ON CREATE SET c.master_id = $master_id, c.created_at = datetime()
-            ON MATCH SET c.master_id = $master_id
-        """, case_id=case_id, master_id=master_id)
-        
-        # Nodul Document
-        tx.run("""
-            MERGE (d:Document {id: $doc_id})
-            ON CREATE SET d.filename = $filename, d.created_at = datetime()
+            MERGE (d:Document {doc_id: $doc_id})
+            SET d.name = $nume_fisier, d.filename = $nume_fisier, d.case_id = $case_id
             WITH d
             MATCH (c:Case {id: $case_id})
             MERGE (d)-[:PARTE_DIN]->(c)
-        """, doc_id=doc_id, filename=filename, case_id=case_id)
+            """, doc_id=str(doc_id), nume_fisier=nume_fisier, case_id=case_id
+        )
 
-    @staticmethod
-    def _create_transaction(tx, from_name, from_id, to_name, to_id, amount, t_type, doc_id):
-        """Creează un flux financiar între două entități."""
-        # Nod Sursă (Firma/Entitate)
-        tx.run("MERGE (e1:Firma {name: $name}) ON CREATE SET e1.cui = $ext", name=from_name, ext=from_id)
-        # Nod Destinație
-        tx.run("MERGE (e2:Firma {name: $name}) ON CREATE SET e2.cui = $ext", name=to_name, ext=to_id)
-        # Relația de Tranzacție
-        tx.run("""
-            MATCH (e1:Firma {name: $f_name}), (e2:Firma {name: $t_name}), (d:Document {id: $d_id})
-            MERGE (e1)-[r:A_PLATIT {suma: $amt, tip: $type}]->(e2)
-            MERGE (e1)-[:APARE_IN]->(d)
-            MERGE (e2)-[:APARE_IN]->(d)
-        """, f_name=from_name, t_name=to_name, amt=amount, type=t_type, d_id=doc_id)
+        # 2. Entitati
+        valori_entitati = {} 
+        for ent in date_json.get("entitati", []):
+            tip = re.sub(r'[^A-Za-z0-9_]', '', ent.get("tip_entitate", "Entitate"))
+            val = ent.get("valoare")
+            if not val or not ent.get("id"): continue
+            valori_entitati[ent["id"]] = val
+            
+            # Adaugam si proprietatea 'name' pentru compatibilitate cu frontend-ul
+            tx.run(f"MERGE (e:{tip} {{valoare: $val}}) SET e.name = $val, e.master_id = $m_id", val=val, m_id=master_id)
+            # Legam de document
+            tx.run(f"MATCH (e:{tip} {{valoare: $val}}), (d:Document {{doc_id: $doc_id}}) MERGE (e)-[:APARE_IN]->(d)", 
+                   val=val, doc_id=str(doc_id))
 
-    @staticmethod
-    def _create_entity_relationship(tx, doc_id, nume, cui, rol):
-        label = "Firma" if cui and len(str(cui)) > 5 else "Persoana"
-        tx.run(f"""
-            MERGE (e:{label} {{name: $nume}})
-            ON CREATE SET e.cui = $cui
-            WITH e
-            MATCH (d:Document {{id: $doc_id}})
-            MERGE (e)-[:APARE_IN {{rol: $rol}}]->(d)
-        """, nume=nume, cui=cui, doc_id=doc_id, rol=rol)
+        # 3. Relatii
+        for rel in date_json.get("relatii", []):
+            tip_rel = re.sub(r'[^A-Za-z0-9_]', '', rel.get("tip_relatie", "ASOCIAT_CU"))
+            s_val = valori_entitati.get(rel.get("sursa"))
+            d_val = valori_entitati.get(rel.get("destinatie"))
+            if s_val and d_val:
+                tx.run(f"""
+                    MATCH (s {{valoare: $s_val}}), (d {{valoare: $d_val}})
+                    MERGE (s)-[:{tip_rel}]->(d)
+                """, s_val=s_val, d_val=d_val)
+
+    def query_relationships(self, entity_names: list):
+        """Caută conexiuni între entitățile menționate."""
+        if not self.driver or not entity_names: return ""
+        
+        results = []
+        with self.driver.session() as session:
+            for name in entity_names:
+                # 1. Căutăm nodul și documentele în care apare
+                query_docs = """
+                MATCH (e {valoare: $name})-[:APARE_IN]->(d:Document)
+                RETURN e.valoare as entitate, labels(e)[0] as tip, d.name as document
+                """
+                res_docs = session.run(query_docs, name=name)
+                for record in res_docs:
+                    results.append(f"Entitatea '{record['entitate']}' ({record['tip']}) apare în documentul: {record['document']}")
+
+            # 2. Căutăm legături directe între oricare două entități din listă
+            if len(entity_names) >= 2:
+                query_rel = """
+                MATCH (s)-[r]->(d)
+                WHERE s.valoare IN $names AND d.valoare IN $names
+                RETURN s.valoare as sursa, type(r) as relatie, d.valoare as destinatie
+                """
+                res_rel = session.run(query_rel, names=entity_names)
+                for record in res_rel:
+                    results.append(f"LEGĂTURĂ GĂSITĂ: {record['sursa']} --[{record['relatie']}]--> {record['destinatie']}")
+
+        return "\n".join(results) if results else ""
 
 graph_service = GraphService()

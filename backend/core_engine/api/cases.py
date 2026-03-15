@@ -3,7 +3,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from ..database import get_forensic_db, get_auth_db, SessionLocal
-from ..models import Case, User, Document, ChatMessage, case_worker_link, MasterEntity, DocumentEntityLink
+from ..models import Case, User, Document, ChatMessage, case_worker_link, MasterEntity, DocumentEntityLink, DocumentChunk, FinancialItem
 from ..core.security import SECRET_KEY, ALGORITHM
 from jose import jwt, JWTError
 from ..core.audit import log_event
@@ -23,15 +23,22 @@ class CaseCreate(BaseModel):
 class ChatRequest(BaseModel):
     question: str
 
-def get_current_user(authorization: str = Header(None), db: Session = Depends(get_auth_db)):
-    if not authorization or not authorization.startswith("Bearer "):
+def get_current_user(authorization: str = Header(None), token: Optional[str] = None, db: Session = Depends(get_auth_db)):
+    final_token = None
+    if authorization and authorization.startswith("Bearer "):
+        final_token = authorization.split(" ")[1]
+    elif token:
+        final_token = token
+        
+    if not final_token:
         raise HTTPException(status_code=401, detail="Invalid token")
-    token = authorization.split(" ")[1]
+    
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(final_token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
         if username is None: raise HTTPException(status_code=401, detail="Invalid token")
     except JWTError: raise HTTPException(status_code=401, detail="Invalid token")
+    
     user = db.query(User).filter(User.username == username).first()
     if user is None: raise HTTPException(status_code=401, detail="User not found")
     return user
@@ -70,6 +77,52 @@ def create_case(case_in: CaseCreate, current_user: User = Depends(get_current_us
     db.add(new_case); db.commit(); db.refresh(new_case)
     log_event("CASE_CREATED", user_id=current_user.id, case_id=new_case.id, details={"name": new_case.name})
     return new_case
+
+@router.post("/{case_id}/delete")
+def delete_case(case_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_forensic_db)):
+    c = db.query(Case).filter(Case.id == case_id).first()
+    if not c: raise HTTPException(status_code=404, detail="Case not found")
+    
+    # Verificare permisiuni (Doar Admin sau Master-ul dosarului)
+    if current_user.role != "ADMIN" and c.master_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Nu aveți dreptul să ștergeți acest dosar.")
+
+    # 1. Ștergere Documente în Cascadă (folosind logica existentă pentru fiecare document)
+    docs = db.query(Document).filter(Document.case_id == case_id).all()
+    for doc in docs:
+        filename = doc.filename
+        doc_id = doc.id
+        
+        # Stergere Neo4j
+        try: graph_service.delete_document(doc_id)
+        except: pass
+        
+        # Stergere dependente SQL
+        db.query(DocumentChunk).filter(DocumentChunk.document_id == doc_id).delete()
+        db.query(FinancialItem).filter(FinancialItem.document_id == doc_id).delete()
+        db.query(DocumentEntityLink).filter(DocumentEntityLink.document_id == doc_id).delete()
+        
+        # Stergere disc
+        paths = [os.path.join("/app/uploads", filename), os.path.join("/app/backend/uploads", filename)]
+        for p in paths:
+            if os.path.exists(p):
+                try: os.remove(p)
+                except: pass
+
+    # 2. Ștergere Chat și Case din SQL
+    db.query(ChatMessage).filter(ChatMessage.case_id == case_id).delete()
+    db.delete(c)
+    db.commit()
+    
+    # 3. Ștergere nod Case din Neo4j (dacă există)
+    if graph_service.driver:
+        try:
+            with graph_service.driver.session() as session:
+                session.run("MATCH (c:Case {id: $id}) DETACH DELETE c", id=case_id)
+        except: pass
+
+    log_event("CASE_DELETED", user_id=current_user.id, case_id=case_id, details={"case_name": c.name})
+    return {"message": "Dosar șters complet din toate sistemele."}
 
 @router.get("/{case_id}/documents")
 def get_case_documents(case_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_forensic_db)):
@@ -207,15 +260,34 @@ def delete_chat_message(case_id: int, message_id: int, current_user: User = Depe
     if msg: db.delete(msg); db.commit()
     return {"message": "Deleted"}
 
+from fastapi.responses import FileResponse
+
+@router.get("/{case_id}/audit-report")
+def download_audit_report(case_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_forensic_db)):
+    validate_case_access(case_id, current_user, db)
+    report_path = f"/app/uploads/Raport_Constatare_Case_{case_id}.pdf"
+    if not os.path.exists(report_path):
+        raise HTTPException(status_code=404, detail="Raportul nu a fost generat încă.")
+    return FileResponse(report_path, filename=f"Raport_Audit_Dosar_{case_id}.pdf", media_type="application/pdf")
+
 @router.get("/{case_id}/summary")
 def get_case_summary(case_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_forensic_db)):
     validate_case_access(case_id, current_user, db)
     c = db.query(Case).filter(Case.id == case_id).first()
+    
+    # Dacă avem deja un rezumat, îl returnăm direct
+    if c.case_summary and len(c.case_summary) > 10:
+        return {"summary": c.case_summary}
+        
     processed_docs = [d for d in c.documents if d.status == "COMPLETED" and d.ai_summary]
     if not processed_docs: return {"summary": "Dosarul nu are documente procesate."}
     summaries_text = "\n\n".join([f"DOC: {d.filename}\nSUMAR: {d.ai_summary}" for d in processed_docs])
     active_model = get_active_model_name()
-    prompt = f"Fă o sinteză executivă pentru dosarul {c.name}: {summaries_text}"
+    
+    system_msg = "Senior Forensic Lead. Misiune: Generare Sinteză Executivă a dosarului."
+    user_msg = f"Obiectiv: Realizează o analiză de ansamblu pentru dosarul '{c.name}', integrând următoarele rezumate de documente:\n{summaries_text}"
+    prompt = f"### System:\n{system_msg}\n\n### User:\n{user_msg}\n\n### Assistant:\n"
+    
     try:
         res = requests.post(f"http://llm:11434/api/generate", json={"model": active_model, "prompt": prompt, "stream": False}, timeout=1200)
         summary = res.json().get("response", "")
@@ -229,23 +301,34 @@ def delete_document(doc_id: int, current_user: User = Depends(get_current_user),
     if not doc: raise HTTPException(status_code=404, detail="Document not found")
     validate_case_access(doc.case_id, current_user, db)
     
-    # 1. Ștergere din Neo4j
-    if graph_service.driver:
-        try:
-            with graph_service.driver.session() as session:
-                session.run("MATCH (d:Document {id: $id}) DETACH DELETE d", id=doc_id)
-        except Exception as ge:
-            print(f"[!] Eroare ștergere Graph: {ge}")
+    filename = doc.filename
+    case_id = doc.case_id
 
-    # 2. Ștergere de pe Disc
-    file_path = os.path.join("/app/backend/uploads", doc.filename)
-    if not os.path.exists(file_path):
-        file_path = os.path.join("/app/uploads", doc.filename)
+    # 1. Ștergere din Neo4j (Clean & Orphan Removal via GraphService)
+    try:
+        graph_service.delete_document(doc_id)
+    except Exception as ge:
+        print(f"[!] Eroare ștergere Graph: {ge}")
+
+    # 2. Ștergere manuală dependențe SQL (pentru siguranță totală la re-upload)
+    db.query(DocumentChunk).filter(DocumentChunk.document_id == doc_id).delete()
+    db.query(FinancialItem).filter(FinancialItem.document_id == doc_id).delete()
+    db.query(DocumentEntityLink).filter(DocumentEntityLink.document_id == doc_id).delete()
     
-    if os.path.exists(file_path):
-        os.remove(file_path)
-
-    # 3. Ștergere din SQL (Cascade sterge si articolele/chunks)
+    # 3. Ștergere Document din Postgres (Eliberează HASH-ul)
     db.delete(doc)
     db.commit()
+
+    # 4. Ștergere Fișier Fizic
+    paths = [
+        os.path.join("/app/uploads", filename),
+        os.path.join("/app/backend/uploads", filename),
+        os.path.join("./uploads", filename)
+    ]
+    for p in paths:
+        if os.path.exists(p):
+            try: os.remove(p)
+            except: pass
+            
+    log_event("DOCUMENT_DELETED", user_id=current_user.id, case_id=case_id, details={"filename": filename})
     return {"message": "Purjare completă reușită."}

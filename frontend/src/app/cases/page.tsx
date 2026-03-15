@@ -5,12 +5,13 @@ import api from '../../lib/api';
 import Cookies from 'js-cookie';
 import { 
   Shield, Folder, Plus, Search, Filter, Loader2, 
-  ChevronRight, Calendar, Users, FileText, LayoutGrid, List, Brain
+  ChevronRight, Calendar, Users, FileText, LayoutGrid, List, Brain, Trash2
 } from 'lucide-react';
 
 export default function Cases() {
   const router = useRouter();
   const [cases, setCases] = useState<any[]>([]);
+  const [user, setUser] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isCreating, setIsCreating] = useState(false);
   const [activeModel, setActiveModel] = useState<string>('...');
@@ -19,12 +20,14 @@ export default function Cases() {
 
   const fetchData = async () => {
     try {
-      const [casesRes, modelRes] = await Promise.all([
+      const [casesRes, modelRes, userRes] = await Promise.all([
         api.get('/cases'),
-        api.get('/system/models/active')
+        api.get('/system/models/active'),
+        api.get('/auth/me')
       ]);
       setCases(casesRes.data);
       setActiveModel(modelRes.data.active_model);
+      setUser(userRes.data);
     } catch (err) {
       router.push('/login');
     } finally {
@@ -49,6 +52,18 @@ export default function Cases() {
     }
   };
 
+  const handleDeleteCase = async (e: React.MouseEvent, id: number, name: string) => {
+    e.stopPropagation();
+    if (confirm(`ATENȚIE: Ștergerea dosarului "${name}" va elimina DEFINITIV toate documentele, vectorii și relațiile din hartă. Continui?`)) {
+      try {
+        await api.post(`/cases/${id}/delete`);
+        fetchData();
+      } catch (err) {
+        alert("Eroare la ștergere.");
+      }
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200 font-sans">
       {/* HEADER */}
@@ -60,7 +75,7 @@ export default function Cases() {
             </div>
             <div>
               <h1 className="text-xl font-black text-white tracking-tight uppercase leading-none">DocAI</h1>
-              <span className="text-[9px] font-black text-blue-500 uppercase tracking-[0.2em] mt-1 block">v0.1 BETA</span>
+              <span title="Codat (prost) de Gemini ✨ si cfp90" className="cursor-help text-[9px] font-black text-blue-500 uppercase tracking-[0.2em] mt-1 block">v0.1 ALPHA</span>
             </div>
           </div>
 
@@ -69,12 +84,14 @@ export default function Cases() {
               <Brain className="w-3.5 h-3.5 text-blue-400" />
               <span className="text-[10px] font-black text-blue-400 uppercase tracking-widest">Model Activ: {activeModel}</span>
             </div>
-            <button 
-              onClick={() => setIsCreating(true)}
-              className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 hover:bg-blue-500 rounded-xl text-xs font-black uppercase tracking-widest transition-all shadow-lg shadow-blue-900/20"
-            >
-              <Plus className="w-4 h-4" /> Dosar Nou
-            </button>
+            {user?.role && user.role !== 'WORKER' && (
+              <button 
+                onClick={() => setIsCreating(true)}
+                className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 hover:bg-blue-500 rounded-xl text-xs font-black uppercase tracking-widest transition-all shadow-lg shadow-blue-900/20"
+              >
+                <Plus className="w-4 h-4" /> Dosar Nou
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -97,14 +114,25 @@ export default function Cases() {
                   <Folder className="w-24 h-24 text-white" />
                 </div>
                 
-                <div className="flex items-center gap-3 mb-6">
-                  <div className="p-3 bg-blue-500/10 rounded-2xl group-hover:bg-blue-500/20 transition-colors">
-                    <Folder className="w-6 h-6 text-blue-400" />
+                <div className="flex items-center justify-between mb-6">
+                  <div className="flex items-center gap-3">
+                    <div className="p-3 bg-blue-500/10 rounded-2xl group-hover:bg-blue-500/20 transition-colors">
+                      <Folder className="w-6 h-6 text-blue-400" />
+                    </div>
+                    <div>
+                      <h3 className="text-lg font-black text-white uppercase tracking-tight">{c.name}</h3>
+                      <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">ID Dosar: #{c.id}</p>
+                    </div>
                   </div>
-                  <div>
-                    <h3 className="text-lg font-black text-white uppercase tracking-tight">{c.name}</h3>
-                    <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">ID Dosar: #{c.id}</p>
-                  </div>
+                  {user?.role && user.role !== 'WORKER' && (
+                    <button 
+                      onClick={(e) => handleDeleteCase(e, c.id, c.name)}
+                      className="p-2.5 bg-red-500/10 hover:bg-red-500/20 text-red-500 rounded-xl transition-all opacity-0 group-hover:opacity-100 z-20"
+                      title="Șterge Dosar"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  )}
                 </div>
 
                 <p className="text-sm text-slate-400 font-medium mb-8 line-clamp-2 h-10">{c.description || 'Nicio descriere adăugată.'}</p>

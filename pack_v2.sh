@@ -1,32 +1,50 @@
 #!/bin/bash
-# pack_v2.sh - Rulează asta pe mașina CU internet pentru a pregăti pachetul
-VERSION=$1
-if [ -z "$VERSION" ]; then
-  echo "Specificați versiunea: ./pack_v2.sh 1.1"
-  exit 1
-fi
 
-echo "--- Împachetare DocAI Versiunea $VERSION ---"
+# --- CONFIGURARE ---
+EXPORT_DIR="/mnt/docai_migration/docker_images"
+PROJECT_DIR="/home/cfp-90/AI/V2"
+mkdir -p "$EXPORT_DIR"
 
-# 1. Salvare imagini Docker
-echo "[1/3] Salvare imagini Docker..."
-docker save v2-backend:latest | gzip > images_backend_$VERSION.tar.gz
-docker save v2-frontend:latest | gzip > images_frontend_$VERSION.tar.gz
+echo "[*] Incepere export imagini pentru migrare offline la $EXPORT_DIR..."
 
-# 2. Creare arhivă cod și configurări (Include scripturi și modele OCR)
-echo "[2/3] Împachetare configurări, scripturi și modele OCR..."
-tar -czvf update_bundle_$VERSION.tar.gz \
-    docker-compose.yml \
-    setup_v2.sh \
-    apply_update.sh \
-    rollback.sh \
-    .env \
-    backend/ \
-    frontend/ \
-    ocr_cache/
+# 1. Imagile de baza (Third-party)
+IMAGES=(
+  "pgvector/pgvector:pg16"
+  "redis:7-alpine"
+  "neo4j:5-community"
+  "ollama/ollama:latest"
+)
 
-echo "--- GATA! Copiați fișierele .tar.gz pe stick-ul USB ---"
-echo "Fișiere create:"
-echo " - images_backend_$VERSION.tar.gz (Imagine Backend)"
-echo " - images_frontend_$VERSION.tar.gz (Imagine Frontend)"
-echo " - update_bundle_$VERSION.tar.gz (Cod, scripturi și MODELE OCR)"
+for IMG in "${IMAGES[@]}"; do
+  FILENAME=$(echo $IMG | tr '/:' '_').tar
+  if [ ! -f "$EXPORT_DIR/$FILENAME" ]; then
+    echo "[+] Exporting $IMG -> $EXPORT_DIR/$FILENAME"
+    docker save $IMG -o "$EXPORT_DIR/$FILENAME"
+  else
+    echo "[-] $IMG deja exportat."
+  fi
+done
+
+# 2. Imagile proiectului (Build actualizat)
+echo "[*] Building project images..."
+cd "$PROJECT_DIR"
+docker compose build backend worker frontend
+
+PROJECT_IMAGES=(
+  "v2-backend:latest"
+  "v2-worker:latest"
+  "v2-frontend:latest"
+)
+
+for IMG in "${PROJECT_IMAGES[@]}"; do
+  FILENAME=$(echo $IMG | tr '/:' '_').tar
+  echo "[+] Exporting $IMG -> $EXPORT_DIR/$FILENAME"
+  docker save $IMG -o "$EXPORT_DIR/$FILENAME"
+done
+
+echo "[OK] Toate imaginile au fost salvate in $EXPORT_DIR"
+echo "[!] NU UITA SA COPIEZI SI DOSARELE MANUALE PE STICK (sau direct pe SMB):"
+echo "    - data/"
+echo "    - models/"
+echo "    - ocr_cache/"
+echo "    - frontend/node_modules/"
