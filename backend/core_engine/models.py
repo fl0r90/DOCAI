@@ -1,4 +1,6 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, Float, ForeignKey, Date, Table, JSON
+from sqlalchemy import Column, Integer, String, Text, DateTime, Float, ForeignKey, Date, Table, JSON, Index
+from sqlalchemy.dialects.postgresql import UUID, JSONB
+import uuid
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from pgvector.sqlalchemy import Vector
@@ -96,27 +98,50 @@ class DocumentEntityLink(ForensicBase):
     document = relationship("Document", back_populates="entity_links")
     entity = relationship("MasterEntity", back_populates="document_links")
 
+class DocumentStorage(ForensicBase):
+    __tablename__ = "document_storage"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    parent_doc_id = Column(UUID(as_uuid=True), index=True, nullable=True)
+    content_text = Column(Text, nullable=False)
+    embedding = Column(Vector(1024))
+    raw_metadata = Column(JSONB, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # GIN Index for fast JSONB querying and Full Text Search
+    __table_args__ = (
+        Index('ix_doc_storage_metadata_gin', 'raw_metadata', postgresql_using='gin'),
+        Index('ix_doc_storage_content_gin', func.to_tsvector('romanian', 'content_text'), postgresql_using='gin'),
+    )
+
 class DocumentChunk(ForensicBase):
     __tablename__ = "document_chunks"
     id = Column(Integer, primary_key=True, index=True)
     document_id = Column(Integer, ForeignKey("documents.id"))
+    parent_chunk_id = Column(Integer, ForeignKey("document_chunks.id"), nullable=True)
     content = Column(Text)
     page_number = Column(Integer, nullable=True)
-    embedding = Column(Vector(1024)) 
+    spatial = Column(String, nullable=True)
+    embedding = Column(Vector(1024))
     document = relationship("Document", back_populates="chunks")
-
 class FinancialItem(ForensicBase):
     __tablename__ = "financial_items"
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(String, primary_key=True, index=True, default=lambda: str(uuid.uuid4())) # UUID
     document_id = Column(Integer, ForeignKey("documents.id"))
-    doc_number = Column(String, nullable=True) # Numărul facturii (ex: 927...)
-    doc_filename = Column(String, nullable=True) # Numele fișierului original
+    doc_number = Column(String, nullable=True) 
+    doc_filename = Column(String, nullable=True) 
+    transaction_date = Column(String, nullable=True)
     description = Column(String)
-    quantity = Column(Float, default=1.0)
-    unit_price = Column(Float, nullable=True)
     amount = Column(Float) 
-    tax_amount = Column(Float, nullable=True) 
     currency = Column(String, default="RON")
+    
+    # Forensic Fields
+    doc_type = Column(String, nullable=True) # EXTRAS, FACTURA
+    transaction_type = Column(String, nullable=True) # PLATA, INCASARE, FACTURARE
+    cui_source = Column(String, index=True, nullable=True)
+    iban_source = Column(String, index=True, nullable=True)
+    cui_destination = Column(String, index=True, nullable=True)
+    iban_destination = Column(String, index=True, nullable=True)
+    
     source_document = relationship("Document", back_populates="financial_items")
 
 class AuditLog(ForensicBase):
