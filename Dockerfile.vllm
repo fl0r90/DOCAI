@@ -1,0 +1,23 @@
+FROM vllm/vllm-openai:latest
+
+# Instalăm dependențele de sistem necesare
+RUN apt-get update && apt-get install -y git build-essential python3-dev
+
+# Instalăm Triton (critic pentru kernel-urile TurboQuant)
+RUN pip install --no-cache-dir triton
+
+# Instalăm pachetul oficial TurboQuant și transformers din sursă pentru Gemma 4
+RUN pip install --no-cache-dir turboquant-vllm sqlalchemy psycopg2-binary pgvector
+RUN pip install --no-cache-dir git+https://github.com/huggingface/transformers.git
+
+# Copiem scriptul de inițializare personalizat
+COPY vllm_server.py /app/vllm_server.py
+
+# Ne asigurăm că pachetele sunt în cale
+ENV PYTHONPATH=$PYTHONPATH:/app
+
+# Expunem portul standard
+EXPOSE 8000
+
+# Setăm noul entrypoint care injectează TurboQuant
+ENTRYPOINT ["python3", "/app/vllm_server.py"]

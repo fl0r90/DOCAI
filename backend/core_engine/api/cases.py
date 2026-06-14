@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from typing import List
 import uuid
-from ..models import DocumentStorage
+from ..models import DocumentStorageHelper
 from ..services.graph_service import graph_service
 from ..services.ocr_service import ocr_service
 
@@ -10,12 +10,12 @@ router = APIRouter(prefix="/cases", tags=["cases"])
 @router.get("/")
 async def get_cases():
     """Return all cases"""
-    return DocumentStorage().get_all_cases()
+    return DocumentStorageHelper().get_all_cases()
 
 @router.get("/{case_id}")
 async def get_case(case_id: str):
     """Return a specific case by ID"""
-    case = DocumentStorage().get_case(case_id)
+    case = DocumentStorageHelper().get_case(case_id)
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
     return case
@@ -61,13 +61,13 @@ async def create_case(
         }
         
         # Store document
-        DocumentStorage().save_document(document_data)
+        DocumentStorageHelper().save_document(document_data)
         
         # Add to case
         case_data["documents"].append(document_data)
     
     # Save case
-    DocumentStorage().save_case(case_data)
+    DocumentStorageHelper().save_case(case_data)
     
     # Process documents for graph relationships
     graph_service.process_case_documents(case_data)
@@ -77,7 +77,7 @@ async def create_case(
 @router.put("/{case_id}")
 async def update_case(case_id: str, title: str = Form(...), description: str = Form(...)):
     """Update an existing case"""
-    case = DocumentStorage().get_case(case_id)
+    case = DocumentStorageHelper().get_case(case_id)
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
     
@@ -89,22 +89,22 @@ async def update_case(case_id: str, title: str = Form(...), description: str = F
     }
     
     # Save updated case
-    DocumentStorage().save_case(updated_case)
+    DocumentStorageHelper().save_case(updated_case)
     
     return {"message": "Case updated successfully"}
 
 @router.delete("/{case_id}")
 async def delete_case(case_id: str):
     """Delete a case and all associated documents"""
-    case = DocumentStorage().get_case(case_id)
+    case = DocumentStorageHelper().get_case(case_id)
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
     
     # Delete all associated documents
     for document in case.get("documents", []):
-        DocumentStorage().delete_document(document["id"])
+        DocumentStorageHelper().delete_document(document["id"])
     
     # Delete the case itself
-    DocumentStorage().delete_case(case_id)
+    DocumentStorageHelper().delete_case(case_id)
     
     return {"message": "Case deleted successfully"}

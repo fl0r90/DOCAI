@@ -12,27 +12,34 @@ from contextlib import asynccontextmanager
 from .database import engine, SessionLocal, auth_engine, forensic_engine, AuthSessionLocal, ForensicSessionLocal, get_auth_db, get_forensic_db
 from . import models
 from .api import auth, cases, system
-from .api.cases import get_current_user
+from .api.auth import get_current_user
 from .core.audit import log_event
+
+def validate_case_access(case_id: int, user: models.User, db: Session):
+    if user.role in ["ADMIN", "MASTER"]: return True
+    member = db.query(models.CaseMember).filter(
+        models.CaseMember.case_id == case_id,
+        models.CaseMember.user_id == user.id
+    ).first()
+    if not member:
+        raise HTTPException(status_code=403, detail="Nu aveți acces la acest caz.")
+    return True
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 1. Inițializăm Baza de Date FORENSIC
     try:
-        from sqlalchemy import create_engine
-        temp_eng = create_engine(os.getenv("FORENSIC_DATABASE_URL"))
-        with temp_eng.connect() as conn:
+        with forensic_engine.connect() as conn:
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
             conn.commit()
-        temp_eng.dispose()
-        models.ForensicBase.metadata.create_all(bind=forensic_engine)
+        models.Base.metadata.create_all(bind=forensic_engine)
         print("[+] Baza de date FORENSIC inițializată.")
     except Exception as e:
         print(f"[!] Eroare inițializare FORENSIC: {e}")
 
     # 2. Inițializăm Baza de Date AUTH
     try:
-        models.AuthBase.metadata.create_all(bind=auth_engine)
+        models.Base.metadata.create_all(bind=auth_engine)
         print("[+] Baza de date AUTH inițializată.")
     except Exception as e:
         print(f"[!] Eroare inițializare AUTH: {e}")
@@ -61,12 +68,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:8000",
-        "http://127.0.0.1:8000"
-    ],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -87,6 +89,7 @@ async def upload_files(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_forensic_db)
 ):
+    validate_case_access(case_id, current_user, db)
     for file in files:
         content = await file.read()
         file_hash = hashlib.sha256(content).hexdigest()

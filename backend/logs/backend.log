@@ -1,0 +1,11 @@
+2026-04-26 17:19:34 - [INFO] - [94mAction: LOGIN_SUCCESS | User: 1 | Case: None | Details: None[0m
+2026-04-26 17:19:36 - [INFO] - [94mAction: LOGIN_SUCCESS | User: 1 | Case: None | Details: None[0m
+2026-04-26 18:29:57 - [INFO] - [94mAction: LOGIN_SUCCESS | User: 1 | Case: None | Details: None[0m
+2026-04-27 17:55:14 - [INFO] - [94mAction: LOGIN_SUCCESS | User: 1 | Case: None | Details: None[0m
+2026-04-27 17:55:16 - [INFO] - [94mAction: LOGIN_SUCCESS | User: 1 | Case: None | Details: None[0m
+2026-04-27 17:56:14 - [INFO] - [94mAction: LOGIN_SUCCESS | User: 2 | Case: None | Details: None[0m
+2026-05-27 18:09:26 - [INFO] - [94mAction: LOGIN_SUCCESS | User: 2 | Case: None | Details: None[0m
+2026-05-27 18:27:44 - [WARNING] - [93mAction: LOGIN_FAILED | User: None | Case: None | Details: {"username": ""}[0m
+2026-05-27 18:27:46 - [INFO] - [94mAction: LOGIN_SUCCESS | User: 1 | Case: None | Details: None[0m
+2026-05-27 18:27:48 - [INFO] - [94mAction: LOGIN_SUCCESS | User: 1 | Case: None | Details: None[0m
+2026-05-27 18:27:48 - [INFO] - [94mAction: LOGIN_SUCCESS | User: 1 | Case: None | Details: None[0m

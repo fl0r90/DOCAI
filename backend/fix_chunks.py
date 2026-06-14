@@ -14,7 +14,7 @@ OLLAMA_URL = os.getenv("OLLAMA_URL", "http://llm:11434")
 def generate_embedding(text):
     try:
         response = requests.post(f"{OLLAMA_URL}/api/embeddings", json={
-            "model": "mxbai-embed-large", "prompt": text, "keep_alive": 60
+            "model": "bge-m3", "prompt": text, "keep_alive": 60
         }, timeout=60)
         return response.json().get("embedding", [])
     except Exception as e:

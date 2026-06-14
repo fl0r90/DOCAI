@@ -13,6 +13,12 @@ python-jose[cryptography]==3.3.0
 pynvml==11.5.0
 docker>=7.1.0
 redis
+httpx
 pgvector
 neo4j
 onnxruntime
+fpdf2
+pymupdf
+sentence-transformers
+pytesseract
+Pillow

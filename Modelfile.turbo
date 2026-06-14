@@ -1,0 +1,3 @@
+FROM deepseek-r1:7b
+PARAMETER kv_cache_type turbo4
+PARAMETER num_ctx 32768

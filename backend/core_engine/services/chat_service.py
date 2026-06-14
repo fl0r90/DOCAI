@@ -1,192 +1,730 @@
+# TEST_SYNC_12345
 import os
 import requests
 import json
-import redis
 import re
 import time
-from sqlalchemy import text, or_
+from sqlalchemy import text, or_, and_
 from ..database import engine, SessionLocal
-from ..core.config import get_llm_config
-from ..models import DocumentChunk, Document, ChatMessage
+from ..core.config import get_llm_config, get_active_model_name
+from ..models import DocumentChunk, Document, ChatMessage, Case
+from .. import models
+from .graph_service import GraphService
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://llm:11434")
-redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
-r = redis.from_url(redis_url)
+VLLM_URL = os.getenv("VLLM_URL", "http://v2-vllm:8000/v1")
 
-# Schema bazei de date (PostgreSQL)
-SCHEMA_PROMPT = """
-Sistem Audit Forensic. Schema tabele:
-- documents (id, filename, case_id)
-- financial_items (id, document_id, description, amount, currency)
+class AgenticInvestigator:
+    def __init__(self, case_id: int, user_question: str):
+        self.case_id = case_id
+        self.user_question = user_question
+        self.active_model = get_active_model_name()
+        self.citations = []
+        self.graph = GraphService()
+        self.injected_evidence = ""
+        self.history = []
+        self._load_history()
+        self._pre_process_query()
 
-INSTRUCTIUNE CRITICA: Daca intrebarea utilizatorului implica cifre, sume, numar de tranzactii sau cautari de magazine, ESTE OBLIGATORIU sa generezi o interogare SQL.
-REGULA SQL: Cauta magazinele folosind operatorul ILIKE cu wildcard-uri (ex: description ILIKE '%nume%').
-REGULA FILTRU: Filtreaza intotdeauna dupa documents.case_id = {case_id} folosind JOIN.
-FORMAT RASPUNS: Returneaza EXCLUSIV un obiect JSON de tipul: {"sql": "SELECT..."}
-"""
+    def _load_history(self):
+        """Loads last 10 messages for context window."""
+        with SessionLocal() as db:
+            past_msgs = db.query(ChatMessage).filter(ChatMessage.case_id == self.case_id).order_by(ChatMessage.created_at.desc()).limit(10).all()
+            # Reverse to get chronological order
+            for m in reversed(past_msgs):
+                # We strip the investigation logs from history to keep context clean
+                clean_content = m.content.split("**LOG INVESTIGATIE:**")[0].strip()
+                self.history.append({"role": m.role, "content": clean_content})
 
-def get_active_model_name():
-    try: return get_llm_config()["active_model"]
-    except: return "mistral-nemo:12b"
+    def _pre_process_query(self):
+        """Initial check for obvious entities and dates to seed the prompt."""
+        with SessionLocal() as db:
+            doc_ids = [d.id for d in db.query(Document).filter(Document.case_id == self.case_id).all()]
+            if not doc_ids: return
 
-def _generate_query_vector(text: str):
-    try:
-        response = requests.post(f"{OLLAMA_URL}/api/embeddings", json={"model": "mxbai-embed-large", "prompt": text}, timeout=60)
-        return response.json().get("embedding", [])
-    except: return []
+            # Extract temporal anchors (Years, Months)
+            months = ["ianuarie", "februarie", "martie", "aprilie", "mai", "iunie", "iulie", "august", "septembrie", "octombrie", "noiembrie", "decembrie"]
+            found_months = [m for m in months if m in self.user_question.lower()]
+            found_years = re.findall(r'20\d{2}', self.user_question)
+            
+            # Extract obvious entities (ALL CAPS)
+            anchors = re.findall(r'[A-Z]{3,30}', self.user_question)
+            
+            if anchors or found_months or found_years:
+                self.injected_evidence = "--- PRELIMINARY CONTEXT ---\n"
+                self.injected_evidence += f"Detected Subject(s): {', '.join(anchors) if anchors else 'None'}\n"
+                self.injected_evidence += f"Detected Time Constraints: {' '.join(found_months)} {' '.join(found_years)}\n"
+                
+        # Intent Detection
+        q_lower = self.user_question.lower()
+        if any(k in q_lower for k in ["cati", "câți", "cate", "câte", "total", "suma", "listă completă", "lista completa"]):
+            self.injected_evidence += "CRITICAL: The user is asking for a QUANTITATIVE answer or a TOTAL COUNT. You MUST use SEARCH_STRUCTURED_DATA to get accurate counts from the database tables. Do NOT rely on individual text fragments for totals.\n"
+        
+        if any(k in q_lower for k in ["plata", "incasare", "suma", "ron", "usd", "achizitie", "pret", "valoare", "cost"]):
+            self.injected_evidence += "Suggested Intent: FINANCIAL -> Use SEARCH_STRUCTURED_DATA for hard figures.\n"
+        elif any(k in q_lower for k in ["contract", "declaratie", "email", "conversatie", "decizie", "motiv", "cine"]):
+            self.injected_evidence += "Suggested Intent: CONTEXTUAL -> Use SEARCH_TEXT for semantic details.\n"
+                
+        if anchors:
+            self.injected_evidence += "Relational Check: Entities detected. EXPLORE_GRAPH may provide links.\n"
+        
+        self.injected_evidence += "Use the specialized tools below to find exact records.\n"
 
-def _extract_json(text):
-    try:
-        if not text: return None
-        # Curățare tag-uri (DeepSeek, etc.)
-        clean = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
-        # Căutare JSON în blocuri de cod sau text brut
-        json_match = re.search(r'```json\s*(.*?)\s*```', clean, re.DOTALL)
-        if not json_match:
-            json_match = re.search(r'\{.*\}', clean, re.DOTALL)
-        if json_match:
-            json_str = json_match.group(1) if "```json" in clean else json_match.group(0)
-            return json.loads(json_str)
-        return None
-    except: return None
+    def tool_search_text(self, query: str, semantic_intent: str = ""):
+        """Tool 1: Hybrid Search (Lexical + Vector) in document chunks."""
+        with SessionLocal() as db:
+            all_docs = db.query(Document).filter(Document.case_id == self.case_id).all()
+            doc_ids = [d.id for d in all_docs]
+            if not doc_ids: return "No documents in this case."
+            
+            # Apply semantic intent filter (search in doc_type OR filename)
+            if semantic_intent:
+                intent_ids = [d.id for d in all_docs if 
+                             (d.doc_type and semantic_intent.lower() in d.doc_type.lower()) or 
+                             (semantic_intent.lower() in d.filename.lower())]
+                
+                if intent_ids:
+                    doc_ids = intent_ids
+                else:
+                    # Fallback: warn but continue search in all documents
+                    intent_warning = f"Note: No documents found matching type/name '{semantic_intent}'. Searching all docs instead.\n"
+            else:
+                intent_warning = ""
+            
+            words = [w.strip() for w in re.findall(r'\w{3,}', query) if len(w) >= 3]
+            if not words: return "No valid keywords for text search."
 
-def _format_prompt(model_name: str, system_msg: str, user_msg: str, history: str = ""):
-    """Format universal de prompt pentru compatibilitate cu orice LLM (Mistral, Llama, Phi, Gemma)."""
-    return f"""### System:
-{system_msg}
+            # ... (restul logicii rămâne la fel, dar folosim doc_ids filtrat sau total)
+            # Adăugăm intent_warning la output-ul final
 
-### Context History:
-{history}
 
-### User:
-{user_msg}
+            # 1. Semantic Search (Vector)
+            query_embedding = None
+            try:
+                emb_url = f"{OLLAMA_URL}/api/embeddings"
+                resp = requests.post(emb_url, json={"model": "bge-m3", "prompt": query}, timeout=60)
+                if resp.status_code == 200:
+                    query_embedding = resp.json().get("embedding")
+            except Exception as e:
+                print(f"[!] Embedding Error in Hybrid Search: {e}")
 
-### Assistant:
-"""
+            vector_res = []
+            if query_embedding:
+                try:
+                    # Top 20 by semantic similarity
+                    vector_res = db.query(DocumentChunk)\
+                        .filter(DocumentChunk.document_id.in_(doc_ids))\
+                        .order_by(DocumentChunk.embedding.l2_distance(query_embedding))\
+                        .limit(20).all()
+                except Exception as e:
+                    print(f"[!] pgvector search error: {e}")
 
-from ..services.graph_service import graph_service
+            # 2. Lexical Search (Exact Keyword Match via ILIKE)
+            conditions = [DocumentChunk.content.ilike(f"%{w}%") for w in words]
+            lexical_res = db.query(DocumentChunk)\
+                .filter(and_(DocumentChunk.document_id.in_(doc_ids), or_(*conditions)))\
+                .limit(30).all()
+
+            # 3. Merge & Deduplicate
+            seen_ids = set()
+            merged_results = []
+            for r in vector_res + lexical_res:
+                if r.id not in seen_ids:
+                    seen_ids.add(r.id)
+                    merged_results.append(r)
+
+            if not merged_results: return "No text fragments found."
+
+            # 4. Neural Reranking via SentenceTransformers (with Rule-based Fallback)
+            scored_res = []
+            try:
+                from .rerank_service import RerankService
+                reranker = RerankService.get_instance()
+                # Rerank query with candidates
+                scored_res = reranker.rerank(query, merged_results, top_k=20)
+                print(f"[+] Successfully reranked {len(merged_results)} candidates using cross-encoder.")
+            except Exception as e:
+                print(f"[!] Reranker failed or not loaded, falling back to keyword scoring: {e}")
+                # Fallback rule-based scorer
+                def calculate_score(res):
+                    score = 0
+                    content_raw = res.content
+                    content_lower = content_raw.lower()
+                    doc = db.query(Document).filter(Document.id == res.document_id).first()
+                    filename_lower = doc.filename.lower() if doc else ""
+                    entities = re.findall(r'\b[A-Z]{3,}\b', query)
+                    for w in words:
+                        w_low = w.lower()
+                        if w_low in content_lower: score += 1
+                        if w_low in filename_lower: score += 5
+                    for ent in entities:
+                        if ent in content_raw: score += 20
+                        if ent.lower() in filename_lower: score += 50
+                    return score
+
+                scored_res = sorted(
+                    [(calculate_score(r), r) for r in merged_results], 
+                    key=lambda x: x[0], 
+                    reverse=True
+                )
+
+            # 5. Parent Chunk Zoom & Context Zoom
+            final_res = []
+            seen_zoom_ids = set()
+
+            for score, r in scored_res[:10]:
+                if r.id in seen_zoom_ids: continue
+
+                doc_obj = db.query(Document).filter(Document.id == r.document_id).first()
+                citation_id = len(self.citations) + 1
+                
+                # Check for Parent Chunk
+                parent_chunk = None
+                if getattr(r, "parent_chunk_id", None):
+                    parent_chunk = db.query(DocumentChunk).filter(DocumentChunk.id == r.parent_chunk_id).first()
+                
+                if parent_chunk:
+                    full_context = parent_chunk.content
+                    print(f"[*] Parent-Child Match: loading Parent Chunk for Child Chunk {r.id}")
+                else:
+                    # Fallback context zoom
+                    full_context = ""
+                    prev_c = db.query(DocumentChunk).filter(DocumentChunk.document_id == r.document_id, DocumentChunk.id < r.id).order_by(DocumentChunk.id.desc()).first()
+                    if prev_c: full_context += prev_c.content + " "
+                    full_context += r.content
+                    next_c = db.query(DocumentChunk).filter(DocumentChunk.document_id == r.document_id, DocumentChunk.id > r.id).order_by(DocumentChunk.id.asc()).first()
+                    if next_c: full_context += " " + next_c.content
+
+                # Înregistrăm citatul pentru interfață
+                self.citations.append({
+                    "id": citation_id,
+                    "doc_id": r.document_id,
+                    "page": r.page_number,
+                    "content": r.content[:300],
+                    "filename": doc_obj.filename if doc_obj else "unknown",
+                    "spatial": r.spatial if r.spatial else ""
+                })
+
+                header = f"[REF {citation_id} - {doc_obj.filename if doc_obj else 'Doc'}, Page {r.page_number}]"
+                final_res.append(f"{header}: {full_context}")
+                seen_zoom_ids.add(r.id)
+                
+            graph_context = ""
+            entities_to_query = re.findall(r'\b[A-Z]{3,}\b', query) + [w for w in words if len(w) >= 4]
+            if entities_to_query:
+                subgraph_info = self.graph.get_entity_subgraph(entities_to_query, limit=10)
+                if subgraph_info:
+                    graph_context = f"\n\n--- RELATIONAL GRAPH CONTEXT (Neo4j Connections) ---\n{subgraph_info}"
+                    
+            return "\n\n".join(final_res) + graph_context
+
+    def tool_search_transactions(self, subject: str, date_filter: str = "", match_pattern: str = "", aggregate: bool = False, limit: int = 100):
+        """Tool 2: Structured search with AGNOSTIC aggregation capability."""
+        limit = min(int(limit), 100)
+        with SessionLocal() as db:
+            doc_ids = [d.id for d in db.query(Document).filter(Document.case_id == self.case_id).all()]
+            if not doc_ids: return "No documents in this case."
+            
+            # AGNOSTIC AGGREGATION: If requested, parse Markdown tables directly
+            if aggregate:
+                unique_rows = set()
+                # Search across all chunks in this case
+                chunks = db.query(DocumentChunk).filter(DocumentChunk.document_id.in_(doc_ids), DocumentChunk.content.ilike(f"%{subject}%")).all()
+                for c in chunks:
+                    for line in c.content.split('\n'):
+                        if "|" in line:
+                            is_subject_match = False
+                            if subject.lower() in line.lower():
+                                is_subject_match = True
+                            elif subject.lower() in c.content.lower() and subject.lower() not in ["prezent", "absent"]:
+                                is_subject_match = True
+                                
+                            if is_subject_match:
+                                if not match_pattern or match_pattern.lower() in line.lower():
+                                    if not any(hdr in line.lower() for hdr in ["nume si prenume", "email", "status", "---"]):
+                                        # Normalize row for deduplication
+                                        clean_line = "|".join([col.strip() for col in line.split("|") if col.strip()])
+                                        if clean_line: unique_rows.add(clean_line)
+                
+                output = f"AGNOSTIC AGGREGATION RESULT FOR '{subject}':\n"
+                output += f"TOTAL UNIQUE RECORDS: {len(unique_rows)}\n"
+                output += f"UNIQUE RECORDS FOUND (showing first {limit}):\n"
+                for row in sorted(list(unique_rows))[:limit]:
+                    output += f"- {row}\n"
+                if len(unique_rows) > limit:
+                    output += f"... and {len(unique_rows) - limit} more unique records.\n"
+                return output
+
+            # [Rest of the existing search logic...]
+            search_terms = [w.strip() for w in re.findall(r'\w{3,}', subject) if len(w) >= 3]
+            if not search_terms and subject: search_terms = [subject]
+
+            output = ""
+            
+            # --- 1. CĂUTARE ÎN DOCUMENT SUMMARY (NOU) ---
+            try:
+                doc_query = """
+                    SELECT doc_type, COUNT(*) as count, STRING_AGG(DISTINCT filename, ', ' ORDER BY filename) as examples
+                    FROM documents
+                    WHERE id = ANY(:ids)
+                """
+                d_params = {"ids": doc_ids}
+                if search_terms:
+                    d_conditions = []
+                    for i, term in enumerate(search_terms):
+                        key = f"dterm_{i}"
+                        d_conditions.append(f"filename ILIKE :{key} OR doc_type ILIKE :{key}")
+                        d_params[key] = f"%{term}%"
+                    doc_query += f" AND ({' OR '.join(d_conditions)})"
+                
+                doc_query += " GROUP BY doc_type ORDER BY count DESC"
+                d_res = db.execute(text(doc_query), d_params).fetchall()
+                
+                if d_res:
+                    output += f"--- DOCUMENT SUMMARY (Files in Case) ---\n"
+                    for r in d_res:
+                        doc_type_label = r[0] if r[0] else "Uncategorized"
+                        output += f"- Type: {doc_type_label} | Total: {r[1]} files\n"
+                        output += f"  Files: {r[2][:500]}...\n"
+                    output += "\n"
+            except Exception as e:
+                output += f"Document summary error: {e}\n"
+
+            # --- 2. CĂUTARE ÎN ENTITĂȚI ȘI ROLURI (EXISTENT) ---
+            try:
+                entity_query = """
+                    SELECT e.official_name, l.role, COUNT(*) as count
+                    FROM master_entities e
+                    JOIN document_entity_links l ON e.id = l.entity_id
+                    WHERE l.document_id = ANY(:ids)
+                """
+                e_params = {"ids": doc_ids}
+                if search_terms:
+                    e_conditions = []
+                    for i, term in enumerate(search_terms):
+                        key = f"eterm_{i}"
+                        e_conditions.append(f"e.official_name ILIKE :{key}")
+                        e_params[key] = f"%{term}%"
+                    entity_query += f" AND ({' OR '.join(e_conditions)})"
+                
+                entity_query += " GROUP BY e.official_name, l.role ORDER BY count DESC"
+                e_res = db.execute(text(entity_query), e_params).fetchall()
+                
+                if e_res:
+                    output += f"--- ENTITY SUMMARY (Found {len(e_res)} unique roles) ---\n"
+                    for r in e_res:
+                        output += f"- Entity: {r[0]} | Role: {r[1]} | Total Occurrences: {r[2]}\n"
+                    output += "\n"
+            except Exception as e:
+                output += f"Entity search error: {e}\n"
+
+            # --- 2. CĂUTARE ÎN TRANZACȚII FINANCIARE (EXISTENT) ---
+            query_str = "SELECT transaction_date, description, amount, currency, doc_filename FROM financial_items WHERE document_id = ANY(:ids)"
+            params = {"ids": doc_ids}
+            # ... restul logicii de tranzacții rămâne la fel ...
+
+            if search_terms:
+                # Create a group of ILIKE conditions
+                term_conditions = []
+                for i, term in enumerate(search_terms):
+                    key = f"term_{i}"
+                    term_conditions.append(f"description ILIKE :{key}")
+                    params[key] = f"%{term}%"
+                query_str += f" AND ({' OR '.join(term_conditions)})"
+
+            if date_filter:
+                # Robust date handling
+                # If range like "01.02 to 28.02", extract month/year
+                month_year = re.search(r'(\d{2}\.20\d{2})', date_filter)
+                if month_year:
+                    # Search by month.year (e.g. .02.2026)
+                    target = month_year.group(1)
+                    if not target.startswith('.'): target = "." + target
+                    query_str += " AND (transaction_date LIKE :d_filter OR description LIKE :d_filter)"
+                    params["d_filter"] = f"%{target}%"
+                else:
+                    # Fallback to literal digits
+                    date_digits = "".join(re.findall(r'\d+', date_filter))
+                    if len(date_digits) >= 2:
+                        query_str += " AND (transaction_date LIKE :d_filter OR description LIKE :d_filter)"
+                        params["d_filter"] = f"%{date_filter.strip()}%"
+                
+                query_str += " ORDER BY ABS(amount) DESC LIMIT 50"
+            else:
+                query_str += " ORDER BY ABS(amount) DESC LIMIT 50"
+            
+            try:
+                res = db.execute(text(query_str), params).fetchall()
+                
+                # FALLBACK: If no results with date, try without date if subject exists
+                if not res and date_filter and search_terms:
+                    query_fallback = "SELECT transaction_date, description, amount, currency, doc_filename FROM financial_items WHERE document_id = ANY(:ids)"
+                    fallback_params = {"ids": doc_ids}
+                    term_conditions = []
+                    for i, term in enumerate(search_terms):
+                        key = f"term_{i}"
+                        term_conditions.append(f"description ILIKE :{key}")
+                        fallback_params[key] = f"%{term}%"
+                    query_fallback += f" AND ({' OR '.join(term_conditions)}) ORDER BY ABS(amount) DESC LIMIT 20"
+                    res = db.execute(text(query_fallback), fallback_params).fetchall()
+                    if res:
+                        output = f"--- NO RESULTS FOR DATE '{date_filter}', SHOWING ALL RECORDS FOR '{subject}' ---\n"
+                    else:
+                        return f"No transactions found for '{subject}' in '{date_filter}' or any other date."
+                elif not res:
+                    # FALLBACK to AGNOSTIC AGGREGATION if no transactions found
+                    # This helps in cases (like Case 6) where only tabular attendance data is available
+                    unique_rows = set()
+                    chunks = db.query(DocumentChunk).filter(DocumentChunk.document_id.in_(doc_ids), DocumentChunk.content.ilike(f"%{subject}%")).all()
+                    if chunks:
+                        for c in chunks:
+                            for line in c.content.split('\n'):
+                                if "|" in line:
+                                    is_subject_match = False
+                                    if subject.lower() in line.lower():
+                                        is_subject_match = True
+                                    elif subject.lower() in c.content.lower() and subject.lower() not in ["prezent", "absent"]:
+                                        is_subject_match = True
+                                        
+                                    if is_subject_match:
+                                        if not match_pattern or match_pattern.lower() in line.lower():
+                                            if not any(hdr in line.lower() for hdr in ["nume si prenume", "email", "status", "---"]):
+                                                clean_line = "|".join([col.strip() for col in line.split("|") if col.strip()])
+                                                if clean_line: unique_rows.add(clean_line)
+                        if unique_rows:
+                            output = f"--- NO TRANSACTIONS FOUND. FALLBACK AGNOSTIC AGGREGATION RESULT FOR '{subject}':\n"
+                            output += f"TOTAL UNIQUE RECORDS: {len(unique_rows)}\n"
+                            output += f"UNIQUE RECORDS FOUND (showing first {limit}):\n"
+                            for row in sorted(list(unique_rows))[:limit]:
+                                output += f"- {row}\n"
+                            if len(unique_rows) > limit:
+                                output += f"... and {len(unique_rows) - limit} more unique records.\n"
+                            return output
+                    return f"No transactions or tabular records found for '{subject}' in '{date_filter}'."
+                else:
+                    output = f"--- FOUND {len(res)} RECORDS (Verified SQL Data) ---\n"
+                for r in res:
+                    citation_id = len(self.citations) + 1
+                    date_val = r[0] if r[0] and r[0] != "N/A" else "Annual/Period"
+                    content_str = f"Tranzacție: {r[1]} | Sumă: {r[2]} {r[3]} | Data: {date_val}"
+                    
+                    # Înregistrăm citatul
+                    self.citations.append({
+                        "id": citation_id,
+                        "doc_id": "SQL_DB", # Marcăm sursa ca fiind baza de date
+                        "page": 0,
+                        "content": content_str,
+                        "filename": r[4] # doc_filename
+                    })
+                    
+                    output += f"[REF {citation_id}] Type: {date_val} | Amount: {r[2]} {r[3]} | Desc: {r[1]}\n"
+                
+                graph_context = ""
+                if subject:
+                    subgraph_info = self.graph.get_entity_subgraph([subject], limit=10)
+                    if subgraph_info:
+                        graph_context = f"\n\n--- RELATIONAL GRAPH CONTEXT (Neo4j Connections) ---\n{subgraph_info}"
+                return output + graph_context
+            except Exception as e:
+                return f"Transaction search error: {e}"
+
+    def tool_explore_graph(self, entity_name: str):
+        """Tool 3: Neo4j relationship exploration."""
+        if not self.graph: return "Graph service unavailable."
+        # Use existing query_relationships but targeted at a single entity
+        result = self.graph.query_relationships([entity_name])
+        return result if result else f"No graph relationships found for '{entity_name}'."
+
+    def tool_timeline(self, entity_name: str):
+        """Tool 5: Chronological event tracking for an entity."""
+        with SessionLocal() as db:
+            # Search for the entity in transactions
+            tx_res = db.execute(text(
+                "SELECT transaction_date, description FROM financial_items "
+                "WHERE (cui_source ILIKE :e OR cui_destination ILIKE :e OR description ILIKE :e) "
+                "AND document_id IN (SELECT id FROM documents WHERE case_id = :cid) "
+                "ORDER BY transaction_date ASC"
+            ), {"e": f"%{entity_name}%", "cid": self.case_id}).fetchall()
+            
+            if not tx_res: return f"No timeline events found for '{entity_name}'."
+            
+            output = f"--- TIMELINE FOR {entity_name} ---\n"
+            for r in tx_res:
+                output += f"[{r[0]}] {r[1]}\n"
+            return output
+
+    def tool_calculate(self, expr: str):
+        """Tool 4: Deterministic Python math."""
+        try:
+            expr = re.sub(r'[^0-9\+\-\*\/\.\(\), ]', '', expr)
+            return f"MATH RESULT: {eval(expr):,.2f}"
+        except: return "Math error: invalid expression."
+
+    def run(self):
+        yield json.dumps({"type": "status", "data": "Forensic Agent is thinking..."})
+        
+        system_prompt = """You are a Professional Forensic Data Auditor.
+CORE RULES:
+1. AGNOSTICISM: You have no prior knowledge of any persons or events. Answer ONLY using evidence from tools or provided context.
+2. TOOL-USE: Use SEARCH_TEXT or SEARCH_STRUCTURED_DATA to find evidence. If evidence is already provided in the context, do not make redundant calls.
+3. TEMPORAL PRECISION: If the user mentions a date, you MUST use the 'date_filter' parameter (DD.MM.YYYY or MM.YYYY).
+4. LANGUAGE: Think in English, but the FINAL ANSWER must be in ROMANIAN.
+5. PRECISION: Extract specific facts (names, dates, amounts). If info is missing, state it clearly.
+6. NO SUMMARIES: Do not provide general overviews. Answer the specific question directly using the found evidence.
+7. CITATIONS: Every fact MUST be cited using [x], matching the [REF x] from observations.
+8. AGNOSTIC COUNTING: When asked to count (e.g. "Câți?"), you MUST list the unique names/entities found in the [FACTS] section to prove deduplication. Exclude specific statuses (like "Absent") if explicitly requested.
+9. FINALITY: If you have sufficient evidence to answer the question, you MUST provide the [FINAL RESPONSE] immediately, even in the first step.
+
+FINAL RESPONSE FORMAT (ROMANIAN):
+[FACTS]
+- List of specific facts and unique entities found with citations [x].
+[ANALYSIS]
+- Brief reasoning connecting the facts. Highlight [CONTRADICTIONS] here.
+[CONCLUSION]
+- The direct answer to the user's question.
+[MISSING EVIDENCE]
+- Relevant data that was NOT found.
+[CONFIDENCE]: LOW/MEDIUM/HIGH"""
+        
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "SEARCH_STRUCTURED_DATA",
+                    "description": "Find and aggregate records from tables. Use this for COUNTING entities, finding amounts, or specific records. Set aggregate=True for deduplicated counts. If you need a comprehensive list of unique rows, set a higher limit.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "subject": {"type": "string", "description": "Entity or keyword to find in table rows."},
+                            "match_pattern": {"type": "string", "description": "Optional pattern to filter rows (case-insensitive)."},
+                            "aggregate": {"type": "boolean", "description": "If true, returns a deduplicated count and unique records instead of raw text."},
+                            "limit": {"type": "integer", "description": "Maximum number of unique records to return (defaults to 100. Set to 100 to avoid performance bottleneck/GPU thrashing)."}
+                        },
+                        "required": ["subject"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "SEARCH_TEXT",
+                    "description": "Search for non-financial concepts, statements, contracts, or general context.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "concept": {"type": "string", "description": "Keywords to search (e.g. contract imprumut)"},
+                            "semantic_intent": {"type": "string", "description": "Type of document (e.g. CONTRACT, DECLARATIE)."}
+                        },
+                        "required": ["concept"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "EXPLORE_GRAPH",
+                    "description": "Find relationships and links between entities.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "entity": {"type": "string", "description": "Entity name to explore"}
+                        },
+                        "required": ["entity"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "CALCULATE",
+                    "description": "Perform math calculations.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "expression": {"type": "string", "description": "Math expression (e.g. 1500 + 200)"}
+                        },
+                        "required": ["expression"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "TIMELINE",
+                    "description": "Get a chronological timeline of events for an entity.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "entity": {"type": "string", "description": "Entity name to track"}
+                        },
+                        "required": ["entity"]
+                    }
+                }
+            }
+        ]
+
+        messages = [
+            {"role": "system", "content": system_prompt}
+        ]
+        
+        # Add chat history
+        messages.extend(self.history)
+        
+        # Add current question with injected evidence
+        messages.append({
+            "role": "user", 
+            "content": f"EVIDENCE ALREADY IN CONTEXT:\n{self.injected_evidence}\n\nQUESTION: {self.user_question}\n\nREMINDER: You are an Agnostic Auditor. If the answer is in the context above, give the [FINAL RESPONSE] now. If not, use tools. Deduplicate names and follow exclusion rules (e.g. no absentees)."
+        })
+
+        has_used_tools = False
+
+        for step in range(1, 16):
+            yield json.dumps({"type": "step", "data": f"Phase {step}: Investigating..."})
+            
+            # Tools are always available
+            current_tools = tools
+            
+            # If the model tries to end without evidence after phase 1
+            if step > 1 and not has_used_tools and step < 4:
+                messages.append({"role": "user", "content": "You haven't used any tools yet. Use SEARCH_TEXT or SEARCH_STRUCTURED_DATA to find evidence before concluding."})
+            
+            payload = {
+                "model": self.active_model,
+                "messages": messages,
+                "tools": current_tools,
+                "stream": False, 
+                "options": {
+                    "temperature": 0.0,
+                    "num_ctx": 32768
+                }
+            }
+            
+            try:
+                r = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=1800)
+                r.raise_for_status()
+                resp_json = r.json()
+                assistant_msg = resp_json.get("message", {})
+            except Exception as e:
+                yield json.dumps({"type": "final", "data": f"Eroare LLM Engine (Timeout/500): {e}"})
+                return
+
+            messages.append(assistant_msg)
+            
+            # Yield thinking/reasoning if present
+            content = assistant_msg.get("content", "").strip()
+            
+            # FAIL-SAFE: If model writes tool calls in text instead of using tool_calls field
+            synthetic_tool_calls = []
+            if not assistant_msg.get("tool_calls"):
+                if "[SEARCH_STRUCTURED_DATA]" in content:
+                    # Basic extraction for Qwen's common text-calling format
+                    subject_match = re.search(r"subject:\s*([^\\n]+)", content)
+                    if subject_match:
+                        synthetic_tool_calls.append({
+                            "function": {
+                                "name": "SEARCH_STRUCTURED_DATA",
+                                "arguments": {"subject": subject_match.group(1).strip()}
+                            }
+                        })
+                elif "[SEARCH_TEXT]" in content:
+                    concept_match = re.search(r"concept:\s*([^\\n]+)", content)
+                    if concept_match:
+                        synthetic_tool_calls.append({
+                            "function": {
+                                "name": "SEARCH_TEXT",
+                                "arguments": {"concept": concept_match.group(1).strip()}
+                            }
+                        })
+
+            if content:
+                yield json.dumps({"type": "observation", "data": f"Thinking: {content}"})
+
+            # Check if tools were called (real or synthetic)
+            tool_calls = assistant_msg.get("tool_calls", []) or synthetic_tool_calls
+            
+            if tool_calls:
+                has_used_tools = True
+                for tc in tool_calls:
+                    t_name = tc["function"]["name"]
+                    t_args = tc["function"]["arguments"]
+                    
+                    if isinstance(t_args, str):
+                        try:
+                            t_args = json.loads(t_args)
+                        except:
+                            t_args = {"subject": t_args, "concept": t_args, "entity": t_args, "expression": t_args}
+                            
+                    if isinstance(t_args, dict):
+                        subject_val = t_args.get("subject", "")
+                        if isinstance(subject_val, str) and "\n" in subject_val:
+                            lines = subject_val.split("\n")
+                            t_args["subject"] = lines[0].replace("- subject:", "").replace("subject:", "").strip()
+                            for line in lines[1:]:
+                                if "aggregate" in line.lower():
+                                    t_args["aggregate"] = "true" in line.lower()
+                                if "match_pattern" in line.lower():
+                                    t_args["match_pattern"] = line.split(":")[-1].strip().strip("'\"")
+                                if "date_filter" in line.lower():
+                                    t_args["date_filter"] = line.split(":")[-1].strip().strip("'\"")
+                                    
+                    yield json.dumps({"type": "tool_call", "tool": t_name, "params": str(t_args)})
+                    
+                    observation = ""
+                    if t_name == "SEARCH_STRUCTURED_DATA":
+                        observation = self.tool_search_transactions(
+                            subject=t_args.get("subject", "") if isinstance(t_args, dict) else "", 
+                            date_filter=t_args.get("date_filter", "") if isinstance(t_args, dict) else "",
+                            match_pattern=t_args.get("match_pattern", "") if isinstance(t_args, dict) else "",
+                            aggregate=t_args.get("aggregate", False) if isinstance(t_args, dict) else False,
+                            limit=int(t_args.get("limit", 30)) if isinstance(t_args, dict) and t_args.get("limit") is not None else 30
+                        )
+                    elif t_name == "SEARCH_TEXT":
+                        observation = self.tool_search_text(t_args.get("concept", ""), t_args.get("semantic_intent", ""))
+                    elif t_name == "EXPLORE_GRAPH":
+                        observation = self.tool_explore_graph(t_args.get("entity", ""))
+                    elif t_name == "TIMELINE":
+                        observation = self.tool_timeline(t_args.get("entity", ""))
+                    elif t_name == "CALCULATE":
+                        observation = self.tool_calculate(t_args.get("expression", ""))
+                    else:
+                        observation = "Unknown tool."
+                    
+                    yield json.dumps({"type": "observation", "data": observation[:2500]})
+                    
+                    messages.append({
+                        "role": "tool",
+                        "content": observation
+                    })
+                continue # Go to next iteration to let model think about the observation
+            
+            # If no tools called, we check if we have the final answer
+            final_content = assistant_msg.get("content", "").strip()
+            
+            if "[FINAL RESPONSE]" in final_content or "CONCLUZIE" in final_content.upper():
+                # Extract only the final response part if it's mixed with planning/thinking
+                if "[FINAL RESPONSE]" in final_content:
+                    display_content = final_content.split("[FINAL RESPONSE]")[-1].strip()
+                else:
+                    display_content = final_content
+                
+                yield json.dumps({"type": "final", "data": display_content, "citations": self.citations})
+                return
+
+            if step < 5: # Minim 5 pași dacă nu a găsit răspunsul final
+                messages.append({"role": "user", "content": "Continuă investigația folosind uneltele pentru a găsi dovezi clare (date, sume, nume). Dacă ai terminat, oferă răspunsul final precedat de [FINAL RESPONSE]."})
+                continue
+                
+            yield json.dumps({"type": "final", "data": final_content, "citations": self.citations})
+            return
+
+        yield json.dumps({"type": "final", "data": "Am atins limita de 15 pași de investigație. Rezumat parțial bazat pe dovezile găsite:", "citations": self.citations})
 
 def query_investigator(case_id: int, user_question: str):
-    try:
-        r.setex("llm_active_session", 120, "true")
-        active_model = get_active_model_name()
-        
-        history_context = ""
-        with SessionLocal() as db:
-            last_msgs = db.query(ChatMessage).filter(ChatMessage.case_id == case_id).order_by(ChatMessage.created_at.desc()).limit(4).all()
-            for m in reversed(last_msgs):
-                history_context += f"{m.role.upper()}: {m.content}\n"
-
-        # 1. SQL Discovery (Mathematical Accuracy)
-        sql_facts = ""
-        sql_generated = None
-        try:
-            sys_sql = f"""Expert Auditor Forensic - SQL Generator.
-Schema: 
-- documents (id, filename, case_id)
-- financial_items (id, document_id, description, amount, currency)
-
-Obiectiv: Generează un query PostgreSQL valid pentru a răspunde întrebării.
-Reguli:
-- Folosește 'ILIKE %termen%' pentru descrieri.
-- Filtrează obligatoriu după case_id = {case_id} prin JOIN.
-- Returnează EXCLUSIV un obiect JSON: {{"sql": "query"}}"""
-            
-            sql_prompt = f"### System:\n{sys_sql}\n\n### User:\n{user_question}\n\n### Assistant:\n"
-            
-            res_sql = requests.post(f"{OLLAMA_URL}/api/generate", json={
-                "model": active_model, "prompt": sql_prompt, "stream": False, "format": "json",
-                "options": {"temperature": 0.0}
-            }, timeout=60)
-            
-            raw_response = res_sql.json().get("response", "{}")
-            print(f"[*] RAW SQL JSON: {raw_response}")
-            
-            sql_json = json.loads(raw_response)
-            sql = sql_json.get("sql", "").strip()
-            
-            if sql and sql.lower().startswith("select"):
-                sql_generated = sql
-                sql = sql.replace(';', '').replace('\\', '')
-                print(f"[*] AI Executing SQL: {sql}")
-                with engine.connect() as conn:
-                    result = conn.execute(text(sql))
-                    rows = result.fetchall()
-                    
-                    if rows:
-                        # Valoare unica (SUM, COUNT)
-                        if len(rows) == 1 and len(rows[0]) == 1:
-                            val = rows[0][0] if rows[0][0] is not None else 0
-                            if isinstance(val, float): val = round(val, 2)
-                            sql_facts = f"--- DATE MATEMATICE CERTIFICATE (SQL) ---\nRezultat: {val}\n\n"
-                        else:
-                            # Lista de rezultate
-                            sql_facts = "--- DATE EXTRASE DIN TABELE (SQL) ---\n"
-                            for r_item in rows[:10]:
-                                sql_facts += f"- {' | '.join(str(x) for x in r_item)}\n"
-                            sql_facts += "\n"
-        except Exception as e:
-            print(f"[!] SQL Runtime Error: {e}")
-
-        # 2. Graph Discovery (Neo4j)
-        graph_facts = ""
-        try:
-            # Extragem entitati potentiale
-            potential_entities = re.findall(r'"([^"]+)"', user_question) 
-            if not potential_entities:
-                potential_entities = re.findall(r'\b[A-Z][A-Za-z0-9\.]+(?:\s+[A-Z][A-Za-z0-9\.]+)*\b', user_question)
-            
-            if potential_entities:
-                cleaned_entities = [e.strip() for e in potential_entities if len(e) > 3]
-                graph_res = graph_service.query_relationships(cleaned_entities)
-                if graph_res:
-                    graph_facts = f"--- RELATII SI CONEXIUNI IDENTIFICATE (GRAF) ---\n{graph_res}\n\n"
-        except Exception as e_graph:
-            print(f"[!] Graph Query Error: {e_graph}")
-
-        # 3. RAG Context (Similarity Search)
-        query_vector = _generate_query_vector(user_question)
-        raw_context = sql_facts + graph_facts
-        
-        with SessionLocal() as db:
-            keywords = [w.strip(",.!?") for w in user_question.split() if len(w) > 3]
-            keywords.extend(re.findall(r'\b\d{3,}\b', user_question))
-            if keywords:
-                filters = [DocumentChunk.content.ilike(f"%{kw}%") for kw in set(keywords)]
-                kw_chunks = db.query(DocumentChunk).join(Document).filter(Document.case_id == case_id, or_(*filters)).limit(15).all()
-                for kc in kw_chunks:
-                    raw_context += f"\n--- FRAGMENT PROBA: {kc.document.filename} ---\n{kc.content}\n"
-
-        # 4. Final Answer Generation
-        sys_final = """Senior Forensic Auditor & Analyst.
-Misiune: Oferă un răspuns riguros, bazat exclusiv pe contextul furnizat.
-Priorități:
-1. Datele matematice din SQL reprezintă sursa supremă de adevăr pentru cifre.
-2. Relațiile din graf explică conexiunile între entități.
-3. Fragmentele de probă oferă detalii contextuale narative.
-Instrucțiune: Dacă există contradicții între SQL și textul narativ, prevalează cifrele din SQL. Răspunde în ROMÂNĂ."""
-        
-        user_final = f"CONTEXT:\n{raw_context}\n\nINTREBARE UTILIZATOR: {user_question}"
-        final_prompt = _format_prompt(active_model, sys_final, user_final, history_context)
-        
-        res = requests.post(f"{OLLAMA_URL}/api/generate", json={
-            "model": active_model, "prompt": final_prompt, "stream": False,
-            "options": {"num_ctx": 8192}
-        }, timeout=300)
-        resp_text = res.json().get("response", "").strip()
-        
-        # Extragem raspunsul curat 
-        answer = resp_text
-        parsed = _extract_json(resp_text)
-        if parsed: answer = parsed.get("answer", resp_text)
-        
-        return { 
-            "answer": answer, 
-            "sql": sql_generated, 
-            "citations": [], 
-            "results": [] 
-        }
-
-    except Exception as e:
-        print(f"[!] Critical Chat Error: {e}")
-        return { "answer": f"Eroare sistem audit: {str(e)}", "sql": None }
+    agent = AgenticInvestigator(case_id, user_question)
+    full_text = ""
+    for chunk_json in agent.run():
+        chunk = json.loads(chunk_json)
+        if chunk.get("type") == "final": 
+            full_text = chunk["data"]
+            break
+    return {"answer": full_text, "citations": agent.citations}

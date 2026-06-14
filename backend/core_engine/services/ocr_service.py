@@ -1,34 +1,75 @@
-import pytesseract
-from PIL import Image
 import os
+from PIL import Image
+import pytesseract
+from docling.document_converter import DocumentConverter
+from docling.datamodel.pipeline_options import PdfPipelineOptions, RapidOcrOptions
 
 class OCRService:
     def __init__(self):
-        # Initialize any required components for OCR
-        pass
-    
+        # Configurare pipeline Docling
+        self.pipeline_options = PdfPipelineOptions()
+        self.pipeline_options.do_ocr = True
+        
+        # RapidOCR este motorul preferat în acest setup (vezi preload_ocr.py)
+        ocr_options = RapidOcrOptions()
+        self.pipeline_options.ocr_options = ocr_options
+        
+        # Singleton converter pentru eficiență
+        self.converter = None
+
+    def _get_converter(self):
+        if self.converter is None:
+            self.converter = DocumentConverter(pipeline_options=self.pipeline_options)
+        return self.converter
+
     def process_file(self, file_path: str) -> dict:
-        """Process a file using OCR to extract text"""
+        """Metodă veche/simplă pentru compatibilitate."""
         try:
-            # For image files, use pytesseract
             if file_path.endswith(('.jpg', '.jpeg', '.png')):
                 with Image.open(file_path) as img:
-                    # Perform OCR on the image
                     extracted_text = pytesseract.image_to_string(img)
-                    
-                    # Return structured data
-                    return {
-                        "text": extracted_text,
-                        "format": "plain_text"
-                    }
-            elif file_path.endswith('.pdf'):
-                # For PDF files, you might want to convert to images first
-                # This is a simplified implementation
-                return {"error": "PDF processing not implemented"}
-            else:
-                return {"error": "Unsupported file type"}
+                    return {"text": extracted_text, "format": "plain_text"}
+            return {"error": "Folosiți process_document pentru PDF/OCR complex."}
         except Exception as e:
-            return {"error": f"OCR processing failed: {str(e)}"}
+            return {"error": str(e)}
 
-# Create a global instance
+def process_document(file_path: str):
+    """
+    Pipeline principal OCR folosit de Worker (tasks.py).
+    Returnează Markdown și Chunks structurați.
+    """
+    try:
+        service = OCRService()
+        converter = service._get_converter()
+        result = converter.convert(file_path)
+        
+        md_text = result.document.export_to_markdown()
+        
+        # Extracție chunks cu metadate spațiale (cerute de tasks.py)
+        chunks = []
+        for item in result.document.texts:
+            page_no = 1
+            spatial = ""
+            if item.prov:
+                p = item.prov[0]
+                page_no = getattr(p, 'page_no', 1)
+                bbox = getattr(p, 'bbox', None)
+                if bbox:
+                    spatial = f"l={bbox.l},t={bbox.t},r={bbox.r},b={bbox.b}"
+            
+            chunks.append({
+                "content": item.text,
+                "page": page_no,
+                "spatial": spatial
+            })
+            
+        return {
+            "markdown": md_text,
+            "chunks": chunks
+        }
+    except Exception as e:
+        print(f"[!] OCR Error for {file_path}: {e}")
+        return {"error": str(e)}
+
+# Instanță globală (legacy support)
 ocr_service = OCRService()

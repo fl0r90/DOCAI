@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Handwriting OCR Standalone</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background-color: #0f172a; color: #f8fafc; font-family: 'Inter', sans-serif; }
+        .glass { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1); }
+        .dropzone { border: 2px dashed rgba(255, 255, 255, 0.2); transition: all 0.3s ease; }
+        .dropzone:hover { border-color: #38bdf8; background: rgba(56, 189, 248, 0.05); }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col items-center justify-center p-4">
+    <div class="max-w-4xl w-full space-y-8">
+        <div class="text-center">
+            <h1 class="text-4xl font-bold text-sky-400">Handwriting OCR</h1>
+            <p class="text-slate-400 mt-2">Sistem Forensic Standalone pentru Recunoaștere Scris de Mână</p>
+        </div>
+
+        <div class="glass p-8 rounded-2xl shadow-2xl">
+            <div id="dropzone" class="dropzone rounded-xl p-12 text-center cursor-pointer">
+                <div class="space-y-4">
+                    <svg class="mx-auto h-12 w-12 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                    </svg>
+                    <div class="text-lg">Trage PDF sau Imagine aici</div>
+                    <div class="text-sm text-slate-500">sau click pentru a selecta</div>
+                </div>
+                <input type="file" id="fileInput" class="hidden" accept=".pdf,.jpg,.jpeg,.png">
+            </div>
+
+            <div id="status" class="mt-6 text-center hidden">
+                <div class="flex items-center justify-center space-x-2">
+                    <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-sky-400"></div>
+                    <span class="text-sky-400">Procesare OCR...</span>
+                </div>
+            </div>
+
+            <div id="resultContainer" class="mt-8 space-y-4 hidden">
+                <div class="flex items-center justify-between">
+                    <h2 class="text-xl font-semibold">Text Extras</h2>
+                    <button id="copyBtn" class="bg-sky-600 hover:bg-sky-500 text-white px-4 py-2 rounded-lg text-sm transition-colors">Copiază Text</button>
+                </div>
+                <textarea id="resultText" class="w-full h-64 bg-slate-900 border border-slate-700 rounded-xl p-4 text-slate-300 focus:outline-none focus:ring-2 focus:ring-sky-500 whitespace-pre-wrap" readonly></textarea>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const dropzone = document.getElementById('dropzone');
+        const fileInput = document.getElementById('fileInput');
+        const status = document.getElementById('status');
+        const resultContainer = document.getElementById('resultContainer');
+        const resultText = document.getElementById('resultText');
+        const copyBtn = document.getElementById('copyBtn');
+
+        dropzone.onclick = () => fileInput.click();
+
+        fileInput.onchange = (e) => handleFile(e.target.files[0]);
+
+        dropzone.ondragover = (e) => { e.preventDefault(); dropzone.classList.add('border-sky-400'); };
+        dropzone.ondragleave = () => dropzone.classList.remove('border-sky-400');
+        dropzone.ondrop = (e) => { e.preventDefault(); handleFile(e.dataTransfer.files[0]); };
+
+        async function handleFile(file) {
+            if (!file) return;
+
+            status.classList.remove('hidden');
+            resultContainer.classList.add('hidden');
+            
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const response = await fetch('http://localhost:8001/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                if (response.ok) {
+                    resultText.value = data.text;
+                    resultContainer.classList.remove('hidden');
+                } else {
+                    alert('Eroare: ' + data.detail);
+                }
+            } catch (err) {
+                alert('Eroare de conexiune la serverul OCR.');
+            } finally {
+                status.classList.add('hidden');
+            }
+        }
+
+        copyBtn.onclick = () => {
+            resultText.select();
+            document.execCommand('copy');
+            copyBtn.innerText = 'Copiat!';
+            setTimeout(() => copyBtn.innerText = 'Copiază Text', 2000);
+        };
+    </script>
+</body>
+</html>

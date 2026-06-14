@@ -1,0 +1,31 @@
+services:
+  ocr-backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ocr-standalone-backend
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./backend:/app
+    environment:
+      - OLLAMA_URL=http://v2-llm-1:11434
+    networks:
+      - default
+      - v2_forensic_net
+    restart: unless-stopped
+
+  ocr-frontend:
+    image: nginx:alpine
+    container_name: ocr-standalone-frontend
+    ports:
+      - "8080:80"
+    volumes:
+      - ./frontend:/usr/share/nginx/html
+    networks:
+      - default
+    restart: unless-stopped
+
+networks:
+  v2_forensic_net:
+    external: true

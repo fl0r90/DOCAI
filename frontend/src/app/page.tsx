@@ -1,11 +1,13 @@
 "use client";
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Shield, Building2, User, Database, Landmark, AlertTriangle, Loader2, ScrollText, History, Clock, FileText, ArrowRight } from 'lucide-react';
+import { Shield, Building2, User, Database, Landmark, AlertTriangle, Loader2, ScrollText, History, Clock, FileText, ArrowRight, Plus, X, Sun, Moon } from 'lucide-react';
 import api from '../lib/api';
 import Cookies from 'js-cookie';
+import { useTheme } from '../lib/ThemeProvider';
 
 export default function ForensicDashboard() {
+  const { theme, toggleTheme } = useTheme();
   const [entities, setEntities] = useState([]);
   const [docs, setDocs] = useState<any[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -16,6 +18,10 @@ export default function ForensicDashboard() {
   const [currentTime, setCurrentTime] = useState(new Date());
   const [queueStatus, setQueueStatus] = useState<any>(null);
   const [mounted, setMounted] = useState(false);
+  
+  const [isCreating, setIsCreating] = useState(false);
+  const [newCase, setNewCase] = useState({ name: '', description: '' });
+  
   const router = useRouter();
 
   const token = Cookies.get('token');
@@ -44,9 +50,9 @@ export default function ForensicDashboard() {
 
       if (selectedCaseId) {
         const [eRes, dRes, aRes] = await Promise.all([
-          api.get(`/entities?case_id=${selectedCaseId}`),
-          api.get(`/documents?case_id=${selectedCaseId}`),
-          api.get(`/system/audit?case_id=${selectedCaseId}&limit=10`)
+          api.get(`/cases/${selectedCaseId}/entities`),
+          api.get(`/cases/${selectedCaseId}/documents`),
+          api.get(`/system/audit?limit=10`)
         ]);
         setEntities(eRes.data);
         setDocs(dRes.data);
@@ -118,32 +124,60 @@ export default function ForensicDashboard() {
     }
   };
 
+  const handleCreateCase = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const res = await api.post('/cases', newCase);
+      setNewCase({ name: '', description: '' });
+      setIsCreating(false);
+      refreshData();
+      setSelectedCaseId(res.data.id.toString());
+    } catch (err) {
+      alert("Eroare la crearea dosarului.");
+    }
+  };
+
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-200 p-8 font-sans animate-in fade-in duration-500">
-      <nav className="flex justify-between items-center mb-12 border-b border-slate-800 pb-6">
+    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-200 p-8 font-sans animate-in fade-in duration-500 transition-colors duration-300">
+      <nav className="flex justify-between items-center mb-12 border-b border-slate-200 dark:border-slate-800 pb-6">
         <div className="flex items-center gap-3">
           <Shield className="w-8 h-8 text-blue-500" />
-          <h1 className="text-2xl font-black tracking-tighter uppercase">Doc<span className="text-blue-500">AI</span></h1>
-          <span title="Codat (prost) de Gemini ✨ si cfp90" className="cursor-help text-[10px] font-black text-blue-500/50 uppercase tracking-widest mt-1 ml-2">v0.1 ALPHA</span>
+          <h1 className="text-2xl font-black tracking-tighter uppercase text-slate-900 dark:text-white">Doc<span className="text-blue-500">AI</span></h1>
+          <span title="Codat (prost) de Gemini ✨ si cfp90" className="cursor-help text-[10px] font-black text-blue-500/50 uppercase tracking-widest mt-1 ml-2">v0.6.5 ALPHA</span>
         </div>
         <div className="text-right hidden md:block">
           {currentUser && (
-            <p className="text-sm font-bold text-slate-300">
-              Bun venit, <span className="text-blue-400">@{currentUser.username}</span>!
+            <p className="text-sm font-bold text-slate-600 dark:text-slate-300">
+              Bun venit, <span className="text-blue-600 dark:text-blue-400">@{currentUser.username}</span>!
             </p>
           )}
-          <p className="text-[10px] font-mono text-slate-500 uppercase tracking-widest">
-            {currentTime.toLocaleDateString()} | {currentTime.toLocaleTimeString()}
+          <p className="text-[10px] font-mono text-slate-400 dark:text-slate-500 uppercase tracking-widest">
+            {currentTime.toLocaleDateString('ro-RO')} | {currentTime.toLocaleTimeString('ro-RO')}
           </p>
         </div>
         <div className="flex gap-2 items-center">
+          <button 
+            onClick={toggleTheme}
+            className="p-2.5 bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 hover:bg-slate-200 dark:hover:bg-slate-800 rounded-lg text-slate-600 dark:text-slate-400 transition-all"
+            title="Schimbă Tema"
+          >
+            {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+          </button>
           {(role === 'MASTER' || role === 'ADMIN') && (
-            <button 
-              onClick={() => router.push('/cases')}
-              className="bg-purple-600/10 text-purple-500 hover:bg-purple-600/20 px-4 py-2 rounded-lg text-sm font-bold border border-purple-500/20 transition-all"
-            >
-              Dosare
-            </button>
+            <>
+              <button 
+                onClick={() => setIsCreating(true)}
+                className="bg-blue-600 text-white hover:bg-blue-500 px-4 py-2 rounded-lg text-sm font-bold shadow-lg shadow-blue-600/20 transition-all flex items-center gap-2"
+              >
+                <Plus className="w-4 h-4" /> Dosar Nou
+              </button>
+              <button 
+                onClick={() => router.push('/cases')}
+                className="bg-purple-600/10 text-purple-500 hover:bg-purple-600/20 px-4 py-2 rounded-lg text-sm font-bold border border-purple-500/20 transition-all"
+              >
+                Dosare
+              </button>
+            </>
           )}
           {role === 'ADMIN' && (
             <button 
@@ -162,13 +196,13 @@ export default function ForensicDashboard() {
         </div>
       </nav>
 
-      <div className="mb-8 bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-xl flex flex-col md:flex-row gap-4 items-end">
+      <div className="mb-8 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-6 rounded-2xl shadow-xl flex flex-col md:flex-row gap-4 items-end">
         <div className="flex-1 w-full">
-          <h2 className="text-sm font-bold text-slate-400 mb-4 tracking-widest uppercase">Dosar de lucru</h2>
+          <h2 className="text-sm font-bold text-slate-400 dark:text-slate-500 mb-4 tracking-widest uppercase">Dosar de lucru</h2>
           <select 
             value={selectedCaseId} 
             onChange={e => setSelectedCaseId(e.target.value)}
-            className="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-blue-500 text-sm appearance-none cursor-pointer hover:bg-slate-900 transition-colors"
+            className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-3 text-slate-900 dark:text-white focus:outline-none focus:border-blue-500 text-sm appearance-none cursor-pointer hover:bg-slate-100 dark:hover:bg-slate-900 transition-colors"
           >
             <option value="">-- Alege un dosar pentru a adăuga probe --</option>
             {cases.map((c: any) => (
@@ -188,15 +222,15 @@ export default function ForensicDashboard() {
 
       {selectedCaseId && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-12">
-          <label className="border-2 border-dashed border-slate-800 p-10 rounded-2xl flex flex-col items-center hover:border-blue-500 transition-all cursor-pointer bg-slate-900/30 group">
-            <Landmark className="mb-4 text-slate-500 group-hover:text-blue-500 transition-colors w-10 h-10" />
-            <span className="text-xs font-mono text-slate-400 group-hover:text-blue-400 tracking-widest font-bold">ÎNCARCĂ DOCUMENTE FISCALE</span>
+          <label className="border-2 border-dashed border-slate-200 dark:border-slate-800 p-10 rounded-2xl flex flex-col items-center hover:border-blue-500 transition-all cursor-pointer bg-white dark:bg-slate-900/30 group">
+            <Landmark className="mb-4 text-slate-400 dark:text-slate-500 group-hover:text-blue-500 transition-colors w-10 h-10" />
+            <span className="text-xs font-mono text-slate-400 dark:text-slate-500 group-hover:text-blue-600 dark:group-hover:text-blue-400 tracking-widest font-bold">ÎNCARCĂ DOCUMENTE FISCALE</span>
             <input type="file" multiple className="hidden" onChange={handleUpload} disabled={uploading} />
           </label>
           
-          <label className="border-2 border-dashed border-slate-800 p-10 rounded-2xl flex flex-col items-center hover:border-emerald-500 transition-all cursor-pointer bg-slate-900/30 group">
-            <Database className="mb-4 text-slate-500 group-hover:text-emerald-500 transition-colors w-10 h-10" />
-            <span className="text-xs font-mono text-slate-400 group-hover:text-emerald-400 tracking-widest font-bold">ÎNCARCĂ DOSAR COMPLET</span>
+          <label className="border-2 border-dashed border-slate-200 dark:border-slate-800 p-10 rounded-2xl flex flex-col items-center hover:border-emerald-500 transition-all cursor-pointer bg-white dark:bg-slate-900/30 group">
+            <Database className="mb-4 text-slate-400 dark:text-slate-500 group-hover:text-emerald-500 transition-colors w-10 h-10" />
+            <span className="text-xs font-mono text-slate-400 dark:text-slate-500 group-hover:text-emerald-600 dark:group-hover:text-emerald-400 tracking-widest font-bold">ÎNCARCĂ DOSAR COMPLET</span>
             {/* @ts-ignore */}
             <input type="file" webkitdirectory="" directory="" multiple className="hidden" onChange={handleUpload} disabled={uploading} />
           </label>
@@ -216,24 +250,24 @@ export default function ForensicDashboard() {
                     <h3 className="text-lg font-black uppercase tracking-tighter">
                       {queueStatus.is_llm_active ? 'Procesare în Pauză' : 'Coadă Procesare'}
                     </h3>
-                    <p className="text-xs text-slate-500 font-medium">
+                    <p className="text-xs text-slate-500 dark:text-slate-400 font-medium">
                       {queueStatus.is_llm_active ? 'Se eliberează resursele GPU pentru interogare LLM...' : 'Documentele sunt procesate în ordinea priorității.'}
                     </p>
                   </div>
                 </div>
                 
-                <div className="flex gap-8 text-center border-l border-slate-800 pl-8 h-full items-center">
+                <div className="flex gap-8 text-center border-l border-slate-200 dark:border-slate-800 pl-8 h-full items-center">
                   <div>
-                    <p className="text-[10px] font-bold text-slate-500 uppercase mb-1">Poziția Ta</p>
-                    <p className="text-2xl font-black text-white">{queueStatus.position || '-'}</p>
+                    <p className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase mb-1">Poziția Ta</p>
+                    <p className="text-2xl font-black text-slate-900 dark:text-white">{queueStatus.position || '-'}</p>
                   </div>
                   <div>
-                    <p className="text-[10px] font-bold text-slate-500 uppercase mb-1">Total Coadă</p>
-                    <p className="text-2xl font-black text-slate-400">{queueStatus.queue_total}</p>
+                    <p className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase mb-1">Total Coadă</p>
+                    <p className="text-2xl font-black text-slate-500 dark:text-slate-400">{queueStatus.queue_total}</p>
                   </div>
-                  <div className="bg-slate-950 px-4 py-2 rounded-xl border border-slate-800 shadow-inner">
-                    <p className="text-[10px] font-bold text-blue-500 uppercase mb-1">ETA Estimativ</p>
-                    <p className="text-xl font-black text-white">~{queueStatus.eta_minutes} <span className="text-[10px] text-slate-500">min</span></p>
+                  <div className="bg-white dark:bg-slate-950 px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-800 shadow-inner">
+                    <p className="text-[10px] font-bold text-blue-600 dark:text-blue-500 uppercase mb-1">ETA Estimativ</p>
+                    <p className="text-xl font-black text-slate-900 dark:text-white">~{queueStatus.eta_minutes} <span className="text-[10px] text-slate-400 dark:text-slate-500">min</span></p>
                   </div>
                 </div>
               </div>
@@ -242,13 +276,13 @@ export default function ForensicDashboard() {
 
           {docs.some(d => d.status !== 'COMPLETED' && d.status !== 'FAILED') && (
             <section>
-              <h2 className="text-xs font-bold text-slate-500 uppercase mb-4 tracking-widest">Procesare Live</h2>
+              <h2 className="text-xs font-bold text-slate-400 dark:text-slate-500 uppercase mb-4 tracking-widest">Procesare Live</h2>
               <div className="space-y-2">
                 {docs.filter(d => d.status !== 'COMPLETED' && d.status !== 'FAILED').map(doc => (
-                  <div key={doc.id} className="bg-slate-900 border border-slate-800 p-3 rounded-lg flex justify-between items-center">
-                    <span className="text-sm font-mono truncate max-w-md">{doc.filename}</span>
+                  <div key={doc.id} className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-3 rounded-lg flex justify-between items-center">
+                    <span className="text-sm font-mono truncate max-w-md text-slate-700 dark:text-slate-300">{doc.filename}</span>
                     <div className="flex items-center gap-3">
-                      <span className="text-[10px] text-blue-400 font-bold animate-pulse">{doc.status}</span>
+                      <span className="text-[10px] text-blue-600 dark:text-blue-400 font-bold animate-pulse">{doc.status}</span>
                       <Loader2 className="w-4 h-4 text-blue-500 animate-spin" />
                     </div>
                   </div>
@@ -258,22 +292,22 @@ export default function ForensicDashboard() {
           )}
 
           <section>
-            <h2 className="text-xs font-bold text-slate-500 uppercase mb-6 tracking-widest">Entități Identificate în Dosar</h2>
+            <h2 className="text-xs font-bold text-slate-400 dark:text-slate-500 uppercase mb-6 tracking-widest">Entități Identificate în Dosar</h2>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {entities.length === 0 && <p className="text-xs text-slate-600 italic">Nicio entitate extrasă încă.</p>}
+              {entities.length === 0 && <p className="text-xs text-slate-400 dark:text-slate-600 italic">Nicio entitate extrasă încă.</p>}
               {entities.map((e: any) => (
-                <div key={e.id} className="bg-slate-900 border border-slate-800 p-6 rounded-xl group hover:border-blue-500 transition-all border-l-4 border-l-blue-500/30 shadow-lg shadow-blue-500/5">
+                <div key={e.id} className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-6 rounded-xl group hover:border-blue-500 transition-all border-l-4 border-l-blue-500/30 shadow-lg shadow-blue-500/5">
                   <div className="flex justify-between items-start mb-4">
-                    {e.entity_type === 'FIRMA' ? <Building2 className="text-emerald-400" /> : <User className="text-sky-400" />}
-                    <span className="text-[10px] font-mono text-slate-600">ID: {e.id}</span>
+                    {e.entity_type === 'FIRMA' ? <Building2 className="text-emerald-500 dark:text-emerald-400" /> : <User className="text-sky-500 dark:text-sky-400" />}
+                    <span className="text-[10px] font-mono text-slate-400 dark:text-slate-600">ID: {e.id}</span>
                   </div>
-                  <h3 className="text-lg font-bold group-hover:text-blue-400 transition-colors">{e.official_name}</h3>
+                  <h3 className="text-lg font-bold text-slate-900 dark:text-white group-hover:text-blue-600 dark:group-hover:text-blue-400 transition-colors">{e.official_name}</h3>
                   <p className="text-xs font-mono text-slate-500 mb-6">{e.cui_cif_cnp || 'Identificator lipsă'}</p>
                   <div className="flex items-center gap-3">
-                    <div className="h-1 flex-1 bg-slate-800 rounded-full overflow-hidden">
+                    <div className="h-1 flex-1 bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden">
                       <div className="h-full bg-red-600" style={{ width: `${e.risk_score || 5}%` }}></div>
                     </div>
-                    <span className="text-[10px] font-black text-red-500">{e.risk_score || 0}% RISK</span>
+                    <span className="text-[10px] font-black text-red-600 dark:text-red-500">{e.risk_score || 0}% RISK</span>
                   </div>
                 </div>
               ))}
@@ -284,26 +318,26 @@ export default function ForensicDashboard() {
         <div className="space-y-8">
           {selectedCaseId && (
             <section>
-              <h2 className="text-xs font-bold text-slate-500 uppercase mb-4 tracking-widest flex items-center gap-2">
+              <h2 className="text-xs font-bold text-slate-400 dark:text-slate-500 uppercase mb-4 tracking-widest flex items-center gap-2">
                 <History className="w-4 h-4" /> Activitate Recentă
               </h2>
-              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 max-h-[500px] overflow-y-auto space-y-3 shadow-2xl">
-                {activityLogs.length === 0 && <p className="text-xs text-slate-600 text-center py-4 italic">Nicio activitate.</p>}
+              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-4 max-h-[500px] overflow-y-auto space-y-3 shadow-2xl">
+                {activityLogs.length === 0 && <p className="text-xs text-slate-400 dark:text-slate-600 text-center py-4 italic">Nicio activitate.</p>}
                 {activityLogs.map(log => (
-                  <div key={log.id} className="flex justify-between items-start border-b border-slate-800/50 pb-3 last:border-0 hover:bg-slate-800/10 transition-colors px-1 pt-1">
+                  <div key={log.id} className="flex justify-between items-start border-b border-slate-100 dark:border-slate-800/50 pb-3 last:border-0 hover:bg-slate-50 dark:hover:bg-slate-800/10 transition-colors px-1 pt-1">
                     <div className="flex items-start gap-3">
-                      <div className={`p-1.5 rounded-lg mt-0.5 ${log.action.includes('UPLOAD') ? 'bg-blue-500/10 text-blue-500' : 'bg-slate-800 text-slate-400'}`}>
+                      <div className={`p-1.5 rounded-lg mt-0.5 ${log.action.includes('UPLOAD') ? 'bg-blue-500/10 text-blue-600 dark:text-blue-500' : 'bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400'}`}>
                         {log.action.includes('UPLOAD') ? <FileText className="w-3 h-3" /> : <Clock className="w-3 h-3" />}
                       </div>
                       <div>
-                        <p className="text-xs font-bold text-slate-300">
-                          <span className="text-blue-400">@{log.username}</span>
+                        <p className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                          <span className="text-blue-600 dark:text-blue-400">@{log.username}</span>
                         </p>
-                        <p className="text-[10px] text-slate-400 mb-1">{log.action.toLowerCase().replace('_', ' ')}</p>
-                        <p className="text-[9px] text-slate-600 italic truncate max-w-[150px]">{log.details}</p>
+                        <p className="text-[10px] text-slate-500 dark:text-slate-400 mb-1">{log.action.toLowerCase().replace('_', ' ')}</p>
+                        <p className="text-[9px] text-slate-400 dark:text-slate-600 italic truncate max-w-[150px]">{log.details}</p>
                       </div>
                     </div>
-                    <span className="text-[8px] font-mono text-slate-700 whitespace-nowrap">{new Date(log.created_at).toLocaleTimeString()}</span>
+                    <span className="text-[8px] font-mono text-slate-400 dark:text-slate-700 whitespace-nowrap">{new Date(log.created_at).toLocaleTimeString('ro-RO')}</span>
                   </div>
                 ))}
               </div>
@@ -311,6 +345,48 @@ export default function ForensicDashboard() {
           )}
         </div>
       </div>
+
+      {/* MODAL CREARE DOSAR */}
+      {isCreating && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-slate-950/90 backdrop-blur-sm">
+          <div className="w-full max-w-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-8 shadow-2xl animate-in zoom-in-95 duration-200">
+            <div className="flex justify-between items-center mb-8">
+              <h2 className="text-2xl font-black text-slate-900 dark:text-white uppercase tracking-tighter">Creează Dosar Nou</h2>
+              <button onClick={() => setIsCreating(false)} className="p-2 hover:bg-slate-100 dark:hover:bg-white/5 rounded-full text-slate-500 transition-colors">
+                <X className="w-6 h-6" />
+              </button>
+            </div>
+            <form onSubmit={handleCreateCase} className="space-y-6">
+              <div>
+                <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Nume Investigație</label>
+                <input 
+                  autoFocus
+                  required
+                  value={newCase.name}
+                  onChange={(e) => setNewCase({...newCase, name: e.target.value})}
+                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3.5 text-sm font-bold text-slate-900 dark:text-white focus:outline-none focus:border-blue-500 transition-all"
+                  placeholder="Ex: Control Fiscal Octombrie 2024"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Descriere / Obiective</label>
+                <textarea 
+                  value={newCase.description}
+                  onChange={(e) => setNewCase({...newCase, description: e.target.value})}
+                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3.5 text-sm font-bold text-slate-900 dark:text-white focus:outline-none focus:border-blue-500 transition-all h-32 resize-none"
+                  placeholder="Detalii despre scopul analizei..."
+                />
+              </div>
+              <button 
+                type="submit"
+                className="w-full py-4 bg-blue-600 hover:bg-blue-500 rounded-xl text-sm font-black uppercase tracking-widest transition-all shadow-lg shadow-blue-600/20 text-white"
+              >
+                Lansează Dosarul
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

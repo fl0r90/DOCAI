@@ -6,11 +6,14 @@ import Cookies from 'js-cookie';
 import { 
   Shield, Users, Folder, FileText, Activity, 
   LogOut, LayoutDashboard, Database,
-  Cpu, HardDrive, Terminal, Zap, Thermometer, Clock, Server, Brain, RefreshCw, X
+  Cpu, HardDrive, Terminal, Zap, Thermometer, Clock, Server, Brain, RefreshCw, X,
+  Sun, Moon
 } from 'lucide-react';
 import { LineChart, Line, ResponsiveContainer, YAxis } from 'recharts';
+import { useTheme } from '../../lib/ThemeProvider';
 
 export default function Dashboard() {
+  const { theme, toggleTheme } = useTheme();
   const router = useRouter();
   const [user, setUser] = useState<any>(null);
   const [metrics, setMetrics] = useState<any>(null);
@@ -98,38 +101,42 @@ export default function Dashboard() {
   );
 
   return (
-    <div className="h-screen bg-slate-950 text-slate-200 font-sans flex overflow-hidden">
+    <div className="h-screen bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-200 font-sans flex overflow-hidden transition-colors duration-300">
       {/* SIDEBAR */}
-      <div className="w-72 bg-slate-900 border-r border-white/5 p-6 flex flex-col flex-shrink-0">
+      <div className="w-72 bg-slate-100 dark:bg-slate-900 border-r border-slate-200 dark:border-white/5 p-6 flex flex-col flex-shrink-0">
         <div className="flex items-center gap-3 mb-12 px-2">
           <div className="p-2 bg-indigo-600 rounded-xl shadow-lg shadow-indigo-900/40">
             <Zap className="w-6 h-6 text-white" />
           </div>
           <div>
-            <span className="text-xl font-black tracking-tighter text-white uppercase block leading-none">DocAI Admin</span>
-            <span title="Codat (prost) de Gemini ✨ si cfp90" className="cursor-help text-[9px] font-black text-indigo-500 uppercase tracking-[0.2em] mt-1 block">v0.1 ALPHA</span>
+            <span className="text-xl font-black tracking-tighter text-slate-900 dark:text-white uppercase block leading-none italic">DocAI Admin</span>
+            <span title="Codat (prost) de Gemini ✨ si cfp90" className="cursor-help text-[9px] font-black text-indigo-500 uppercase tracking-[0.2em] mt-1 block">v0.6.5 ALPHA</span>
           </div>
         </div>
 
         <nav className="flex-1 space-y-2">
-          <div className="px-4 py-3 bg-indigo-600/10 border border-indigo-600/20 rounded-xl text-indigo-400 flex items-center gap-3 font-bold text-sm">
-            <Activity className="w-4 h-4" /> System Health
+          <div className="px-4 py-3 bg-indigo-600/10 border border-indigo-600/20 rounded-xl text-indigo-600 dark:text-indigo-400 flex items-center gap-3 font-bold text-sm">
+            <Activity className="w-4 h-4" /> Starea Sistemului
           </div>
-          <button onClick={() => router.push('/dashboard/llm')} className="w-full px-4 py-3 hover:bg-white/5 rounded-xl text-slate-400 flex items-center gap-3 font-bold text-sm transition-all text-left">
+          <button onClick={() => router.push('/dashboard/llm')} className="w-full px-4 py-3 hover:bg-black/5 dark:hover:bg-white/5 rounded-xl text-slate-500 dark:text-slate-400 flex items-center gap-3 font-bold text-sm transition-all text-left">
             <Brain className="w-4 h-4" /> Configurație LLM
           </button>
-          <button onClick={() => router.push('/dashboard/updates')} className="w-full px-4 py-3 hover:bg-white/5 rounded-xl text-slate-400 flex items-center gap-3 font-bold text-sm transition-all text-left">
+          <button onClick={() => router.push('/dashboard/updates')} className="w-full px-4 py-3 hover:bg-black/5 dark:hover:bg-white/5 rounded-xl text-slate-500 dark:text-slate-400 flex items-center gap-3 font-bold text-sm transition-all text-left">
             <RefreshCw className="w-4 h-4" /> Actualizări & Backup
           </button>
-          <button onClick={() => router.push('/users')} className="w-full px-4 py-3 hover:bg-white/5 rounded-xl text-slate-400 flex items-center gap-3 font-bold text-sm transition-all text-left">
+          <button onClick={() => router.push('/users')} className="w-full px-4 py-3 hover:bg-black/5 dark:hover:bg-white/5 rounded-xl text-slate-500 dark:text-slate-400 flex items-center gap-3 font-bold text-sm transition-all text-left">
             <Users className="w-4 h-4" /> Management Useri
           </button>
-          <button onClick={() => router.push('/cases')} className="w-full px-4 py-3 hover:bg-white/5 rounded-xl text-slate-400 flex items-center gap-3 font-bold text-sm transition-all text-left border-t border-white/5 pt-6 mt-4">
+          <button onClick={() => router.push('/cases')} className="w-full px-4 py-3 hover:bg-black/5 dark:hover:bg-white/5 rounded-xl text-slate-500 dark:text-slate-400 flex items-center gap-3 font-bold text-sm transition-all text-left border-t border-slate-200 dark:border-white/5 pt-6 mt-4">
             <Folder className="w-4 h-4" /> Dosare Criminalistice
           </button>
         </nav>
 
-        <div className="mt-auto pt-6 border-t border-white/5">
+        <div className="mt-auto pt-6 border-t border-slate-200 dark:border-white/5 space-y-2">
+          <button onClick={toggleTheme} className="w-full px-4 py-3 bg-slate-200 dark:bg-white/5 hover:bg-slate-300 dark:hover:bg-white/10 rounded-xl text-slate-700 dark:text-slate-300 flex items-center gap-3 font-bold text-sm transition-all text-left">
+            {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+            {theme === 'dark' ? 'Tema Luminoasă' : 'Tema Întunecată'}
+          </button>
           <button onClick={handleLogout} className="w-full px-4 py-3 hover:bg-red-500/10 rounded-xl text-slate-500 hover:text-red-400 flex items-center gap-3 font-bold text-sm transition-all text-left">
             <LogOut className="w-4 h-4" /> Deconectare
           </button>
@@ -137,17 +144,17 @@ export default function Dashboard() {
       </div>
 
       {/* CONTENT AREA WITH SCROLLING */}
-      <div className="flex-1 overflow-y-auto custom-scrollbar bg-slate-950">
+      <div className="flex-1 overflow-y-auto custom-scrollbar bg-white dark:bg-slate-950 transition-colors duration-300">
         <div className="p-12 max-w-[1600px] mx-auto">
           <div className="mb-12">
-            <h1 className="text-4xl font-black text-white uppercase tracking-tight mb-2 tracking-tighter italic">Panou de Control</h1>
+            <h1 className="text-4xl font-black text-slate-900 dark:text-white uppercase tracking-tight mb-2 tracking-tighter italic">Panou de Control</h1>
             <p className="text-slate-500 font-medium italic">Monitorizarea infrastructurii de analiză forensic.</p>
           </div>
 
           {/* HARDWARE GRID */}
           <div className="grid grid-cols-4 gap-6 mb-12">
             {/* CPU */}
-            <div className="p-8 bg-slate-900/50 border border-white/5 rounded-3xl group relative overflow-hidden flex flex-col">
+            <div className="p-8 bg-white dark:bg-slate-900/50 border border-slate-200 dark:border-white/5 rounded-3xl group relative overflow-hidden flex flex-col transition-all">
               <div className="relative z-10">
                 <div className="flex justify-between items-start mb-4">
                   <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest flex items-center gap-2"><Cpu className="w-3 h-3"/> CPU</p>
@@ -156,7 +163,7 @@ export default function Dashboard() {
                   </span>
                 </div>
                 <div className="flex items-end gap-2 mb-2">
-                  <span className="text-5xl font-black text-white leading-none">{(metrics?.cpu?.usage || 0).toFixed(1)}%</span>
+                  <span className="text-5xl font-black text-slate-900 dark:text-white leading-none">{(metrics?.cpu?.usage || 0).toFixed(1)}%</span>
                 </div>
                 <p className="text-[10px] text-slate-500 font-bold uppercase truncate mb-4" title={metrics?.cpu?.name || 'N/A'}>{metrics?.cpu?.name || 'Procesor'}</p>
               </div>
@@ -165,11 +172,11 @@ export default function Dashboard() {
             </div>
 
             {/* RAM */}
-            <div className="p-8 bg-slate-900/50 border border-white/5 rounded-3xl group relative overflow-hidden flex flex-col">
+            <div className="p-8 bg-white dark:bg-slate-900/50 border border-slate-200 dark:border-white/5 rounded-3xl group relative overflow-hidden flex flex-col transition-all">
               <div className="relative z-10">
                 <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-4 flex items-center gap-2"><Server className="w-3 h-3"/> RAM</p>
                 <div className="flex items-end gap-2 mb-2">
-                  <span className="text-5xl font-black text-white leading-none">{(metrics?.ram?.percent || 0).toFixed(1)}%</span>
+                  <span className="text-5xl font-black text-slate-900 dark:text-white leading-none">{(metrics?.ram?.percent || 0).toFixed(1)}%</span>
                 </div>
                 <p className="text-[10px] text-slate-500 font-bold uppercase mb-4">{metrics?.ram?.free || 0}GB Liberi / {metrics?.ram?.total || 0}GB Total</p>
               </div>
@@ -178,7 +185,7 @@ export default function Dashboard() {
             </div>
 
             {/* GPU */}
-            <div className="p-8 bg-slate-900/50 border border-white/5 rounded-3xl group relative overflow-hidden flex flex-col">
+            <div className="p-8 bg-white dark:bg-slate-900/50 border border-slate-200 dark:border-white/5 rounded-3xl group relative overflow-hidden flex flex-col transition-all">
               <div className="relative z-10">
                 <div className="flex justify-between items-start mb-4">
                   <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest flex items-center gap-2"><Zap className="w-3 h-3"/> GPU</p>
@@ -187,7 +194,7 @@ export default function Dashboard() {
                   </span>
                 </div>
                 <div className="flex items-end gap-2 mb-2">
-                  <span className="text-5xl font-black text-white leading-none">{(metrics?.gpu?.usage || 0).toFixed(1)}%</span>
+                  <span className="text-5xl font-black text-slate-900 dark:text-white leading-none">{(metrics?.gpu?.usage || 0).toFixed(1)}%</span>
                 </div>
                 <div className="flex flex-col mb-4">
                   <p className="text-[10px] text-slate-500 font-bold uppercase truncate" title={metrics?.gpu?.name || 'N/A'}>{metrics?.gpu?.name || 'Placă Video'}</p>
@@ -199,11 +206,11 @@ export default function Dashboard() {
             </div>
 
             {/* STORAGE */}
-            <div className="p-8 bg-slate-900/50 border border-white/5 rounded-3xl group relative overflow-hidden flex flex-col">
+            <div className="p-8 bg-white dark:bg-slate-900/50 border border-slate-200 dark:border-white/5 rounded-3xl group relative overflow-hidden flex flex-col transition-all">
               <div className="relative z-10">
                 <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-4 flex items-center gap-2"><HardDrive className="w-3 h-3"/> Stocare</p>
                 <div className="flex items-end gap-2 mb-2">
-                  <span className="text-5xl font-black text-white leading-none">{(metrics?.disk?.percent || 0).toFixed(1)}%</span>
+                  <span className="text-5xl font-black text-slate-900 dark:text-white leading-none">{(metrics?.disk?.percent || 0).toFixed(1)}%</span>
                 </div>
                 <p className="text-[10px] text-slate-500 font-bold uppercase mb-4">{metrics?.disk?.free || 0}GB Disponibili / {metrics?.disk?.total || 0}GB</p>
               </div>
@@ -214,51 +221,51 @@ export default function Dashboard() {
           <div className="grid grid-cols-3 gap-8 pb-20">
             <div className="col-span-2 space-y-6">
               {/* OPERATIVE FLUX (NEW) */}
-              <div className="p-8 bg-slate-900 border border-indigo-500/20 rounded-3xl shadow-2xl shadow-indigo-900/10">
+              <div className="p-8 bg-white dark:bg-slate-900 border border-slate-200 dark:border-indigo-500/20 rounded-3xl shadow-xl dark:shadow-indigo-900/10 transition-all">
                 <div className="flex justify-between items-center mb-6">
-                  <h3 className="text-xs font-black text-indigo-400 uppercase tracking-[0.2em] flex items-center gap-2">
+                  <h3 className="text-xs font-black text-indigo-600 dark:text-indigo-400 uppercase tracking-[0.2em] flex items-center gap-2">
                     <Terminal className="w-4 h-4" /> Flux Operativ Consolidat
                   </h3>
                   <div className="flex items-center gap-2">
                     <div className="w-1.5 h-1.5 bg-indigo-500 rounded-full animate-pulse" />
-                    <span className="text-[10px] font-black text-slate-500 uppercase">Live Stream</span>
+                    <span className="text-[10px] font-black text-slate-400 dark:text-slate-500 uppercase">Live Stream</span>
                   </div>
                 </div>
-                <div className="bg-black/60 rounded-2xl p-6 font-mono text-[10px] h-[300px] overflow-y-auto custom-scrollbar border border-white/5">
+                <div className="bg-slate-50 dark:bg-black/60 rounded-2xl p-6 font-mono text-[10px] h-[300px] overflow-y-auto custom-scrollbar border border-slate-200 dark:border-white/5 shadow-inner">
                   {operativeLogs.length > 0 ? operativeLogs.map((log, i) => (
                     <div key={i} className="mb-1.5 flex gap-3 group">
-                      <span className={`flex-shrink-0 font-black px-1.5 py-0.5 rounded-[4px] ${
-                        log.service === 'WORKER' ? 'bg-blue-500/10 text-blue-400' :
-                        log.service === 'LLM' ? 'bg-fuchsia-500/10 text-fuchsia-400' :
-                        'bg-emerald-500/10 text-emerald-400'
+                      <span className={`flex-shrink-0 font-black px-1.5 py-0.5 rounded-[4px] text-[9px] ${
+                        log.service === 'WORKER' ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400' :
+                        log.service === 'LLM' ? 'bg-fuchsia-500/10 text-fuchsia-600 dark:text-fuchsia-400' :
+                        'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
                       }`}>
                         {log.service}
                       </span>
-                      <span className="text-slate-400 group-hover:text-slate-200 transition-colors">{log.message}</span>
+                      <span className="text-slate-600 dark:text-slate-400 group-hover:text-slate-900 dark:group-hover:text-slate-200 transition-colors font-medium">{log.message}</span>
                     </div>
                   )) : (
-                    <div className="h-full flex items-center justify-center text-slate-700 font-black uppercase tracking-widest italic">
+                    <div className="h-full flex items-center justify-center text-slate-300 dark:text-slate-700 font-black uppercase tracking-widest italic text-center">
                       Așteptare date din infrastructură...
                     </div>
                   )}
                 </div>
               </div>
 
-              <div className="p-8 bg-slate-900/50 border border-white/5 rounded-3xl">
+              <div className="p-8 bg-white dark:bg-slate-900/50 border border-slate-200 dark:border-white/5 rounded-3xl shadow-sm transition-all">
                 <h3 className="text-xs font-black text-slate-500 uppercase tracking-widest mb-6 flex items-center gap-2">
                   <Terminal className="w-4 h-4" /> Servicii Docker
                 </h3>
                 <div className="space-y-3">
                   {containers.map((c, i) => (
-                    <div key={i} className="flex items-center justify-between p-4 bg-slate-950 rounded-2xl border border-white/5 hover:border-white/10 transition-all group">
+                    <div key={i} className="flex items-center justify-between p-4 bg-slate-50 dark:bg-slate-950 rounded-2xl border border-slate-200 dark:border-white/5 hover:border-slate-300 dark:hover:border-white/10 transition-all group">
                       <div className="flex items-center gap-4">
                         <div className={`w-2 h-2 rounded-full ${c.status === 'running' ? 'bg-emerald-500 shadow-[0_0_10px_rgba(16,185,129,0.5)]' : 'bg-red-500'}`} />
                         <div>
-                          <p className="text-sm font-black text-white uppercase tracking-tight">{c.name}</p>
-                          <p className="text-[10px] text-slate-500 font-bold uppercase">{c.image}</p>
+                          <p className="text-sm font-black text-slate-900 dark:text-white uppercase tracking-tight">{c.name}</p>
+                          <p className="text-[10px] text-slate-400 dark:text-slate-500 font-bold uppercase">{c.image}</p>
                         </div>
                       </div>
-                      <button onClick={() => setSelectedLogs(c.name)} className="px-3 py-1.5 bg-slate-800 hover:bg-white/10 rounded-lg text-[10px] font-black uppercase tracking-widest text-slate-400 transition-all opacity-0 group-hover:opacity-100">Live Logs</button>
+                      <button onClick={() => setSelectedLogs(c.name)} className="px-3 py-1.5 bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-white/10 rounded-lg text-[10px] font-black uppercase tracking-widest text-slate-600 dark:text-slate-400 transition-all opacity-0 group-hover:opacity-100">Live Logs</button>
                     </div>
                   ))}
                 </div>
@@ -266,18 +273,18 @@ export default function Dashboard() {
             </div>
 
             <div className="space-y-6">
-              <div className="p-8 bg-slate-900/50 border border-white/5 rounded-3xl">
+              <div className="p-8 bg-white dark:bg-slate-900/50 border border-slate-200 dark:border-white/5 rounded-3xl shadow-sm transition-all">
                 <h3 className="text-xs font-black text-slate-500 uppercase tracking-widest mb-6 flex items-center gap-2">
                   <Clock className="w-4 h-4" /> Audit Securitate
                 </h3>
                 <div className="space-y-4">
                   {audit.map((log, i) => (
-                    <div key={i} className="flex flex-col gap-1 pb-4 border-b border-white/5 last:border-0">
+                    <div key={i} className="flex flex-col gap-1 pb-4 border-b border-slate-100 dark:border-white/5 last:border-0">
                       <div className="flex justify-between items-center">
-                        <span className="text-[10px] font-black text-indigo-400 uppercase tracking-widest">{log.action}</span>
-                        <span className="text-[9px] font-bold text-slate-600">{new Date(log.created_at).toLocaleTimeString()}</span>
+                        <span className="text-[10px] font-black text-indigo-600 dark:text-indigo-400 uppercase tracking-widest">{log.action}</span>
+                        <span className="text-[9px] font-bold text-slate-400 dark:text-slate-600">{new Date(log.created_at).toLocaleTimeString()}</span>
                       </div>
-                      <p className="text-xs font-bold text-slate-300">{log.username}</p>
+                      <p className="text-xs font-bold text-slate-800 dark:text-slate-300">{log.username}</p>
                       <p className="text-[10px] text-slate-500 italic line-clamp-1 pr-4">
                         {typeof log.details === 'object' ? JSON.stringify(log.details) : log.details}
                       </p>

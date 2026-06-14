@@ -1,0 +1,121 @@
+version: '3.8'
+
+networks:
+  forensic_net:
+    driver: bridge
+  access_net:
+    driver: bridge
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: forensic-db
+    networks: [forensic_net]
+    volumes:
+      - ./data/postgres_data:/var/lib/postgresql/data
+      - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh
+    environment:
+      - POSTGRES_USER=forensic_admin
+      - POSTGRES_PASSWORD=supersecret_dgx_password
+      - POSTGRES_DB=forensic_admin
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: forensic-redis
+    networks: [forensic_net]
+    restart: unless-stopped
+
+  neo4j:
+    image: neo4j:5-community
+    container_name: forensic-neo4j
+    networks: [forensic_net]
+    environment:
+      - NEO4J_AUTH=neo4j/supersecret_dgx_password
+      - NEO4J_PLUGINS=["apoc"]
+    volumes:
+      - ./data/neo4j_data:/data
+    restart: unless-stopped
+
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: forensic-vllm
+    runtime: nvidia
+    networks: [forensic_net]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    command: >
+      casperhansen/deepseek-r1-distill-qwen-32b-awq
+      --kv-cache-dtype fp8
+      --max-model-len 65536
+      --gpu-memory-utilization 0.9
+      --trust-remote-code
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  backend:
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: forensic-backend
+    runtime: nvidia
+    networks: [forensic_net, access_net]
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONPATH=/app
+      - AUTH_DATABASE_URL=postgresql://forensic_admin:supersecret_dgx_password@db:5432/auth_db
+      - FORENSIC_DATABASE_URL=postgresql://forensic_admin:supersecret_dgx_password@db:5432/forensic_db
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=supersecret_dgx_password
+      - REDIS_URL=redis://redis:6379/0
+      - VLLM_URL=http://vllm:8000/v1
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - ./backend:/app
+      - ./shared_uploads:/app/uploads
+    depends_on:
+      - db
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: forensic-worker
+    runtime: nvidia
+    networks: [forensic_net]
+    command: python3 -m worker.tasks
+    environment:
+      - PYTHONPATH=/app
+      - AUTH_DATABASE_URL=postgresql://forensic_admin:supersecret_dgx_password@db:5432/auth_db
+      - FORENSIC_DATABASE_URL=postgresql://forensic_admin:supersecret_dgx_password@db:5432/forensic_db
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=supersecret_dgx_password
+      - REDIS_URL=redis://redis:6379/0
+      - VLLM_URL=http://vllm:8000/v1
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - ./backend:/app
+      - ./shared_uploads:/app/uploads
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: forensic-frontend
+    networks: [access_net]
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    restart: unless-stopped

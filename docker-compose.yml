@@ -18,7 +18,7 @@ services:
       - POSTGRES_DB=forensic_admin
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U forensic_admin -d postgres"]
+      test: ["CMD-SHELL", "pg_isready -U forensic_admin -d forensic_db"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -50,15 +50,20 @@ services:
   llm:
     image: ollama/ollama:latest
     container_name: v2-llm-1
+    runtime: nvidia
     networks: [forensic_net]
     volumes:
       - ./models:/root/.ollama
     ports:
       - "11440:11434"
     environment:
-      - OLLAMA_KEEP_ALIVE=-1
+      - OLLAMA_KEEP_ALIVE=30m
       - OLLAMA_NUM_PARALLEL=1
       - OLLAMA_MAX_LOADED_MODELS=1
+      - OLLAMA_FLASH_ATTENTION=1
+      - OLLAMA_KV_CACHE_TYPE=q8_0
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
     deploy:
       resources:
         reservations:
@@ -69,13 +74,17 @@ services:
     restart: unless-stopped
 
   backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     image: v2-backend:latest
     container_name: v2-backend
+    runtime: nvidia
     networks: [forensic_net, access_net]
     ports:
       - "8000:8000"
     environment:
-      - PYTHONPATH=/app/backend
+      - PYTHONPATH=/app
       - AUTH_DATABASE_URL=postgresql://forensic_admin:supersecret_dgx_password@db:5432/auth_db
       - FORENSIC_DATABASE_URL=postgresql://forensic_admin:supersecret_dgx_password@db:5432/forensic_db
       - NEO4J_URI=bolt://neo4j:7687
@@ -83,15 +92,22 @@ services:
       - NEO4J_PASSWORD=supersecret_dgx_password
       - REDIS_URL=redis://redis:6379/0
       - HF_HOME=/app/ocr_cache/huggingface
-      - HF_HUB_OFFLINE=1
+      - HF_HUB_OFFLINE=0
+      - TRANSFORMERS_OFFLINE=0
       - RAPIDOCR_CACHE=/app/ocr_cache/rapidocr
       - TORCH_HOME=/app/ocr_cache/torch
       - OLLAMA_URL=http://llm:11434
+      - VLLM_URL=http://vllm:8000/v1
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
     volumes:
+      - ./backend:/app
       - ./ocr_cache:/app/ocr_cache
       - /var/run/docker.sock:/var/run/docker.sock
       - ./shared_uploads:/app/uploads
       - ./shared_data:/app/data
+      - ./backups:/app/backups
+      - ./models:/app/ollama_models
     deploy:
       resources:
         reservations:
@@ -105,12 +121,16 @@ services:
     restart: unless-stopped
 
   worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     image: v2-worker:latest
     container_name: v2-worker
+    runtime: nvidia
     networks: [forensic_net]
     command: python3 -m worker.tasks
     environment:
-      - PYTHONPATH=/app/backend
+      - PYTHONPATH=/app
       - AUTH_DATABASE_URL=postgresql://forensic_admin:supersecret_dgx_password@db:5432/auth_db
       - FORENSIC_DATABASE_URL=postgresql://forensic_admin:supersecret_dgx_password@db:5432/forensic_db
       - NEO4J_URI=bolt://neo4j:7687
@@ -118,15 +138,21 @@ services:
       - NEO4J_PASSWORD=supersecret_dgx_password
       - REDIS_URL=redis://redis:6379/0
       - HF_HOME=/app/ocr_cache/huggingface
-      - HF_HUB_OFFLINE=1
+      - HF_HUB_OFFLINE=0
+      - TRANSFORMERS_OFFLINE=0
       - RAPIDOCR_CACHE=/app/ocr_cache/rapidocr
       - TORCH_HOME=/app/ocr_cache/torch
       - OLLAMA_URL=http://llm:11434
+      - VLLM_URL=http://vllm:8000/v1
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
     volumes:
+      - ./backend:/app
       - ./ocr_cache:/app/ocr_cache
       - /var/run/docker.sock:/var/run/docker.sock
       - ./shared_uploads:/app/uploads
       - ./shared_data:/app/data
+      - ./backups:/app/backups
     deploy:
       resources:
         reservations:
@@ -145,9 +171,40 @@ services:
     networks: [access_net]
     ports:
       - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
     environment:
       - NEXT_PUBLIC_API_URL=http://localhost:8000
     command: npm run dev -- -H 0.0.0.0
     depends_on:
       - backend
     restart: unless-stopped
+
+#  vllm:
+#    build:
+#      context: .
+#      dockerfile: Dockerfile.vllm
+#    container_name: v2-vllm
+#    runtime: nvidia
+#    networks: [forensic_net]
+#    ports:
+#      - "8001:8000"
+#    volumes:
+#      - ./models/hf_local:/root/.cache/huggingface
+#      - ./backend:/app
+#    environment:
+#      - HF_HUB_OFFLINE=0
+#      - NVIDIA_VISIBLE_DEVICES=all
+#      - PYTORCH_ALLOC_CONF=expandable_segments:True
+#    entrypoint: ["python3", "/app/vllm_server.py"]
+#    command: []
+#    deploy:
+#      resources:
+#        reservations:
+#          devices:
+#            - driver: nvidia
+#              count: all
+#              capabilities: [gpu]
+#    restart: unless-stopped

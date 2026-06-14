@@ -1,209 +1,201 @@
 import os
-import requests
 import json
 import re
-import time
-import redis
-from ..core.config import get_llm_config
+import asyncio
+import uuid
+import requests
+from typing import Dict, Any, List
+from .llm_service import LLMService
+from ..database import ForensicSessionLocal
+from .. import models
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://llm:11434")
-CHUNK_SIZE = 1500 
 
-redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
-r = redis.from_url(redis_url)
+def clean_val(val):
+    if not val: return 0.0
+    # Curățare robustă pentru formate financiare (ex: 1.234,56 sau 1,234.56)
+    val = str(val).strip().replace(" ", "")
+    if not val: return 0.0
+    
+    # Detecție format: dacă avem și punct și virgulă
+    if ',' in val and '.' in val:
+        # Verificăm care e ultimul (cel zecimal)
+        if val.rfind(',') > val.rfind('.'):
+            # Format European: 1.234,56
+            val = val.replace(".", "").replace(",", ".")
+        else:
+            # Format US: 1,234.56
+            val = val.replace(",", "")
+    elif ',' in val:
+        # Doar virgulă: 500,00 -> 500.00
+        # Dar atenție la formatul 1,234 (fără zecimale, unde virgula e mii)
+        # Heuristică: dacă sunt 3 cifre după virgulă la final, probabil e separator de mii
+        if re.search(r',\d{3}$', val):
+            val = val.replace(",", "")
+        else:
+            val = val.replace(",", ".")
+            
+    try: return float(val)
+    except: return 0.0
 
-def _unload_all_models():
-    """Golește complet VRAM-ul pentru a face loc următorului model."""
+def _unload_ollama():
+    """VRAM Marshalling: Îi spunem Ollama să elibereze memoria pentru Docling."""
     try:
-        res = requests.get(f"{OLLAMA_URL}/api/ps")
+        print("[*] VRAM Marshalling: Detecție și eliberare modele Ollama...")
+        # 1. Încercăm să obținem lista de modele active din Ollama
+        res = requests.get(f"{OLLAMA_URL}/api/ps", timeout=5)
         if res.status_code == 200:
-            for m in res.json().get("models", []):
-                requests.post(f"{OLLAMA_URL}/api/generate", json={"model": m['name'], "keep_alive": 0}, timeout=5)
-        print("[*] VRAM Marshalling: Memorie video eliberată.")
-    except Exception as e:
-        print(f"[!] Eroare eliberare VRAM: {e}")
-
-def _send_to_ollama(model: str, prompt: str, timeout: int, is_json: bool = False, keep_warm: bool = True):
-    """Trimite cererea și extrage JSON-ul manual pentru stabilitate maximă."""
-    try:
-        safe_prompt = "".join(c for c in prompt if c.isprintable() or c in "\n\r\t")
-        keep_alive = 300 if keep_warm else 0
-        payload = {
-            "model": model, 
-            "prompt": safe_prompt, 
-            "stream": False, 
-            "options": {"temperature": 0.01}, # Temperatura minima pentru structura rigida
-            "keep_alive": keep_alive
-        }
-        if is_json:
-            payload["format"] = "json"
-            
-        res = requests.post(f"{OLLAMA_URL}/api/generate", json=payload, timeout=timeout)
-        res.raise_for_status()
-        raw = res.json().get("response", "")
-        if not is_json: return raw
+            models_info = res.json().get("models", [])
+            for m in models_info:
+                m_name = m.get("name")
+                if m_name:
+                    print(f"[*] Descărcare model activ: {m_name}")
+                    requests.post(f"{OLLAMA_URL}/api/generate", json={"model": m_name, "keep_alive": 0}, timeout=5)
         
-        # 1. Curățare zgomot (think tags)
-        clean = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL)
-        
-        # 2. Sanitizare agresivă JSON (ghilimele invalide în descrieri)
-        # Căutăm câmpul "descriere": "..." și curățăm ghilimelele duble interne
-        def sanitize_json_string(match):
-            key_val = match.group(0)
-            if '"descriere":' in key_val or '"valoare":' in key_val:
-                # Extragem textul dintre prima și ultima ghilimea de valoare
-                parts = key_val.split('": "', 1)
-                if len(parts) == 2:
-                    content = parts[1].rsplit('"', 1)[0]
-                    # Înlocuim ghilimelele duble interne cu simple
-                    sanitized_content = content.replace('"', "'")
-                    return f'"{parts[0]}": "{sanitized_content}"'
-            return key_val
-
-        # Regex pentru a găsi perechi cheie-valoare string
-        sanitized_json = re.sub(r'"[^"]+":\s*"[^"]*"', sanitize_json_string, clean)
-
+        # 2. Descarcă și modelele din configurație ca fallback
+        from ..core.config import get_llm_config
         try:
-            return json.loads(sanitized_json)
-        except:
-            # Ultimul resort: json.loads pe textul curățat de caractere de control
-            try:
-                final_clean = "".join(c for c in clean if ord(c) >= 32 or c in "\n\r\t")
-                return json.loads(final_clean)
-            except: pass
-        return {}
-    except Exception as e:
-        print(f"[-] AI Error ({model}): {e}")
-        return {} if is_json else ""
-
-def classify_document_with_ai(text: str, model: str):
-    if r.exists("llm_active_session"):
-        _unload_all_models()
-        return "ALTUL"
-    sample = text[:4000]
-    prompt = f"""### System:
-Expert Document Classifier.
-Identify category: FACTURA, CONTRACT, BALANTA, OP, DISPOZITIV_MOBIL, ALTUL.
-### User:
-TEXT: {sample}
-Return ONLY the category name.
-### Assistant:
-"""
-    category = _send_to_ollama(model, prompt, 300, keep_warm=True)
-    return str(category).strip().upper()
-
-def extract_forensic_data(full_text: str, filename: str, doc_id: int, current_metadata: dict = None, start_segment: int = 0):
-    """Extracție de înaltă precizie cu controlul integrității (CRC)."""
-    config = get_llm_config()
-    _unload_all_models()
-    
-    doc_type = "ALTUL"
-    if current_metadata and current_metadata.get("doc_type"):
-        doc_type = current_metadata["doc_type"]
-    else:
-        doc_type = classify_document_with_ai(full_text, config["active_model"])
-    
-    is_tabular = doc_type in ["FACTURA", "BALANTA", "OP"]
-    extract_model = config["specialist_tabular"] if is_tabular else config["specialist_narrative"]
-    
-    text_chunks = [full_text[i:i + CHUNK_SIZE] for i in range(0, len(full_text), CHUNK_SIZE)]
-    total_segments = len(text_chunks)
-    
-    if not current_metadata:
-        consolidated = {
-            "doc_type": doc_type,
-            "data_document": "",
-            "graph_data": {"entitati": [], "relatii": []},
-            "financial_data": [],
-            "failed_segments": []
-        }
-    else:
-        consolidated = current_metadata
-        if "graph_data" not in consolidated: consolidated["graph_data"] = {"entitati": [], "relatii": []}
-        if "financial_data" not in consolidated: consolidated["financial_data"] = []
-        if "failed_segments" not in consolidated: consolidated["failed_segments"] = []
-    
-    print(f"[*] Lansare Ingestie Forensic (CRC Active) - Model: {extract_model} - Segmente: {total_segments}")
-    
-    for idx in range(start_segment, total_segments):
-        if r.exists("llm_active_session"):
-            _unload_all_models()
-            return {"doc_type": doc_type, "metadata": consolidated, "next_segment": idx, "is_finished": False, "total_segments": total_segments}
-
-        chunk = text_chunks[idx]
-        print(f"[*] Analiza Segment {idx+1}/{total_segments}...")
-        
-        system_msg = f"Expert Forensic Auditor. Misiune: Extracție structurată (JSON) din segment de document tip {doc_type}."
-        user_msg = f"""Obiectiv: Extrage toate entitățile și tranzacțiile financiare identificate.
-Schema JSON obligatorie:
-{{
-    "data_document": "YYYY-MM-DD",
-    "entitati": [{{"id": "e1", "tip_entitate": "Persoana|Firma|IBAN|Telefon", "valoare": "Value", "rol": "Context"}}],
-    "tranzactii": [{{"descriere": "Detaliu tranzacție", "suma": 0.0, "valuta": "RON"}}]
-}}
-Fragment Text:
-{chunk}"""
-
-        # Format universal de prompt (System/User/Assistant)
-        prompt = f"### System:\n{system_msg}\n\n### User:\n{user_msg}\n\n### Assistant:\n"
-
-        segment_data = None
-        for attempt in range(2): # 2 încercări total
-            try:
-                segment_data = _send_to_ollama(extract_model, prompt, 1200, is_json=True, keep_warm=True)
-                if segment_data and (segment_data.get("tranzactii") or segment_data.get("entitati") or "data_document" in segment_data):
-                    break
-                print(f"[?] Segment {idx+1} invalid. Re-incercare {attempt+1}...")
-                time.sleep(2)
-            except Exception as e:
-                print(f"[!] Tentativa {attempt+1} esuata pentru {idx+1}: {e}")
-                time.sleep(3)
-
-        if not segment_data:
-            print(f"[!] ESEC DEFINITIV SEGMENT {idx+1}")
-            consolidated["failed_segments"].append({"idx": idx, "error": "AI Timeout/Invalid JSON"})
-            continue
-
-        try:
-            if segment_data.get("data_document"): consolidated["data_document"] = segment_data["data_document"]
-            
-            for ent in segment_data.get("entitati", []):
-                val = ent.get("valoare") or ent.get("nume") or ent.get("name")
-                tip = ent.get("tip_entitate", "")
-                if not val: continue
-                if tip == "IBAN" and re.match(r'^[0-9.,-]+$', str(val)): continue
-                if not any(ex["valoare"] == val for ex in consolidated["graph_data"]["entitati"]):
-                    ent["valoare"] = val
-                    consolidated["graph_data"]["entitati"].append(ent)
-            
-            for rel in segment_data.get("relatii", []):
-                consolidated["graph_data"]["relatii"].append(rel)
-                
-            for trans in segment_data.get("tranzactii", []):
-                consolidated["financial_data"].append(trans)
-                
+            cfg = get_llm_config()
+            models_to_unload = [
+                cfg.get("active_model"), 
+                cfg.get("specialist_narrative"), 
+                cfg.get("specialist_tabular"),
+                "gemma4:e4b"
+            ]
+            for m_name in filter(None, models_to_unload):
+                requests.post(f"{OLLAMA_URL}/api/generate", json={"model": m_name, "keep_alive": 0}, timeout=5)
         except Exception as e:
-            print(f"[!] ESEC SEGMENT {idx+1}: {e}")
-            consolidated["failed_segments"].append({"idx": idx, "error": str(e)})
-        
-        r.set(f"doc_progress_{doc_id}", json.dumps({"metadata": consolidated, "last_idx": idx}))
+            print(f"[!] Eroare la citirea configurării pentru descărcare LLM: {e}")
+    except Exception as e:
+        print(f"[!] Eroare generală VRAM Marshalling: {e}")
 
-    _unload_all_models()
-    summary_prompt = f"""### System:
-Expert Forensic Auditor.
-Misiune: Generare rezumat executiv, tehnic și concis în ROMÂNĂ.
-### User:
-Document: {filename}
-Date Extrase: {json.dumps(consolidated)}
-### Assistant:
-"""
-    summary = _send_to_ollama(config["specialist_narrative"], summary_prompt, 300, keep_warm=False)
+def _save_transaction_live(doc_id: int, data: str, desc: str, suma: float):
+    """Salvează imediat tranzacția în DB."""
+    db = ForensicSessionLocal()
+    try:
+        pg_id = str(uuid.uuid4())
+        new_item = models.FinancialItem(
+            id=pg_id,
+            document_id=doc_id,
+            transaction_date=str(data),
+            description=str(desc),
+            amount=suma,
+            currency="RON"
+        )
+        db.add(new_item)
+        db.commit()
+    except Exception as e:
+        print(f"[!] Eroare DB Live: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+async def extract_entities_from_table(md_content: str, llm: LLMService, context: str = "", model: str = "gemma4:e4b") -> Dict:
+    """Extracție AGNOSTICĂ de entități din tabele Markdown."""
+    prompt = f"""[INST] You are a Forensic Data Expert. Analyze the following table and extract all entities.
+CONTEXT: {context}
+
+Return ONLY valid JSON in this exact structure:
+{{
+    "entities": [
+        {{"valoare": "Nume/CUI/IBAN", "tip_entitate": "PERSOANA|FIRMA|IBAN|CUI", "rol": "ex: Participant, Instructor, Beneficiar"}}
+    ],
+    "metadata": {{
+        "table_type": "ex: Attendance List, Bank Statement, Invoice",
+        "total_rows": 20
+    }}
+}}
+RULES:
+1. If the table contains people (Attendance/Participants), extract them as PERSOANA.
+2. If it contains financial data, extract the parties involved.
+3. Be precise with names. Clean any noise.
+
+TABLE CONTENT:
+{md_content}
+[/INST]"""
+    try:
+        result = await asyncio.wait_for(llm.generate(prompt, model, is_json=True), timeout=120.0)
+        return result
+    except Exception as e:
+        print(f"[!] Eroare LLM Extracție Tabel Agnostic: {e}")
+        return {"entities": []}
+
+async def extract_forensic_data(layout_data: Dict, filename: str = "", doc_id: int = 0, current_metadata: dict = None, start_segment: int = 0):
+    """Procesare HIBRIDA AGNOSTICA cu VRAM Marshalling si Scriere Live."""
+    import redis
+    from .entity_resolver import save_entities_to_db # Importăm salvatorul robust
+    from ..core.config import get_llm_config
     
-    r.delete(f"doc_progress_{doc_id}")
-    return {
-        "doc_type": doc_type, "metadata": consolidated, 
-        "graph_data": consolidated["graph_data"],
-        "summary": summary, "is_finished": True,
-        "total_segments": total_segments,
-        "failed_segments": consolidated["failed_segments"]
+    r = redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
+    llm = LLMService()
+    
+    cfg = get_llm_config()
+    model = cfg.get("specialist_tabular") or cfg.get("active_model") or "gemma4:e4b"
+    
+    # Contextul global pentru a ajuta LLM-ul să înțeleagă rolurile
+    global_context = layout_data.get("chunks", [{}])[0].get("text", "")[:500] if isinstance(layout_data, dict) else ""
+
+    res = {
+        "doc_type": "HIBRID_AGNOSTIC_V3",
+        "financial_data": [],
+        "graph_data": {"entitati": [], "relatii": []},
+        "segment_summaries": []
     }
+
+    items = layout_data.get("items", []) if isinstance(layout_data, dict) else [{"type": "TEXT", "content": layout_data}]
+    total_items = len(items)
+    
+    print(f"[*] Ingestie AGNOSTICA Live ({filename}) - {total_items} elemente.")
+
+    for idx, item in enumerate(items):
+        # Update UI Status
+        r.set(f"doc_progress_{doc_id}", json.dumps({
+            "status": "PROCESSING",
+            "percent": round((idx / total_items) * 100, 1),
+            "message": f"Analiză {item['type']} ({idx+1}/{total_items})"
+        }))
+
+        if item["type"] in ["TABLE", "TABLE_PART"]:
+            # Extracție AGNOSTICĂ din tabel
+            table_res = await extract_entities_from_table(item["content"], llm, context=global_context, model=model)
+            
+            # Mapăm rezultatele în formatul acceptat de save_entities_to_db
+            formatted_data = {
+                "entitati": [
+                    {"nume": e["valoare"], "rol": e["rol"], "tip": e["tip_entitate"]} 
+                    for e in table_res.get("entities", [])
+                ]
+            }
+            # Salvare imediată în SQL/Neo4j
+            save_entities_to_db(formatted_data, doc_id)
+            
+            # Păstrăm și în obiectul de retur pentru metadate doc
+            res["graph_data"]["entitati"].extend(table_res.get("entities", []))
+
+        elif item["type"] == "TEXT":
+            text = item["content"]
+            if len(text) > 100:
+                try:
+                    prompt = f"""### System:
+Ești un Expert Analyst Forensic. Extrage Entități și Relații.
+Returnează UNICUL obiect JSON valid:
+{{
+    "entitati": [
+        {{"nume": "...", "tip": "FIRMA|PERSOANA|IBAN|CUI", "rol": "..."}}
+    ]
+}}
+### User:
+TEXT: {text[:3000]}
+"""
+                    ai_res = await asyncio.wait_for(llm.generate(prompt, model, is_json=True), timeout=180.0)
+                    if ai_res:
+                        save_entities_to_db(ai_res, doc_id)
+                        res["graph_data"]["entitati"].extend(ai_res.get("entitati", []))
+                except: pass
+
+    await llm.close()
+    return {"metadata": res, "is_finished": True}
+
+
+    await llm.close()
+    return {"metadata": res, "is_finished": True}

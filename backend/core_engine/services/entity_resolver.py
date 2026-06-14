@@ -2,6 +2,21 @@ from sqlalchemy.orm import Session
 from core_engine.models import Document, MasterEntity, DocumentEntityLink, FinancialItem, DocumentChunk
 from core_engine.database import SessionLocal
 import re
+import uuid
+
+def normalize_entity_name(name: str) -> str:
+    """Normalizează denumirile de firme pentru deduplicare robustă."""
+    if not name: return ""
+    name = str(name).upper()
+    # Eliminăm prefixe/sufixe legale
+    for token in [" S.R.L.", " SRL", " S.A.", " SA", " S.C. ", " SC ", " INC.", " LTD."]:
+        name = name.replace(token, "")
+    if name.startswith("SC "): name = name[3:]
+    if name.startswith("S.C. "): name = name[5:]
+    # Eliminăm caractere speciale și spații multiple
+    name = re.sub(r'[^A-Z0-9]', ' ', name)
+    name = re.sub(r'\s+', ' ', name).strip()
+    return name
 
 def save_entities_to_db(extracted_json: dict, doc_id: int = None):
     """
@@ -50,10 +65,9 @@ def save_entities_to_db(extracted_json: dict, doc_id: int = None):
                 db.commit() # Salvăm parțial
                 print(f"[*] Batch {i//10 + 1} de vectori salvat.")
 
-        # 3. Entități (Robust mapping)
+        # 3. Entități (Robust mapping & Deduplicare inteligentă)
         entitati = extracted_json.get("entitati", [])
         for e in entitati:
-            # Încercăm toate variantele posibile de chei
             nume = e.get("nume") or e.get("full_legal_name") or e.get("name")
             if not nume or nume in ["...", "N/A", "Not specified"]: continue
 
@@ -61,14 +75,27 @@ def save_entities_to_db(extracted_json: dict, doc_id: int = None):
             rol = e.get("rol") or e.get("role") or e.get("rol_in_document")
             adresa = e.get("adresa") or e.get("full_address") or e.get("address")
 
-            # Evităm duplicatele în master_entities
+            # Evităm duplicatele în master_entities folosind CUI și normalizarea numelui
             exist = None
             if cui:
+                # 1. Căutare sigură după CUI
                 exist = db.query(MasterEntity).filter(MasterEntity.cui_cif_cnp == str(cui)).first()
-            if not exist:
-                exist = db.query(MasterEntity).filter(MasterEntity.official_name == nume).first()
             
             if not exist:
+                # 2. Căutare fuzzy după numele normalizat
+                norm_name = normalize_entity_name(nume)
+                if len(norm_name) > 3: # Nu căutăm firme cu 3 litere (prea multe false pozitive)
+                    exist = db.query(MasterEntity).filter(MasterEntity.official_name.ilike(f"%{norm_name}%")).first()
+                
+                # 2b. LOGICĂ NOUĂ: Verificare permutări pentru persoane
+                if not exist and len(norm_name.split()) == 2:
+                    # Dacă numele are exact 2 cuvinte (Nume Prenume), încercăm să le inversăm
+                    parts = norm_name.split()
+                    reversed_name = f"{parts[1]} {parts[0]}"
+                    exist = db.query(MasterEntity).filter(MasterEntity.official_name.ilike(f"%{reversed_name}%")).first()
+            
+            if not exist:
+                # 3. Nu există în baza de date, cream una nouă
                 exist = MasterEntity(
                     official_name=nume,
                     cui_cif_cnp=str(cui) if cui else None,
@@ -78,7 +105,7 @@ def save_entities_to_db(extracted_json: dict, doc_id: int = None):
                 db.add(exist)
                 db.flush() # Pentru a genera ID-ul
 
-            # Creăm legătura
+            # Creăm legătura cu documentul curent
             link = DocumentEntityLink(document_id=doc_id, entity_id=exist.id, role=rol)
             db.add(link)
 
@@ -90,6 +117,7 @@ def save_entities_to_db(extracted_json: dict, doc_id: int = None):
             
             suma = it.get("suma") or it.get("amount") or it.get("suma_totala")
             new_it = FinancialItem(
+                id=str(uuid.uuid4()),
                 document_id=doc_id,
                 description=desc,
                 amount=float(suma) if suma else 0.0

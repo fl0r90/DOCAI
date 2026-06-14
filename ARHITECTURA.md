@@ -1,40 +1,66 @@
-# Arhitectură Tehnică - Forensic DocAI V2
+# Arhitectură Tehnică - Forensic DocAI v0.6.5 ALPHA
 
-## 1. Infrastructură și Servicii (Stabilizat)
-- **Networking:** S-a trecut de la IP-uri statice hardcodate la **rezoluție DNS prin nume de servicii** (ex: `db`, `redis`, `llm`, `neo4j`). Această schimbare previne blocarea conexiunilor la repornirea containerelor (unde IP-urile se pot schimba/inversa).
-- **Porturi:**
-  - **Frontend:** `3000` (Next.js)
-  - **Backend API:** `8000` (FastAPI)
-  - **Ollama (LLM):** `11440` (Extern) / `11434` (Intern)
-  - **Postgres:** `5432` (Intern)
-  - **Neo4j:** `7474` (HTTP) / `7687` (Bolt)
+## 1. Infrastructură și Servicii (Regim Offline & Air-Gapped)
+- **Database:** PostgreSQL cu extensia `pgvector` pentru stocare vectorială și indexare GIN pentru Full Text Search.
+- **Relații:** Neo4j pentru maparea ierarhică (Harta Documentului) și a entităților tranzacționale.
+- **Cache/Queue:** Redis pentru progresul procesării, stocarea buffer-ului de rezultate și semnale de control (Stop Generation).
+- **LLM Engine:** 
+    - **Ollama (Principal):** Qwen 3.6-35B-A3B (MoE - Agentic Excellence, top-tier coding & document understanding), gemma4:26b (MoE - Reasoning Stability), gemma4:e4b (Balanced).
+    - **Model Embedding:** bge-m3:latest (Multilingual, Dense/Sparse Hybrid Search).
+- **Offline Sideloading:** Modelele sunt încărcate manual din `./models/hf_local`, fără nicio dependență de internet.
 
-## 2. Pipeline Ingestie & Sincronizare Multi-DB
-- **OCR 100% Offline:** Docling și RapidOCR sunt configurate să folosească exclusiv cache-ul local (`ocr_cache/`). Nu necesită internet la prima rulare a unui document.
-- **Sincronizare Entități (Double-Write):**
-  - Entitățile extrase de AI sunt salvate simultan în **Neo4j** (pentru relații complexe) și în **Postgres** (`master_entities` / `document_entity_links`) pentru interogări SQL rapide și consistența datelor.
-- **Segmentare (Chunking):** `CHUNK_SIZE` fixat la **1500 caractere**.
-- **Reziliență:** Mecanism de retry (2 încercări) per segment și salvare imediată a `raw_text` în Postgres post-OCR.
+## 2. Implementări Strategice (v0.6.5 - Aprilie 2026)
 
-## 3. Motorul de Chat & Inteligență Hybridă
-- **Prompting Agnostic (Universal):** Toate prompturile (Audit, Extracție, Rezumat) au fost refactorizate pentru a fi profesionale și compatibile cu orice model (Phi, Llama, Gemma, Mistral). Format obligatoriu:
-  ```
-  ### System: {Expert Forensic Objective}
-  ### User: {Context + Question}
-  ### Assistant:
-  ```
-- **Neo4j Integration:** Chat-ul interoghează acum automat graful de conexiuni pentru a identifica legături între entitățile menționate în întrebare (ex: dacă două firme apar în același document).
-- **Prioritate Matematică (SQL First):** Cifrele din SQL (agregări `SUM`, `COUNT`, `MAX`) au prioritate absolută în fața textului narativ (RAG) pentru a preveni halucinațiile matematice ale LLM-ului.
+### Etapa 13: Gândire Strategică și Rigoare Analitică - IMPLEMENTAT
+- **Planning Phase Isolation:** Agentul este forțat să genereze un `[STRATEGIC PLAN]` în faza 1, fără acces la unelte, pentru a izola raționamentul de execuție.
+- **Extended Investigation Loop:** Mărirea limitei la 15 pași cu mecanism de **Early Stop** (oprire automată când dovezile sunt suficiente).
+- **Forensic Intelligence Rules:** Integrarea regulilor de **Mathematical Cross-Check** (Contract vs Factură vs Plată) și **Management Overlap** (detectare auto-tranzacționare via ONRC).
+- **Evidence Confidence Layer:** Evaluarea obligatorie a nivelului de încredere (LOW/MEDIUM/HIGH) bazată pe consistența probelor coroborate.
 
-## 4. Strategie Offline & Migrare
-- **Portabilitate pe Stick:** Sistemul poate fi mutat pe alt calculator via SMB/USB prin pachetul de migrare creat.
-- **Procedură Migrare:**
-  1. Export imagini Docker în format `.tar` (`pack_v2.sh`).
-  2. Copiere foldere date: `data/`, `models/`, `ocr_cache/`, `frontend/node_modules/`.
-  3. **Important:** Link-urile simbolice din `ocr_cache` și `node_modules` trebuie rezolvate în fișiere reale (`cp -L` sau `rsync -L`) pentru compatibilitate cu sisteme de fișiere non-Linux (CIFS/NTFS).
-  4. Lansare pe noul sistem via `setup_v2.sh` folosind `docker-compose-offline.yml`.
+### Etapa 14: Optimizarea Retrieval-ului și UI Forensic - IMPLEMENTAT
+- **Keyword Reranking & Filename Boosting:** Algoritm de scoring care acordă prioritate de până la 50x documentelor unde entitățile căutate apar în nume sau conținut exact (eliminare zgomot din rapoarte mari).
+- **TIMELINE Tool:** Unealtă nouă pentru reconstrucția cronologică a evenimentelor și tranzacțiilor unui subiect.
+- **Visual Forensic Reporting:** Parsare vizuală în interfață pentru secțiunile `[FACTS]`, `[ANALYSIS]`, `[CONCLUSION]`, `[MISSING EVIDENCE]` și Badge-uri de `[CONFIDENCE]`.
+- **Enhanced Citation Mapping:** Injecția automată a numelui fișierului în metadatele de căutare pentru deschiderea precisă a documentului sursă la click.
 
-## 5. Mentenanță și Depanare
-- **Audit Logic:** Backend-ul loghează `[*] RAW SQL JSON` pentru a vedea query-ul generat de AI.
-- **Restart Prompt:** Modificările la nivel de logică LLM sau Prompting necesită `docker compose restart backend/worker` pentru aplicare.
-- **Easter Egg:** Versiunea "v0.1 ALPHA" din UI afișează detalii despre autori la hover.
+### Etapa 15: Database & Context Integrity - IMPLEMENTAT
+- **Log Isolation:** Separarea logurilor de investigație (coloana `sql`) de conținutul principal al mesajului pentru a preveni poluarea contextului LLM.
+- **Context Urgency:** Semnalizarea automată a limitei de pași către model pentru a forța sinteza finală în cazuri de volum mare de date.
+
+## 3. Mandatul Agnosticismului (Regulă Absolută)
+- **Agnosticism Total:** Zero referințe la conținut specific (nume, sume) în cod.
+- **Evidence-Only Protocol:** Agentul este forțat prin prompt-ul de sistem să ruleze unelte de căutare înainte de orice afirmație.
+- **Language Protocol:** Raționament intern în Engleză (precizie tehnică) / Raport final obligatoriu în Română.
+
+### Etapa 16: Agentic DocAI & Quant Integrity - ÎN CURS (24 Mai 2026)
+- **Qwen 3.6 Integration:** Migrarea către seria Qwen 3.6 pentru capabilități superioare de autonomie ("Agentic AI") și înțelegere de layout documente (DocAI).
+- **Quant Integrity Protocol:** Forțarea interogărilor SQL (`SEARCH_STRUCTURED_DATA`) pentru întrebări ce vizează sume, cantități sau liste agregate, reducând riscul de eroare din sinteza fragmentată a vector search-ului.
+- **Backend Stability Fix:** Corectarea erorilor de indentare în `chat_service.py` și stabilizarea loop-ului de restart al serviciilor.
+- **Remediere Limitare Agregare (24 Mai 2026):** Adăugarea parametrului `limit` (implicit 30, configurabil) pentru a permite agentului să preia liste mai mari de entități fără trunchiere.
+- **Optimizare Performanță RAG (Capping Limit):** Căparea parametrului `limit` la un maximum de 100 de înregistrări în codul uneltei `SEARCH_STRUCTURED_DATA` (în loc de 300) pentru a proteja instanța locală de Ollama împotriva blocajelor de VRAM paging și a timeout-urilor (eroare 500) pe GPU-uri cu 8GB VRAM la contexte mari, menținând în același timp destulă informație pentru corelări logice corecte.
+
+### Etapa 17: Trace & Live Logs UI - IMPLEMENTAT (27 Mai 2026)
+- **JSON Serialization of Agent Logs:** Modificarea backend-ului (`cases.py`) pentru a salva toate evenimentele intermediare (`status`, `step`, `tool_call`, `observation`) ca JSON array în coloana `ChatMessage.sql`.
+- **Live Trace Logs Viewer:** Implementarea în interfața de chat (`page.tsx`) a unui panou pliabil unificat ("Jurnal Investigare") care prezintă în timp real și istoric logurile procesului de gândire, tool calls și rezultatele acestora (observațiile).
+
+## 4. Configurație Media Stack NAS (XPenology) - Mentenanță Iunie 2026
+- **Download Engine:** qBittorrent (Aplicație nativă Synology).
+- **Automation:** Radarr (Filme) & Sonarr (Seriale) rulate în Docker.
+- **Paths & Mappings (Critic):**
+    - **Local Docker Path:** `/data` (mapat la `/volume1` de pe host).
+    - **Download Path (Host):** `/volume1/downloads/complete` (sau `/volume1/Download/complete`).
+    - **Remote Path Mapping (Radarr/Sonarr):** `host: 192.168.0.77` | `Remote: /volume1/` | `Local: /data/`.
+    - **Media Root:** `/volume1/xpenology/Download/Jellyfin/Filme` (și `Seriale`).
+- **Permisiuni:** Toate folderele de media și download au fost setate la `777` (UID: 1026/abc) pentru a permite importul între aplicația nativă și containere.
+
+
+---
+*Ultima actualizare: 27 Mai 2026 - Adăugat Etapa 17 (Trace & Live Logs UI) și stocare JSON logs în chat_messages.*
+
+### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
+Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:
+1. **Agentic Investigator Loop:** Sistemul functioneaza printr-o bucla `AgenticInvestigator` care alterneaza faze de rationament (`Thinking`) cu faze de actiune (`Tool Use`). Acest lucru previne halucinatiile deoarece modelul trebuie sa astepte observatia (datele extrase).
+2. **Quant Integrity Protocol (Financial Data):** Daca query-ul implica sume (bani), cantitati, bilanturi, agentului i se blocheaza accesul la rezultatele fragmentate ale vector-search-ului. E fortat prin prompt injectat sa apeleze `SEARCH_STRUCTURED_DATA`, care randeaza aggregari din baza de date relationala (PostgreSQL).
+3. **Hybrid Search cu Reranker:** Pentru text (contracte, extrase), se apeleaza `SEARCH_TEXT`. Vectorii sunt adusi din extensia `pgvector`, apoi rerankati cu `BAAI/bge-reranker-base` pentru a asigura densitatea informatiei (Cross-Encoder).
+4. **Early Stop Mechanism:** Agentul nu e fortat sa ajunga la pasul 15. Imediat ce are `[FACTS]` complete care raspund integral la intrebarea utilizatorului, opreste bucla si emite o concluzie.
+5. **Graph Search (Harta Documentului):** Utilizand `Neo4j`, cand agentul gaseste entitati (nume de companii), poate extrage conexiunile ierarhice (actionariat, auto-tranzactionare, management overlap).
