@@ -43,6 +43,15 @@
 - **JSON Serialization of Agent Logs:** Modificarea backend-ului (`cases.py`) pentru a salva toate evenimentele intermediare (`status`, `step`, `tool_call`, `observation`) ca JSON array în coloana `ChatMessage.sql`.
 - **Live Trace Logs Viewer:** Implementarea în interfața de chat (`page.tsx`) a unui panou pliabil unificat ("Jurnal Investigare") care prezintă în timp real și istoric logurile procesului de gândire, tool calls și rezultatele acestora (observațiile).
 
+### Etapa 18: Arhitectură Multi-Engine & Suport LM Studio (Local / Remote) - IMPLEMENTAT (Septembrie 2026)
+- **Unified LLM Client (`llm_client.py`):** Crearea unui adaptor unificat agnostic care rutează cererile către **Ollama** (`/api/chat`, `/api/generate`), **vLLM** (`/v1/chat/completions`) sau **LM Studio** (`/v1/chat/completions`).
+- **Suport Ambidextru (Chat + Procesare Grinder):** Atât investigatorul forensic (`chat_service.py`), cât și procesarea de documente/extracția de tabele & entități (`grinder.py`, `llm_service.py`) folosesc motorul activ selectat.
+- **Conectivitate Remote & Host Gateway:** Adăugarea `extra_hosts: ["host.docker.internal:host-gateway"]` în `docker-compose.yml` și suport complet pentru configurarea unui IP extern/remote (ex: `http://192.168.x.x:1234/v1`) cu API Key opțional și testare automată de latență (`/system/llm/test-connection`).
+- **Sincronizare Automată a Experților & UI Simplificat (`dashboard/llm/page.tsx`):**
+    - În modul LM Studio, modelul încărcat activ este sincronizat și alocat automat la **toți experții** (`active_model`, `specialist_tabular`, `specialist_narrative`).
+    - Opțiunile redundante (alegere separată de specialiști, slidere de tokeni și ferestre de Context RAM) sunt ascunse automat din UI-ul de administrare, întrucât parametrii de context și offloading sunt deciși direct în interfața LM Studio la încărcarea modelului.
+- **UI Admin LLM Config (`dashboard/llm/page.tsx`):** Selector triplu (Ollama / vLLM / LM Studio), panou dedicat pentru adresa serverului LM Studio, buton live de verificare a conexiunii, detecție a modelelor și badge informativ pentru modelul unic activ.
+
 ## 4. Configurație Media Stack NAS (XPenology) - Mentenanță Iunie 2026
 - **Download Engine:** qBittorrent (Aplicație nativă Synology).
 - **Automation:** Radarr (Filme) & Sonarr (Seriale) rulate în Docker.
@@ -55,7 +64,7 @@
 
 
 ---
-*Ultima actualizare: 27 Mai 2026 - Adăugat Etapa 17 (Trace & Live Logs UI) și stocare JSON logs în chat_messages.*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 18 (Arhitectură Multi-Engine Ollama/vLLM/LM Studio Local & Remote).*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:

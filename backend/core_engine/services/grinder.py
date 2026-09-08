@@ -133,7 +133,8 @@ async def extract_forensic_data(layout_data: Dict, filename: str = "", doc_id: i
     model = cfg.get("specialist_tabular") or cfg.get("active_model") or "gemma4:e4b"
     
     # Contextul global pentru a ajuta LLM-ul să înțeleagă rolurile
-    global_context = layout_data.get("chunks", [{}])[0].get("text", "")[:500] if isinstance(layout_data, dict) else ""
+    _first_chunk = layout_data.get("chunks", [{}]) if isinstance(layout_data, dict) else [{}]
+    global_context = (_first_chunk[0].get("content") or _first_chunk[0].get("text", ""))[:500] if _first_chunk else ""
 
     res = {
         "doc_type": "HIBRID_AGNOSTIC_V3",

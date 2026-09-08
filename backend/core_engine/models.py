@@ -136,6 +136,8 @@ class ChatMessage(Base):
     case_id = Column(Integer, ForeignKey("cases.id"))
     role = Column(String) # "user" sau "assistant"
     content = Column(Text)
+    sql = Column(Text)  # Jurnal de investigație (trace logs) serializat ca JSON array
+    citations = Column(JSON)  # Citatele [REF x] asociate răspunsului
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 class DocumentStorageHelper: # Renamed from DocumentStorage

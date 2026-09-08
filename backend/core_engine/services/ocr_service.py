@@ -44,9 +44,10 @@ def process_document(file_path: str):
         result = converter.convert(file_path)
         
         md_text = result.document.export_to_markdown()
-        
+
         # Extracție chunks cu metadate spațiale (cerute de tasks.py)
         chunks = []
+        items = []  # Elemente tipizate (TEXT/TABLE) cerute de grinder.extract_forensic_data
         for item in result.document.texts:
             page_no = 1
             spatial = ""
@@ -56,16 +57,31 @@ def process_document(file_path: str):
                 bbox = getattr(p, 'bbox', None)
                 if bbox:
                     spatial = f"l={bbox.l},t={bbox.t},r={bbox.r},b={bbox.b}"
-            
+
             chunks.append({
                 "content": item.text,
                 "page": page_no,
                 "spatial": spatial
             })
-            
+            if item.text and item.text.strip():
+                items.append({"type": "TEXT", "content": item.text, "page": page_no})
+
+        # Tabelele sunt extrase separat și marcate ca TABLE pentru extracția structurată
+        for table in getattr(result.document, "tables", []) or []:
+            try:
+                table_md = table.export_to_markdown()
+            except Exception:
+                table_md = ""
+            if table_md and table_md.strip():
+                page_no = 1
+                if getattr(table, "prov", None):
+                    page_no = getattr(table.prov[0], 'page_no', 1)
+                items.append({"type": "TABLE", "content": table_md, "page": page_no})
+
         return {
             "markdown": md_text,
-            "chunks": chunks
+            "chunks": chunks,
+            "items": items
         }
     except Exception as e:
         print(f"[!] OCR Error for {file_path}: {e}")

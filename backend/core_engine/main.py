@@ -33,12 +33,23 @@ async def lifespan(app: FastAPI):
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
             conn.commit()
         models.Base.metadata.create_all(bind=forensic_engine)
+        # Migrare idempotentă: coloane adăugate ulterior creării tabelelor
+        with forensic_engine.connect() as conn:
+            conn.execute(text("ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS sql TEXT"))
+            conn.execute(text("ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS citations JSONB"))
+            conn.execute(text("ALTER TABLE cases ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES users(id)"))
+            conn.execute(text("ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS chunk_index INTEGER"))
+            conn.execute(text("ALTER TABLE financial_items ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT now()"))
+            conn.commit()
         print("[+] Baza de date FORENSIC inițializată.")
     except Exception as e:
         print(f"[!] Eroare inițializare FORENSIC: {e}")
 
     # 2. Inițializăm Baza de Date AUTH
     try:
+        with auth_engine.connect() as conn:
+            conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+            conn.commit()
         models.Base.metadata.create_all(bind=auth_engine)
         print("[+] Baza de date AUTH inițializată.")
     except Exception as e:

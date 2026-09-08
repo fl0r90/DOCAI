@@ -27,14 +27,23 @@ def get_llm_config():
             # vLLM TurboQuant Settings
             "vllm_kv_cache_dtype": config.get("vllm_kv_cache_dtype", "turboquant"),
             "vllm_gpu_utilization": float(config.get("vllm_gpu_utilization", 0.90)),
-            "vllm_max_model_len": int(config.get("vllm_max_model_len", 32768))
+            "vllm_max_model_len": int(config.get("vllm_max_model_len", 32768)),
+
+            # LM Studio Settings (Local / Remote)
+            "lmstudio_url": config.get("lmstudio_url", os.getenv("LMSTUDIO_URL", "http://host.docker.internal:1234/v1")),
+            "lmstudio_api_key": config.get("lmstudio_api_key", ""),
+            "lmstudio_timeout": int(config.get("lmstudio_timeout", 300))
         }
     except:
         return {
+            "active_llm_engine": "ollama",
             "active_model": "phi4:latest", "chat_temp": 0.7, "chat_ctx": 16384,
             "specialist_tabular": "qwen2.5-coder:7b", "tabular_temp": 0.0, "tabular_ctx": 16384,
             "specialist_narrative": "gemma3:27b", "narrative_temp": 0.1, "narrative_ctx": 32768,
-            "vllm_kv_cache_dtype": "turboquant", "vllm_gpu_utilization": 0.90, "vllm_max_model_len": 32768
+            "vllm_kv_cache_dtype": "turboquant", "vllm_gpu_utilization": 0.90, "vllm_max_model_len": 32768,
+            "lmstudio_url": os.getenv("LMSTUDIO_URL", "http://host.docker.internal:1234/v1"),
+            "lmstudio_api_key": "",
+            "lmstudio_timeout": 300
         }
     finally:
         db.close()

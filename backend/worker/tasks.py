@@ -105,7 +105,7 @@ def _create_chunks_and_embeddings(doc_id, chunks_data, filename="unknown"):
         
         child_idx = 0
         for idx, item in enumerate(chunks_data):
-            content = item.get("text", "") if isinstance(item, dict) else item
+            content = (item.get("content") or item.get("text", "")) if isinstance(item, dict) else item
             page_no = item.get("page", 1) if isinstance(item, dict) else 1
             spatial = item.get("spatial", "") if isinstance(item, dict) else ""
             if not content or len(content.strip()) < 5: continue

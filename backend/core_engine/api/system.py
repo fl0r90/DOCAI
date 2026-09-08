@@ -131,25 +131,77 @@ def get_active_model(db: Session = Depends(get_db)):
     return {"active_model": setting.value if setting else "mistral-nemo:12b"}
 
 @router.get("/models/available")
-def get_available_models(admin: User = Depends(check_admin)):
-    try:
-        res = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
-        if res.status_code == 200:
-            return res.json().get("models", [])
-        else:
-            print(f"[!] Ollama returned status {res.status_code}: {res.text}")
+def get_available_models(admin: User = Depends(check_admin), db: Session = Depends(get_db)):
+    settings = db.query(SystemSetting).all()
+    config = {s.key: s.value for s in settings}
+    engine = config.get("active_llm_engine", "ollama").lower()
+
+    if engine == "lmstudio":
+        lm_url = config.get("lmstudio_url") or os.getenv("LMSTUDIO_URL", "http://host.docker.internal:1234/v1")
+        lm_url = lm_url.rstrip("/")
+        models_url = f"{lm_url}/models"
+        headers = {}
+        api_key = (config.get("lmstudio_api_key") or "").strip()
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        try:
+            res = requests.get(models_url, headers=headers, timeout=5)
+            if res.status_code == 200:
+                data = res.json()
+                items = data.get("data") or data.get("models") or []
+                result = []
+                for item in items:
+                    mid = item.get("id") or item.get("name") or item.get("model")
+                    if mid:
+                        result.append({
+                            "name": mid,
+                            "model": mid,
+                            "details": {
+                                "format": "gguf",
+                                "family": item.get("owned_by") or "lmstudio",
+                                "parameter_size": str(item.get("meta", {}).get("n_params", "N/A"))
+                            }
+                        })
+                return result
+            else:
+                print(f"[!] LM Studio returned status {res.status_code}: {res.text}")
+                return []
+        except Exception as e:
+            print(f"[!] Error fetching models from LM Studio ({models_url}): {e}")
             return []
-    except Exception as e:
-        print(f"[!] Error fetching models from Ollama ({OLLAMA_URL}): {str(e)}")
-        return []
+
+    elif engine == "vllm":
+        vllm_url = os.getenv("VLLM_URL", "http://vllm:8000/v1").rstrip("/")
+        try:
+            res = requests.get(f"{vllm_url}/models", timeout=5)
+            if res.status_code == 200:
+                data = res.json()
+                items = data.get("data", [])
+                return [{"name": m.get("id"), "model": m.get("id")} for m in items if m.get("id")]
+            return []
+        except Exception as e:
+            print(f"[!] Error fetching models from vLLM: {e}")
+            return []
+
+    else:
+        try:
+            res = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
+            if res.status_code == 200:
+                return res.json().get("models", [])
+            else:
+                print(f"[!] Ollama returned status {res.status_code}: {res.text}")
+                return []
+        except Exception as e:
+            print(f"[!] Error fetching models from Ollama ({OLLAMA_URL}): {str(e)}")
+            return []
 
 @router.get("/llm/config")
 def get_llm_config_api(admin: User = Depends(check_admin), db: Session = Depends(get_db)):
     settings = db.query(SystemSetting).all()
     config = {s.key: s.value for s in settings}
     return {
-        "active_llm_engine": config.get("active_llm_engine", "vllm"),
-        "active_model": config.get("active_model", "mistral-nemo:12b"),
+        "active_llm_engine": config.get("active_llm_engine", "ollama"),
+        "active_model": config.get("active_model", "gemma4-it-q4:latest"),
         "chat_temp": float(config.get("chat_temp", 0.7)),
         "chat_ctx": int(config.get("chat_ctx", 16384)),
         
@@ -159,11 +211,20 @@ def get_llm_config_api(admin: User = Depends(check_admin), db: Session = Depends
         
         "specialist_narrative": config.get("specialist_narrative", "gemma2:27b"),
         "narrative_temp": float(config.get("narrative_temp", 0.1)),
-        "narrative_ctx": int(config.get("narrative_ctx", 32768))
+        "narrative_ctx": int(config.get("narrative_ctx", 32768)),
+
+        "lmstudio_url": config.get("lmstudio_url", os.getenv("LMSTUDIO_URL", "http://host.docker.internal:1234/v1")),
+        "lmstudio_api_key": config.get("lmstudio_api_key", ""),
+        "lmstudio_timeout": int(config.get("lmstudio_timeout", 300))
     }
 
 @router.post("/llm/config")
 def update_llm_config(payload: dict, admin: User = Depends(check_admin), db: Session = Depends(get_db)):
+    # Dacă LM Studio este activat, toți experții folosesc automat modelul unic încărcat
+    if payload.get("active_llm_engine") == "lmstudio" and "active_model" in payload:
+        payload["specialist_tabular"] = payload["active_model"]
+        payload["specialist_narrative"] = payload["active_model"]
+
     for key, value in payload.items():
         s = db.query(SystemSetting).filter(SystemSetting.key == key).first()
         if s: s.value = str(value)
@@ -189,10 +250,58 @@ def update_llm_config(payload: dict, admin: User = Depends(check_admin), db: Ses
                 print("[*] Pornim v2-vllm...")
                 try: client.containers.get("v2-vllm").start()
                 except: pass
+            elif engine == "lmstudio":
+                print("[*] Switch la LM Studio: Oprim v2-vllm dacă rula...")
+                try: client.containers.get("v2-vllm").stop(timeout=5)
+                except: pass
         except Exception as e:
             print(f"[!] Eroare gestionare containere la switch engine: {e}")
 
     return {"message": "OK"}
+
+@router.post("/llm/test-connection")
+def test_llm_connection(payload: dict, admin: User = Depends(check_admin)):
+    """Testează conectivitatea cu un server LM Studio (local sau remote) sau OpenAI-compatible."""
+    url = (payload.get("url") or "").strip().rstrip("/")
+    api_key = (payload.get("api_key") or "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="URL-ul serverului este obligatoriu.")
+
+    models_url = url if url.endswith("/models") else f"{url}/models"
+    headers = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    start_t = time.time()
+    try:
+        res = requests.get(models_url, headers=headers, timeout=5)
+        latency_ms = round((time.time() - start_t) * 1000, 1)
+        if res.status_code == 200:
+            data = res.json()
+            models_list = []
+            if isinstance(data, dict):
+                items = data.get("data") or data.get("models") or []
+                for item in items:
+                    mid = item.get("id") or item.get("name") or item.get("model")
+                    if mid:
+                        models_list.append(mid)
+            return {
+                "success": True,
+                "latency_ms": latency_ms,
+                "models": models_list,
+                "count": len(models_list)
+            }
+        else:
+            return {
+                "success": False,
+                "status_code": res.status_code,
+                "error": f"Serverul a returnat HTTP {res.status_code}: {res.text[:200]}"
+            }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Eroare de conexiune: {str(e)}"
+        }
 
 @router.get("/audit")
 def get_audit_logs(current_user: User = Depends(get_current_user), limit: int = 100, db: Session = Depends(get_db), auth_db: Session = Depends(get_auth_db)):
@@ -221,6 +330,146 @@ def get_container_logs(container_name: str, admin: User = Depends(check_admin)):
 @router.get("/updates/available")
 def list_updates(admin: User = Depends(check_admin)):
     return [f for f in os.listdir("/app/updates") if f.endswith(('.sh', '.tar.gz'))] if os.path.exists("/app/updates") else []
+
+@router.post("/updates/apply/{filename}")
+def apply_update(filename: str, bg_tasks: BackgroundTasks, admin: User = Depends(check_admin)):
+    update_path = f"/app/updates/{filename}"
+    if not os.path.exists(update_path):
+        raise HTTPException(status_code=404, detail="Pachetul de update nu a fost găsit.")
+    bg_tasks.add_task(run_system_script, "apply_update.sh", [update_path])
+    return {"message": f"Aplicarea update-ului {filename} a fost inițiată în fundal."}
+
+@router.get("/queue/status")
+def queue_status(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Starea cozii de procesare a documentelor (pentru pagina principală)."""
+    import redis as _redis
+    queue_total = db.query(models.Document).filter(models.Document.status.in_(["QUEUED", "PROCESSING"])).count()
+    processing = db.query(models.Document).filter(models.Document.status == "PROCESSING").count()
+    is_llm_active = False
+    try:
+        _r = _redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
+        is_llm_active = bool(_r.exists("llm_active_session"))
+    except Exception:
+        pass
+    return {
+        "queue_total": queue_total,
+        "position": processing or (1 if queue_total else 0),
+        "eta_minutes": queue_total * 3,  # estimare grosieră: ~3 min/document
+        "is_llm_active": is_llm_active,
+    }
+
+# --------------------------------------------------------------------------- #
+# Graph analytics globale (toate dosarele) - folosite de dashboard/graph
+# Schema de id-uri identică cu /cases/{id}/graph: case_/doc_/ent_
+# --------------------------------------------------------------------------- #
+def _build_global_graph(db: Session):
+    from collections import defaultdict
+    from sqlalchemy import text as _text
+    nodes = {}
+    adjacency = defaultdict(set)
+
+    def add_link(a, b):
+        adjacency[a].add(b)
+        adjacency[b].add(a)
+
+    for c in db.query(models.Case).all():
+        nodes[f"case_{c.id}"] = {"id": f"case_{c.id}", "name": c.name, "label": "CASE"}
+    for d in db.query(models.Document).all():
+        nid = f"doc_{d.id}"
+        nodes[nid] = {"id": nid, "name": d.filename, "filename": d.filename, "label": "DOC"}
+        if d.case_id:
+            add_link(f"case_{d.case_id}", nid)
+
+    rows = db.execute(_text("""
+        SELECT l.document_id, e.id, e.official_name
+        FROM document_entity_links l JOIN master_entities e ON e.id = l.entity_id
+    """)).fetchall()
+    for doc_id, ent_id, name in rows:
+        if not name:
+            continue
+        nid = f"ent_{ent_id}"
+        if nid not in nodes:
+            nodes[nid] = {"id": nid, "name": name, "label": "ENTITY"}
+        add_link(f"doc_{doc_id}", nid)
+    return nodes, adjacency
+
+@router.get("/graph/analytics/leader")
+def global_leader(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    _, adjacency = _build_global_graph(db)
+    return {nid: len(neigh) for nid, neigh in adjacency.items()}
+
+@router.get("/graph/analytics/cartel")
+def global_cartel(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    from collections import deque
+    nodes, adjacency = _build_global_graph(db)
+    community, cid = {}, 0
+    for nid in nodes:
+        if nid in community:
+            continue
+        community[nid] = cid
+        q = deque([nid])
+        while q:
+            cur = q.popleft()
+            for nb in adjacency.get(cur, []):
+                if nb not in community:
+                    community[nb] = cid; q.append(nb)
+        cid += 1
+    return community
+
+@router.get("/graph/analytics/path")
+def global_path(source_name: str, target_name: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    from collections import deque
+    nodes, adjacency = _build_global_graph(db)
+
+    def find_id(name):
+        name = name.strip().lower()
+        for n in nodes.values():
+            if name in str(n.get("name", "")).lower():
+                return n["id"]
+        return None
+
+    src, dst = find_id(source_name), find_id(target_name)
+    if not src or not dst:
+        return {"nodes": []}
+    prev = {src: None}
+    q = deque([src])
+    while q:
+        cur = q.popleft()
+        if cur == dst:
+            break
+        for nb in adjacency.get(cur, []):
+            if nb not in prev:
+                prev[nb] = cur; q.append(nb)
+    if dst not in prev:
+        return {"nodes": []}
+    path, cur = [], dst
+    while cur is not None:
+        path.append(cur); cur = prev[cur]
+    return {"nodes": list(reversed(path))}
+
+@router.get("/graph/analytics/clones")
+def global_clones(cui: str = "", user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Entități suspecte: împart același CUI sau aceeași adresă (posibile firme-clonă)."""
+    from sqlalchemy import text as _text
+    clones = []
+    # 1. Același CUI
+    if cui:
+        same = db.query(models.MasterEntity).filter(models.MasterEntity.cui_cif_cnp == cui).all()
+        for i in range(len(same)):
+            for j in range(i + 1, len(same)):
+                clones.append({"suspect_id": f"ent_{same[i].id}", "clone_id": f"ent_{same[j].id}"})
+    # 2. Aceeași adresă (non-goală)
+    rows = db.execute(_text("""
+        SELECT address, array_agg(id) AS ids FROM master_entities
+        WHERE address IS NOT NULL AND address <> ''
+        GROUP BY address HAVING COUNT(*) > 1
+    """)).fetchall()
+    for _addr, ids in rows:
+        ids = list(ids)
+        for i in range(len(ids)):
+            for j in range(i + 1, len(ids)):
+                clones.append({"suspect_id": f"ent_{ids[i]}", "clone_id": f"ent_{ids[j]}"})
+    return {"clones": clones}
 
 @router.get("/backups/available")
 def list_backups(admin: User = Depends(check_admin)):

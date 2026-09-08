@@ -10,6 +10,7 @@ from ..core.config import get_llm_config, get_active_model_name
 from ..models import DocumentChunk, Document, ChatMessage, Case
 from .. import models
 from .graph_service import GraphService
+from .llm_client import UnifiedLLMClient
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://llm:11434")
 VLLM_URL = os.getenv("VLLM_URL", "http://v2-vllm:8000/v1")
@@ -117,6 +118,7 @@ class AgenticInvestigator:
                         .order_by(DocumentChunk.embedding.l2_distance(query_embedding))\
                         .limit(20).all()
                 except Exception as e:
+                    db.rollback()
                     print(f"[!] pgvector search error: {e}")
 
             # 2. Lexical Search (Exact Keyword Match via ILIKE)
@@ -588,22 +590,19 @@ FINAL RESPONSE FORMAT (ROMANIAN):
             if step > 1 and not has_used_tools and step < 4:
                 messages.append({"role": "user", "content": "You haven't used any tools yet. Use SEARCH_TEXT or SEARCH_STRUCTURED_DATA to find evidence before concluding."})
             
-            payload = {
-                "model": self.active_model,
-                "messages": messages,
-                "tools": current_tools,
-                "stream": False, 
-                "options": {
-                    "temperature": 0.0,
-                    "num_ctx": 32768
-                }
-            }
-            
             try:
-                r = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=1800)
-                r.raise_for_status()
-                resp_json = r.json()
-                assistant_msg = resp_json.get("message", {})
+                chat_res = UnifiedLLMClient.chat_step(
+                    messages=messages,
+                    tools=current_tools,
+                    model=self.active_model,
+                    temperature=0.0,
+                    num_ctx=32768
+                )
+                assistant_msg = {
+                    "role": "assistant",
+                    "content": chat_res.get("content", ""),
+                    "tool_calls": chat_res.get("tool_calls", [])
+                }
             except Exception as e:
                 yield json.dumps({"type": "final", "data": f"Eroare LLM Engine (Timeout/500): {e}"})
                 return
@@ -691,10 +690,13 @@ FINAL RESPONSE FORMAT (ROMANIAN):
                     
                     yield json.dumps({"type": "observation", "data": observation[:2500]})
                     
-                    messages.append({
+                    tool_msg = {
                         "role": "tool",
                         "content": observation
-                    })
+                    }
+                    if tc.get("id"):
+                        tool_msg["tool_call_id"] = tc["id"]
+                    messages.append(tool_msg)
                 continue # Go to next iteration to let model think about the observation
             
             # If no tools called, we check if we have the final answer
