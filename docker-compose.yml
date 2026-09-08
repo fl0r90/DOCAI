@@ -172,6 +172,9 @@ services:
     restart: unless-stopped
 
   frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
     image: v2-frontend:latest
     container_name: v2-frontend
     networks: [access_net]

@@ -57,9 +57,22 @@ class EmbeddingService:
                 timeout=30
             )
             if res.status_code == 200:
-                return res.json().get("embedding")
+                emb = res.json().get("embedding")
+                if emb:
+                    return emb
         except Exception as e:
             print(f"[!] Ollama Embedding error: {e}")
+
+        # 4. Automatic Resilient Fallback: CPU SentenceTransformers (Zero Configuration)
+        try:
+            if cls._cpu_model is None:
+                from sentence_transformers import SentenceTransformer
+                model_path = os.getenv("EMBEDDING_LOCAL_PATH", "BAAI/bge-m3")
+                cls._cpu_model = SentenceTransformer(model_path, device="cpu")
+            emb = cls._cpu_model.encode(text_input, normalize_embeddings=True)
+            return emb.tolist()
+        except Exception as e:
+            print(f"[!] CPU Fallback Embedding error: {e}")
 
         return None
 
