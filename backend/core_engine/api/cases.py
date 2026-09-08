@@ -2,6 +2,7 @@ import os
 import json
 import uuid
 from collections import defaultdict, deque
+from datetime import datetime
 
 import redis
 from fastapi import APIRouter, Depends, HTTPException, Body, Query
@@ -292,6 +293,17 @@ def case_timeline(case_id: int, user: models.User = Depends(get_current_user), d
 
 
 # --------------------------------------------------------------------------- #
+# Financial Anomaly Detection (Benford, Smurfing, Duplicates, Round Numbers)
+# --------------------------------------------------------------------------- #
+@router.get("/{case_id}/anomalies")
+def get_case_anomalies(case_id: int, user: models.User = Depends(get_current_user), db: Session = Depends(get_forensic_db)):
+    """Analiză criminalistică completă: Legea lui Benford, smurfing, duplicate și aglomerare cifre rotunde."""
+    _check_access(case_id, user, db)
+    from ..services.anomaly_service import anomaly_service
+    return anomaly_service.analyze_case(case_id, db)
+
+
+# --------------------------------------------------------------------------- #
 # Graph analytics
 # --------------------------------------------------------------------------- #
 @router.get("/{case_id}/graph/analytics/leader")
@@ -476,41 +488,112 @@ def audit_report(case_id: int, user: models.User = Depends(get_current_user), db
     except Exception:
         raise HTTPException(500, "Generatorul PDF (fpdf2) nu este disponibil.")
 
+    from ..services.anomaly_service import anomaly_service
+    anomaly_data = anomaly_service.analyze_case(case_id, db)
+
     def clean(s):
         return str(s or "").encode("latin-1", "replace").decode("latin-1")
 
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
+    
+    # ANTET JUDICIAR / CRIMINALISTIC
     pdf.set_font("Helvetica", "B", 18)
-    pdf.cell(0, 12, clean(f"Raport Audit - {case.name}"), ln=True)
-    pdf.set_font("Helvetica", "", 10)
-    pdf.cell(0, 7, clean(f"Dosar #{case.id} | {len(docs)} documente"), ln=True)
+    pdf.cell(0, 10, clean(f"RAPORT DE EXPERTIZĂ CRIMINALISTICĂ"), ln=True, align="C")
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.cell(0, 8, clean(f"Dosar: {case.name} (ID #{case.id})"), ln=True, align="C")
+    pdf.set_font("Helvetica", "", 9)
+    pdf.cell(0, 5, clean(f"Sistem: Forensic DocAI v0.7.0 | Data emiterii: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}"), ln=True, align="C")
+    pdf.ln(6)
+
+    # 1. LANȚUL DE CUSTODIE (CHAIN OF CUSTODY CU SHA-256)
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.cell(0, 8, clean("1. LANȚ DE CUSTODIE ȘI INTEGRITATE PROBE (SHA-256)"), ln=True)
+    pdf.set_font("Helvetica", "", 8)
+    pdf.cell(0, 5, clean("Garantează nemodificarea probelor de la momentul încărcării în camera criminalistică digitală:"), ln=True)
+    pdf.ln(2)
+
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.set_x(pdf.l_margin)
+    pdf.cell(55, 6, clean("Fișier Sursă"), border=1)
+    pdf.cell(85, 6, clean("Amprentă Criptografică (SHA-256)"), border=1)
+    pdf.cell(40, 6, clean("Status / Dată"), border=1, ln=True)
+
+    pdf.set_font("Helvetica", "", 7)
+    for d in docs:
+        h = d.file_hash or "FĂRĂ HASH"
+        short_hash = f"{h[:14]}...{h[-14:]}" if len(h) > 28 else h
+        dt_str = str(d.created_at)[:10] if d.created_at else "N/A"
+        pdf.set_x(pdf.l_margin)
+        pdf.cell(55, 6, clean(d.filename[:30]), border=1)
+        pdf.cell(85, 6, clean(short_hash), border=1)
+        pdf.cell(40, 6, clean(f"{d.status} | {dt_str}"), border=1, ln=True)
     pdf.ln(4)
 
-    pdf.set_font("Helvetica", "B", 13)
-    pdf.cell(0, 9, "Documente", ln=True)
-    pdf.set_font("Helvetica", "", 9)
-    for d in docs:
-        pdf.set_font("Helvetica", "B", 10)
-        pdf.multi_cell(0, 6, clean(f"{d.filename}  [{d.status}]"))
-        if d.ai_summary:
-            pdf.set_font("Helvetica", "", 9)
-            pdf.multi_cell(0, 5, clean(d.ai_summary))
-        pdf.ln(1)
+    # 2. DETECȚIE ANOMALII FINANCIARE
+    pdf.set_x(pdf.l_margin)
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.cell(0, 8, clean(f"2. ANALIZĂ ANOMALII FINANCIARE (Risc: {anomaly_data['risk_score']}/100 - {anomaly_data['risk_level']})"), ln=True)
+    pdf.set_font("Helvetica", "", 8)
 
-    pdf.ln(2)
-    pdf.set_font("Helvetica", "B", 13)
-    pdf.cell(0, 9, "Entitati identificate", ln=True)
-    pdf.set_font("Helvetica", "", 9)
-    for e in entities[:100]:
-        pdf.multi_cell(0, 5, clean(f"- {e['official_name']} ({e['entity_type'] or 'N/A'}) | rol: {e['role'] or 'N/A'} | apariții: {e['count']}"))
+    anom = anomaly_data.get("anomalies", {})
+    benford = anom.get("benford_analysis", {})
+    smurfing = anom.get("split_invoicing_smurfing", {})
+    duplicates = anom.get("duplicate_transactions", {})
+    round_nums = anom.get("round_number_clustering", {})
+    weekends = anom.get("weekend_transactions", {})
+
+    pdf.set_x(pdf.l_margin)
+    pdf.multi_cell(0, 5, clean(f"Volum tranzacții analizate: {anomaly_data['total_items']} operațiuni | Volum total: {anomaly_data['total_volume']:,.2f}"))
+    pdf.set_x(pdf.l_margin)
+    pdf.multi_cell(0, 5, clean(f"- Testul Benford: MAD = {benford.get('mad_score', 'N/A')} ({benford.get('conformity', 'N/A')})"))
+    pdf.set_x(pdf.l_margin)
+    pdf.multi_cell(0, 5, clean(f"- Structurare / Fragmentare (Smurfing): {smurfing.get('count', 0)} tranzacții în proximitatea pragurilor legale"))
+    pdf.set_x(pdf.l_margin)
+    pdf.multi_cell(0, 5, clean(f"- Plăți / Facturi duplicate detectate: {duplicates.get('count', 0)} grupuri identice"))
+    pdf.set_x(pdf.l_margin)
+    pdf.multi_cell(0, 5, clean(f"- Numere rotunde suspecte: {round_nums.get('round_count', 0)} ({round_nums.get('round_ratio', 0)*100:.1f}% din volum)"))
+    pdf.set_x(pdf.l_margin)
+    pdf.multi_cell(0, 5, clean(f"- Tranzacții operate în weekend: {weekends.get('count', 0)}"))
+    pdf.ln(4)
+
+    # 3. REZUMATE EXECUTIV DOCUMENTE
+    pdf.set_x(pdf.l_margin)
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.cell(0, 8, clean("3. SINTEZA DOCUMENTELOR PROCESATE"), ln=True)
+    pdf.set_font("Helvetica", "", 8)
+    for d in docs:
+        pdf.set_x(pdf.l_margin)
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.cell(0, 6, clean(f"• {d.filename}"), ln=True)
+        if d.ai_summary:
+            pdf.set_x(pdf.l_margin)
+            pdf.set_font("Helvetica", "", 8)
+            pdf.multi_cell(0, 4, clean(d.ai_summary))
+        pdf.ln(1)
+    pdf.ln(4)
+
+    # 4. ENTITĂȚI ȘI REȚELE RELAȚIONALE
+    pdf.set_x(pdf.l_margin)
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.cell(0, 8, clean(f"4. ENTITĂȚI CHEIE IDENTIFICATE ÎN DOSAR ({len(entities)})"), ln=True)
+    pdf.set_font("Helvetica", "", 8)
+    for e in entities[:40]:
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(0, 4.5, clean(f"- {e['official_name']} | Tip: {e['entity_type'] or 'N/A'} | Rol: {e['role'] or 'N/A'} | Frecvență: {e['count']}"))
+
+    # SIGILIU FINAL
+    pdf.ln(6)
+    pdf.set_x(pdf.l_margin)
+    pdf.set_font("Helvetica", "I", 8)
+    pdf.cell(0, 5, clean("--- Document generat automat. Neschimbat și verificabil prin ledger-ul Forensic DocAI ---"), ln=True, align="C")
 
     out = pdf.output()
-    pdf_bytes = bytes(out) if not isinstance(out, (bytes, bytearray)) else out
+    pdf_bytes = bytes(out)
     log_event("AUDIT_REPORT_GENERATED", user_id=user.id, case_id=case_id)
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
-        headers={"Content-Disposition": f"attachment; filename=Raport_Audit_Dosar_{case_id}.pdf"},
+        headers={"Content-Disposition": f"attachment; filename=Raport_Expertiza_Dosar_{case_id}.pdf"},
     )

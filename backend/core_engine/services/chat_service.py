@@ -102,10 +102,8 @@ class AgenticInvestigator:
             # 1. Semantic Search (Vector)
             query_embedding = None
             try:
-                emb_url = f"{OLLAMA_URL}/api/embeddings"
-                resp = requests.post(emb_url, json={"model": "bge-m3", "prompt": query}, timeout=60)
-                if resp.status_code == 200:
-                    query_embedding = resp.json().get("embedding")
+                from .embedding_service import EmbeddingService
+                query_embedding = EmbeddingService.get_embedding(query)
             except Exception as e:
                 print(f"[!] Embedding Error in Hybrid Search: {e}")
 
@@ -562,6 +560,17 @@ FINAL RESPONSE FORMAT (ROMANIAN):
                         "required": ["entity"]
                     }
                 }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "DETECT_FINANCIAL_ANOMALIES",
+                    "description": "Run forensic statistical anomaly detection: Benford's Law deviation, smurfing/split-invoicing, duplicate payments, and round number clustering across case transactions.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                }
             }
         ]
 
@@ -685,6 +694,11 @@ FINAL RESPONSE FORMAT (ROMANIAN):
                         observation = self.tool_timeline(t_args.get("entity", ""))
                     elif t_name == "CALCULATE":
                         observation = self.tool_calculate(t_args.get("expression", ""))
+                    elif t_name == "DETECT_FINANCIAL_ANOMALIES":
+                        from .anomaly_service import anomaly_service
+                        with SessionLocal() as db:
+                            res = anomaly_service.analyze_case(self.case_id, db)
+                            observation = json.dumps(res, indent=2, ensure_ascii=False)
                     else:
                         observation = "Unknown tool."
                     

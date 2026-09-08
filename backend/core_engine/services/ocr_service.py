@@ -74,9 +74,14 @@ def process_document(file_path: str):
                 table_md = ""
             if table_md and table_md.strip():
                 page_no = 1
-                if getattr(table, "prov", None):
-                    page_no = getattr(table.prov[0], 'page_no', 1)
-                items.append({"type": "TABLE", "content": table_md, "page": page_no})
+                table_spatial = ""
+                if getattr(table, "prov", None) and len(table.prov) > 0:
+                    p = table.prov[0]
+                    page_no = getattr(p, 'page_no', 1)
+                    bbox = getattr(p, 'bbox', None)
+                    if bbox:
+                        table_spatial = f"l={bbox.l},t={bbox.t},r={bbox.r},b={bbox.b}"
+                items.append({"type": "TABLE", "content": table_md, "page": page_no, "spatial": table_spatial})
 
         return {
             "markdown": md_text,

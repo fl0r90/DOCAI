@@ -18,18 +18,25 @@ export default function GlobalGraph() {
   const [currentTimeIndex, setCurrentTimeIndex] = useState(0);
   const [filteredData, setFilteredData] = useState({ nodes: [], links: [] });
   const [isLoading, setIsLoading] = useState(true);
-
-  // ... (rest of states)
+  const token = Cookies.get('token');
+  const [highlightNodes, setHighlightNodes] = useState<Set<any>>(new Set());
+  const [highlightLinks, setHighlightLinks] = useState<Set<any>>(new Set());
+  const [nodeColors, setNodeColors] = useState<Record<string, string>>({});
+  const [nodeVals, setNodeVals] = useState<Record<string, number>>({});
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [pathSource, setPathSource] = useState('');
+  const [pathTarget, setPathTarget] = useState('');
+  const [cloneCui, setCloneCui] = useState('');
 
   useEffect(() => {
     if (!token) { router.push('/login'); return; }
     const fetchData = async () => {
       try {
         const [graphRes, timelineRes] = await Promise.all([
-          api.get('/cases/5/graph'), // Folosim graful de caz, nu cel global
-          api.get('/cases/5/timeline').catch(() => ({ data: [] }))
+          api.get('/system/graph'),
+          api.get('/cases/6/timeline').catch(() => ({ data: [] }))
         ]);
-        setGraphData(graphRes.data);
+        setGraphData(graphRes.data || { nodes: [], links: [] });
         const tlData = (timelineRes.data && timelineRes.data.length > 0) ? timelineRes.data : [
             {date: '2026-01-01', title: 'Origine Dosar', type: 'INFO'},
             {date: '2026-04-22', title: 'Stadiu Curent', type: 'INFO'}

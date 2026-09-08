@@ -74,6 +74,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Forensic DocAI V2",
     description="Arhitectură core_engine stabilă",
+    version="0.7.0",
     lifespan=lifespan
 )
 

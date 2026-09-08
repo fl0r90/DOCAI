@@ -130,40 +130,35 @@ def _create_chunks_and_embeddings(doc_id, chunks_data, filename="unknown"):
                 success = False
                 for attempt in range(2):
                     try:
-                        res = requests.post(
-                            f"{OLLAMA_URL}/api/embeddings", 
-                            json={"model": "bge-m3", "prompt": c_text[:3500], "keep_alive": 300}, 
-                            timeout=20
-                        )
-                        if res.status_code == 200:
-                            embedding = res.json().get("embedding")
-                            if embedding:
-                                new_child = models.DocumentChunk(
-                                    document_id=doc_id,
-                                    content=c_text,
-                                    page_number=page_no,
-                                    spatial=spatial,
-                                    embedding=embedding,
-                                    parent_chunk_id=parent_chunk.id
-                                )
-                                db.add(new_child)
-                                db.flush()
-                                inserted_ids.append({"id": new_child.id, "content": c_text})
-                                
-                                # Upsert în document_storage
-                                upsert_document_chunk(
-                                    db, 
-                                    {
-                                        "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, f"chunk_{doc_id}_{child_idx}")), 
-                                        "parent_doc_id": str(parent_uuid), 
-                                        "content": c_text, 
-                                        "metadata": {"filename": filename, "page": page_no, "spatial": spatial, "parent_chunk_id": parent_chunk.id}
-                                    }, 
-                                    embedding
-                                )
-                                child_idx += 1
-                                success = True
-                                break
+                        from core_engine.services.embedding_service import EmbeddingService
+                        embedding = EmbeddingService.get_embedding(c_text[:3500])
+                        if embedding:
+                            new_child = models.DocumentChunk(
+                                document_id=doc_id,
+                                content=c_text,
+                                page_number=page_no,
+                                spatial=spatial,
+                                embedding=embedding,
+                                parent_chunk_id=parent_chunk.id
+                            )
+                            db.add(new_child)
+                            db.flush()
+                            inserted_ids.append({"id": new_child.id, "content": c_text})
+                            
+                            # Upsert în document_storage
+                            upsert_document_chunk(
+                                db, 
+                                {
+                                    "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, f"chunk_{doc_id}_{child_idx}")), 
+                                    "parent_doc_id": str(parent_uuid), 
+                                    "content": c_text, 
+                                    "metadata": {"filename": filename, "page": page_no, "spatial": spatial, "parent_chunk_id": parent_chunk.id}
+                                }, 
+                                embedding
+                            )
+                            child_idx += 1
+                            success = True
+                            break
                     except Exception as e:
                         print(f"[!] Error creating embedding for child chunk: {e}")
                         time.sleep(1)
@@ -184,14 +179,21 @@ def _create_chunks_and_embeddings(doc_id, chunks_data, filename="unknown"):
     return inserted_ids
 
 def unified_worker_pipeline():
-    """Pipeline Liniar UNIFICAT v0.5.0 (Resource-Aware & LLM Extraction)"""
-    print("!!! PIPELINE FORENSIC v0.5.0 - RESOURCE AWARE !!!")
+    """Pipeline Liniar UNIFICAT v0.7.0 (Resource-Aware, Distributed & Multi-Node)"""
+    worker_id = os.getenv("WORKER_ID", f"worker-{uuid.uuid4().hex[:6]}")
+    print(f"!!! PIPELINE FORENSIC v0.7.0 - DISTRIBUTED WORKER [{worker_id}] !!!")
     
     from core_engine.services.grinder import _unload_ollama
     import gc
     import torch
     
     while True:
+        r.set(f"worker_heartbeat_{worker_id}", json.dumps({
+            "worker_id": worker_id,
+            "timestamp": int(time.time()),
+            "status": "IDLE"
+        }), ex=60)
+
         if check_llm_pause(): time.sleep(10); continue
         try:
             doc_id, filename = None, None
@@ -201,7 +203,13 @@ def unified_worker_pipeline():
                 doc_id, filename = next_doc.id, next_doc.filename
                 next_doc.status = "PROCESSING"; db.commit()
             
-            print(f"[*] --- START: {filename} ---")
+            r.set(f"worker_heartbeat_{worker_id}", json.dumps({
+                "worker_id": worker_id,
+                "timestamp": int(time.time()),
+                "status": "PROCESSING",
+                "current_doc": filename
+            }), ex=60)
+            print(f"[*] --- START [{worker_id}]: {filename} ---")
             with SafeSession() as db:
                 next_doc = db.query(models.Document).filter(models.Document.id == doc_id).first()
                 resolver = EntityResolver(db_session=db)

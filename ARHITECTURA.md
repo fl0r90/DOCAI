@@ -1,4 +1,4 @@
-# Arhitectură Tehnică - Forensic DocAI v0.6.5 ALPHA
+# Arhitectură Tehnică - Forensic DocAI v0.7.0 BETA
 
 ## 1. Infrastructură și Servicii (Regim Offline & Air-Gapped)
 - **Database:** PostgreSQL cu extensia `pgvector` pentru stocare vectorială și indexare GIN pentru Full Text Search.
@@ -6,10 +6,10 @@
 - **Cache/Queue:** Redis pentru progresul procesării, stocarea buffer-ului de rezultate și semnale de control (Stop Generation).
 - **LLM Engine:** 
     - **Ollama (Principal):** Qwen 3.6-35B-A3B (MoE - Agentic Excellence, top-tier coding & document understanding), gemma4:26b (MoE - Reasoning Stability), gemma4:e4b (Balanced).
-    - **Model Embedding:** bge-m3:latest (Multilingual, Dense/Sparse Hybrid Search).
+    - **Model Embedding:** bge-m3:latest (Multilingual, Dense/Sparse Hybrid Search) via Ollama sau SentenceTransformers pe CPU (0 VRAM).
 - **Offline Sideloading:** Modelele sunt încărcate manual din `./models/hf_local`, fără nicio dependență de internet.
 
-## 2. Implementări Strategice (v0.6.5 - Aprilie 2026)
+## 2. Implementări Strategice (v0.7.0 - Septembrie 2026)
 
 ### Etapa 13: Gândire Strategică și Rigoare Analitică - IMPLEMENTAT
 - **Planning Phase Isolation:** Agentul este forțat să genereze un `[STRATEGIC PLAN]` în faza 1, fără acces la unelte, pentru a izola raționamentul de execuție.
@@ -51,6 +51,27 @@
     - În modul LM Studio, modelul încărcat activ este sincronizat și alocat automat la **toți experții** (`active_model`, `specialist_tabular`, `specialist_narrative`).
     - Opțiunile redundante (alegere separată de specialiști, slidere de tokeni și ferestre de Context RAM) sunt ascunse automat din UI-ul de administrare, întrucât parametrii de context și offloading sunt deciși direct în interfața LM Studio la încărcarea modelului.
 - **UI Admin LLM Config (`dashboard/llm/page.tsx`):** Selector triplu (Ollama / vLLM / LM Studio), panou dedicat pentru adresa serverului LM Studio, buton live de verificare a conexiunii, detecție a modelelor și badge informativ pentru modelul unic activ.
+
+### Etapa 19: Forensic Intelligence v0.7.0 (Antifraudă, Custodie Criptografică, GDS Graph & Distributed Ingestion) - IMPLEMENTAT (Septembrie 2026)
+- **Modul Criminalistic de Detecție a Anomaliilor Financiare (`anomaly_service.py`):**
+    - *Legea lui Benford:* Analiză statistică pe prima cifră a sumelor tranzacționate, calcul MAD (Mean Absolute Deviation) și calificare conformitate (Drake & Nigrini).
+    - *Smurfing & Split Invoicing:* Detecție automată a plăților fragmentate sub pragurile legale de raportare (40.000 - 49.999 RON / 4.000 - 4.999 EUR).
+    - *Plăți & Facturi Duplicate:* Identificare operațiuni identice pe aceleași numere de facturi sau parteneri comerciali.
+    - *Aglomerare Numere Rotunde:* Monitorizare clustering pe sume rotunde mari (indicator de înțelegeri fictive).
+    - *Tranzacții în Zile Nelucrătoare:* Identificare automată a plăților operate sâmbăta și duminica.
+    - *Agentic Tool Integration:* Unealtă dedicată `DETECT_FINANCIAL_ANOMALIES` integrată în bucla de raționament a investigatorului (`chat_service.py`).
+- **Lanț de Custodie Criptografică & Raport de Expertiză Judiciară (SHA-256):**
+    - Amprentare criptografică unică SHA-256 pentru fiecare document original uploadat, salvată în baza de date.
+    - Endpoint complet de generare Raport de Expertiză Judiciară PDF (`GET /cases/{case_id}/audit-report`) incluzând antet oficial, tabelul de custodie SHA-256, matricea anomaliilor financiare, sinteza probelor și rețelele de entități.
+- **Deep Citation Highlighting:**
+    - Extragere și persistare a coordonatelor spațiale (bounding box: `l,t,r,b`) pentru toate elementele text și tabelele din documente (`ocr_service.py`, `tasks.py`), transmise în metadatele citatelor din chat.
+- **Activare Modul GDS Graph Analytics (`dashboard/graph/page.tsx` & `/system/graph`):**
+    - Hartă vizuală interactivă 2D/3D (ForceGraph2D) conectată la Neo4j și PostgreSQL.
+    - Algoritmi de analiză relațională: Găsește Liderul (PageRank), Detecție Carteluri (Comunități Louvain), Traseu (Shortest Path) și Detecție Clone CUI (Node Similarity).
+- **Optimizare Critică VRAM - Embeddings Hibrid/CPU (`embedding_service.py`):**
+    - `EmbeddingService` permite comutarea modelului `bge-m3` pe CPU via SentenceTransformers (0 MB VRAM alocat pe GPU), lăsând toți cei 8GB VRAM liberi pentru modele LLM mari (14B/32B în LM Studio).
+- **Arhitectură Ingestion Distribuită (Remote Worker Nodes):**
+    - Suport multi-nod pentru workeri asincroni cu `WORKER_ID` și heartbeats în Redis, monitorizați în timp real via `GET /system/workers`.
 
 ## 4. Configurație Media Stack NAS (XPenology) - Mentenanță Iunie 2026
 - **Download Engine:** qBittorrent (Aplicație nativă Synology).

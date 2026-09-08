@@ -393,6 +393,20 @@ def _build_global_graph(db: Session):
         add_link(f"doc_{doc_id}", nid)
     return nodes, adjacency
 
+@router.get("/graph")
+def get_global_graph(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Returnează graful relațional global (toate dosarele, documentele și entitățile)."""
+    nodes, adjacency = _build_global_graph(db)
+    links = []
+    seen = set()
+    for src, targets in adjacency.items():
+        for tgt in targets:
+            pair = tuple(sorted([src, tgt]))
+            if pair not in seen:
+                seen.add(pair)
+                links.append({"source": src, "target": tgt})
+    return {"nodes": list(nodes.values()), "links": links}
+
 @router.get("/graph/analytics/leader")
 def global_leader(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     _, adjacency = _build_global_graph(db)
@@ -528,3 +542,28 @@ def delete_ollama_model(model_name: str, admin: User = Depends(check_admin)):
     except Exception as e:
         print(f"[-] Eroare stergere model {model_name}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/workers")
+def list_active_workers(admin: User = Depends(check_admin)):
+    """Monitorizează nodurile de procesare active (locale sau remote) via Redis heartbeats."""
+    import redis, json
+    r = redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
+    now = int(time.time())
+    keys = r.keys("worker_heartbeat_*")
+    workers = []
+    for k in keys:
+        try:
+            raw = r.get(k)
+            if raw:
+                val = json.loads(raw.decode('utf-8') if isinstance(raw, bytes) else raw)
+                diff = now - val.get("timestamp", now)
+                workers.append({
+                    "worker_id": val.get("worker_id"),
+                    "status": val.get("status", "UNKNOWN"),
+                    "current_doc": val.get("current_doc"),
+                    "last_seen_seconds_ago": diff,
+                    "alive": diff < 65
+                })
+        except Exception:
+            continue
+    return {"active_workers": workers, "count": len(workers)}
