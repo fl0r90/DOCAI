@@ -85,6 +85,7 @@
     - Sigla DocAI a fost transformată în scurtătură directă către Panoul Principal (`/`).
     - În fereastra `/cases` a fost adăugat buton de navigare înapoi (`ChevronLeft`) către Panoul Principal (`/`).
     - Persistența dosarului selectat (`last_selected_case_id` în `localStorage`), astfel încât la revenirea în Panoul Principal dosarul de lucru rămâne gata selectat cu toate probele și entitățile vizibile.
+- **Ghid Autonom de Deploy (README.md):** Documentarea procedurii complete de lansare pe o mașină nouă via GitHub + LM Studio, fără transfer de arhive sau modele mari pe suport fizic.
 
 ## 4. Configurație Media Stack NAS (XPenology) - Mentenanță Iunie 2026
 - **Download Engine:** qBittorrent (Aplicație nativă Synology).
