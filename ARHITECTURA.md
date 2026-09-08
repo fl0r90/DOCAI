@@ -80,6 +80,11 @@
 - **Curățare Criptografică a Sesiunii:** Ștergerea completă și simultană a token-ului JWT (`token`) și a rolului de securitate (`role`) din stocarea cookies înainte de redirecționarea curată către `/login`.
 - **Securizare la Nivel de Transport API (`lib/api.ts`):** Interceptor Axios pentru răspunsuri HTTP `401 Unauthorized` care invalidează automat sesiunea expirată și redirecționează utilizatorul la login fără blocaje de interfață.
 - **Sincronizare Versiune UI:** Alinierea tuturor referințelor vizuale de versiune la `DocAI v0.7.0 BETA` în layout și antete.
+- **Remediere Navigare & Întoarcere Dosar de Lucru (`handleBack` & State Persistence):**
+    - Săgeata de sus din detaliul dosarului (`/cases/[id]`) a fost reparată pentru a apela `handleBack()` (`router.back()` cu fallback la `/`), asigurând că utilizatorul revine exact în fereastra principală de lucru (`/`) din care a apăsat „Deschide Investigația”, eliminând redirecționarea forțată către `/cases`.
+    - Sigla DocAI a fost transformată în scurtătură directă către Panoul Principal (`/`).
+    - În fereastra `/cases` a fost adăugat buton de navigare înapoi (`ChevronLeft`) către Panoul Principal (`/`).
+    - Persistența dosarului selectat (`last_selected_case_id` în `localStorage`), astfel încât la revenirea în Panoul Principal dosarul de lucru rămâne gata selectat cu toate probele și entitățile vizibile.
 
 ## 4. Configurație Media Stack NAS (XPenology) - Mentenanță Iunie 2026
 - **Download Engine:** qBittorrent (Aplicație nativă Synology).

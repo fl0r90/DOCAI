@@ -75,6 +75,12 @@ export default function ForensicDashboard() {
 
   useEffect(() => {
     setMounted(true);
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('last_selected_case_id');
+      if (saved && !selectedCaseId) {
+        setSelectedCaseId(saved);
+      }
+    }
     if (token) {
       refreshData();
       const interval = setInterval(refreshData, 3000);
@@ -202,7 +208,14 @@ export default function ForensicDashboard() {
           <h2 className="text-sm font-bold text-slate-400 dark:text-slate-500 mb-4 tracking-widest uppercase">Dosar de lucru</h2>
           <select 
             value={selectedCaseId} 
-            onChange={e => setSelectedCaseId(e.target.value)}
+            onChange={e => {
+              const val = e.target.value;
+              setSelectedCaseId(val);
+              if (typeof window !== 'undefined') {
+                if (val) localStorage.setItem('last_selected_case_id', val);
+                else localStorage.removeItem('last_selected_case_id');
+              }
+            }}
             className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-3 text-slate-900 dark:text-white focus:outline-none focus:border-blue-500 text-sm appearance-none cursor-pointer hover:bg-slate-100 dark:hover:bg-slate-900 transition-colors"
           >
             <option value="">-- Alege un dosar pentru a adăuga probe --</option>

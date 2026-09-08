@@ -288,11 +288,22 @@ export default function CaseDetail() {
 
   useEffect(() => {
     if (!token) { router.push('/login'); return; }
+    if (caseId && typeof window !== 'undefined') {
+      localStorage.setItem('last_selected_case_id', caseId as string);
+    }
     fetchData();
     api.get(`/cases/${caseId}/chat`).then(res => setMessages(res.data));
     const interval = setInterval(fetchData, 5000);
     return () => clearInterval(interval);
   }, [caseId]);
+
+  const handleBack = () => {
+    if (typeof window !== 'undefined' && window.history.state && window.history.state.idx > 0) {
+      router.back();
+    } else {
+      router.push('/');
+    }
+  };
 
   const formatETA = (seconds: number) => {
     if (!seconds || seconds <= 0) return 'calculând...';
@@ -612,10 +623,18 @@ export default function CaseDetail() {
       <div className="bg-white/80 dark:bg-slate-900/50 border-b border-slate-200 dark:border-white/5 sticky top-0 z-50 backdrop-blur-md">
         <div className="max-w-[1800px] mx-auto px-6 h-20 flex items-center justify-between">
           <div className="flex items-center gap-6">
-            <button onClick={() => router.push('/cases')} className="p-2.5 bg-slate-100 dark:bg-white/5 hover:bg-slate-200 dark:hover:bg-white/10 rounded-xl border border-slate-200 dark:border-white/10 group transition-all">
+            <button 
+              onClick={handleBack} 
+              title="Înapoi"
+              className="p-2.5 bg-slate-100 dark:bg-white/5 hover:bg-slate-200 dark:hover:bg-white/10 rounded-xl border border-slate-200 dark:border-white/10 group transition-all"
+            >
               <ChevronLeft className="w-5 h-5 text-slate-500 dark:text-slate-400 group-hover:text-slate-900 dark:group-hover:text-white" />
             </button>
-            <div className="flex items-center gap-4">
+            <div 
+              onClick={() => router.push('/')}
+              title="Mergi la Panoul Principal"
+              className="flex items-center gap-4 cursor-pointer hover:opacity-80 transition-opacity"
+            >
               <div className="p-2 bg-blue-600 rounded-xl shadow-lg shadow-blue-500/20"><Shield className="w-5 h-5 text-white" /></div>
               <div><h1 title="Codat (prost) de Gemini ✨ si cfp90" className="cursor-help text-sm font-black text-slate-900 dark:text-white uppercase leading-none italic tracking-tighter">DocAI v0.7.0 BETA</h1></div>
             </div>
