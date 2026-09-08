@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Shield, Building2, User, Database, Landmark, AlertTriangle, Loader2, ScrollText, History, Clock, FileText, ArrowRight, Plus, X, Sun, Moon } from 'lucide-react';
+import { Shield, Building2, User, Database, Landmark, AlertTriangle, Loader2, ScrollText, History, Clock, FileText, ArrowRight, Plus, X, Sun, Moon, LogOut } from 'lucide-react';
 import api from '../lib/api';
 import Cookies from 'js-cookie';
 import { useTheme } from '../lib/ThemeProvider';
@@ -143,7 +143,7 @@ export default function ForensicDashboard() {
         <div className="flex items-center gap-3">
           <Shield className="w-8 h-8 text-blue-500" />
           <h1 className="text-2xl font-black tracking-tighter uppercase text-slate-900 dark:text-white">Doc<span className="text-blue-500">AI</span></h1>
-          <span title="Codat (prost) de Gemini ✨ si cfp90" className="cursor-help text-[10px] font-black text-blue-500/50 uppercase tracking-widest mt-1 ml-2">v0.6.5 ALPHA</span>
+          <span title="Codat (prost) de Gemini ✨ si cfp90" className="cursor-help text-[10px] font-black text-blue-500/50 uppercase tracking-widest mt-1 ml-2">v0.7.0 BETA</span>
         </div>
         <div className="text-right hidden md:block">
           {currentUser && (
@@ -189,9 +189,10 @@ export default function ForensicDashboard() {
           )}
           <button 
             onClick={() => { Cookies.remove('token'); Cookies.remove('role'); router.push('/login'); }} 
-            className="bg-red-500/10 text-red-500 px-4 py-2 rounded-lg text-sm font-bold border border-red-500/20 hover:bg-red-500/20 transition-all ml-2"
+            className="flex items-center gap-2 bg-red-500/10 text-red-500 px-4 py-2 rounded-lg text-sm font-bold border border-red-500/20 hover:bg-red-500/20 transition-all ml-2"
+            title="Deconectare din cont"
           >
-            Ieșire
+            <LogOut className="w-4 h-4" /> Ieșire
           </button>
         </div>
       </nav>

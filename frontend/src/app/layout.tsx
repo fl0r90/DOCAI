@@ -2,7 +2,7 @@ import "./globals.css";
 import { ThemeProvider } from "../lib/ThemeProvider";
 
 export const metadata = {
-  title: 'DocAI v0.6.5 ALPHA',
+  title: 'DocAI v0.7.0 BETA',
   description: 'Forensic Document Intelligence Platform',
 }
 

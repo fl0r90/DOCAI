@@ -6,7 +6,7 @@ import Cookies from 'js-cookie';
 import { 
   Shield, RefreshCw, ChevronLeft, Loader2, Database, 
   Play, FileArchive, CheckCircle2, AlertTriangle, Clock, History, Package,
-  RotateCcw, Sun, Moon, Activity
+  RotateCcw, Sun, Moon, Activity, LogOut
 } from 'lucide-react';
 import { useTheme } from '../../../lib/ThemeProvider';
 
@@ -95,6 +95,9 @@ export default function UpdatesCenter() {
           <button onClick={toggleTheme} className="w-full px-4 py-3 bg-slate-100 dark:bg-white/5 hover:bg-slate-200 dark:hover:bg-white/10 rounded-xl text-slate-700 dark:text-slate-300 flex items-center gap-3 font-bold text-sm transition-all text-left">
             {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
             {theme === 'dark' ? 'Tema Luminoasă' : 'Tema Întunecată'}
+          </button>
+          <button onClick={() => { Cookies.remove('token'); Cookies.remove('role'); router.push('/login'); }} className="w-full px-4 py-3 hover:bg-red-500/10 rounded-xl text-slate-500 hover:text-red-400 flex items-center gap-3 font-bold text-sm transition-all text-left">
+            <LogOut className="w-4 h-4" /> Deconectare
           </button>
         </div>
       </div>

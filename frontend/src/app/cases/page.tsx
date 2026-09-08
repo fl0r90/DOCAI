@@ -6,7 +6,7 @@ import Cookies from 'js-cookie';
 import { 
   Shield, Folder, Plus, Search, Filter, Loader2, 
   ChevronRight, Calendar, Users, FileText, LayoutGrid, List, Brain, Trash2,
-  Sun, Moon
+  Sun, Moon, LogOut
 } from 'lucide-react';
 import { useTheme } from '../../lib/ThemeProvider';
 
@@ -67,6 +67,12 @@ export default function Cases() {
     }
   };
 
+  const handleLogout = () => {
+    Cookies.remove('token');
+    Cookies.remove('role');
+    router.push('/login');
+  };
+
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-200 font-sans transition-colors duration-300">
       {/* HEADER */}
@@ -78,7 +84,7 @@ export default function Cases() {
             </div>
             <div>
               <h1 className="text-xl font-black text-slate-900 dark:text-white tracking-tight uppercase leading-none italic">DocAI</h1>
-              <span title="Codat (prost) de Gemini ✨ si cfp90" className="cursor-help text-[9px] font-black text-blue-600 dark:text-blue-500 uppercase tracking-[0.2em] mt-1 block">v0.6.5 ALPHA</span>
+              <span title="Codat (prost) de Gemini ✨ si cfp90" className="cursor-help text-[9px] font-black text-blue-600 dark:text-blue-500 uppercase tracking-[0.2em] mt-1 block">v0.7.0 BETA</span>
             </div>
           </div>
 
@@ -101,6 +107,13 @@ export default function Cases() {
                 <Plus className="w-4 h-4" /> Dosar Nou
               </button>
             )}
+            <button 
+              onClick={handleLogout}
+              className="flex items-center gap-2 px-4 py-2.5 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 rounded-xl text-red-600 dark:text-red-400 text-xs font-black uppercase tracking-widest transition-all"
+              title="Deconectare din cont"
+            >
+              <LogOut className="w-4 h-4" /> Ieșire
+            </button>
           </div>
         </div>
       </div>

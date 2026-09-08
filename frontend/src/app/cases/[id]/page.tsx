@@ -7,7 +7,7 @@ import {
   Shield, Folder, FileText, Landmark, Database, History, 
   Clock, Building2, User, Loader2, Send, MessageSquare, 
   ChevronLeft, Trash2, ArrowRightCircle, X, AlertTriangle, ExternalLink, Search, ScrollText, RotateCcw, Brain, Copy, Upload,
-  Crosshair, Route, Share2, RefreshCw, Info, Sun, Moon, ChevronDown, ChevronUp, Pause, Play, Square
+  Crosshair, Route, Share2, RefreshCw, Info, Sun, Moon, ChevronDown, ChevronUp, Pause, Play, Square, LogOut
 } from 'lucide-react';
 import { useTheme } from '../../../lib/ThemeProvider';
 
@@ -617,7 +617,7 @@ export default function CaseDetail() {
             </button>
             <div className="flex items-center gap-4">
               <div className="p-2 bg-blue-600 rounded-xl shadow-lg shadow-blue-500/20"><Shield className="w-5 h-5 text-white" /></div>
-              <div><h1 title="Codat (prost) de Gemini ✨ si cfp90" className="cursor-help text-sm font-black text-slate-900 dark:text-white uppercase leading-none italic tracking-tighter">DocAI v0.6.5 ALPHA</h1></div>
+              <div><h1 title="Codat (prost) de Gemini ✨ si cfp90" className="cursor-help text-sm font-black text-slate-900 dark:text-white uppercase leading-none italic tracking-tighter">DocAI v0.7.0 BETA</h1></div>
             </div>
             <div className="h-10 w-[1px] bg-slate-200 dark:bg-white/10" />
             <h1 className="text-xl font-black text-slate-900 dark:text-white uppercase truncate max-w-md italic">{caseInfo?.name || 'Încărcare...'}</h1>
@@ -660,6 +660,13 @@ export default function CaseDetail() {
             </button>
             <button onClick={() => setShowBriefing(true)} className="flex items-center gap-2 px-4 py-2 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/20 rounded-xl text-blue-600 dark:text-blue-400 text-sm font-bold transition-all">
               <Brain className="w-4 h-4" /> Briefing
+            </button>
+            <button 
+              onClick={() => { Cookies.remove('token'); Cookies.remove('role'); router.push('/login'); }}
+              className="flex items-center gap-2 px-3.5 py-2 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 rounded-xl text-red-600 dark:text-red-400 text-sm font-bold transition-all ml-1"
+              title="Deconectare din cont"
+            >
+              <LogOut className="w-4 h-4" /> Ieșire
             </button>
           </div>
         </div>

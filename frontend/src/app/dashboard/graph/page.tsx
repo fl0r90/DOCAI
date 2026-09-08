@@ -5,7 +5,7 @@ import api from '../../../lib/api';
 import Cookies from 'js-cookie';
 import dynamic from 'next/dynamic';
 import { 
-  Shield, Share2, ChevronLeft, Loader2, Database, X, Users, Crosshair, Route, Search
+  Shield, Share2, ChevronLeft, Loader2, Database, X, Users, Crosshair, Route, Search, LogOut
 } from 'lucide-react';
 
 const ForceGraph2D = dynamic(() => import('react-force-graph-2d'), { ssr: false });
@@ -189,7 +189,16 @@ export default function GlobalGraph() {
               </h1>
             </div>
           </div>
-          <button onClick={resetStyles} className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-xs font-black uppercase tracking-widest rounded-xl transition-colors">Reset Vizualizare</button>
+          <div className="flex items-center gap-3">
+            <button onClick={resetStyles} className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-xs font-black uppercase tracking-widest rounded-xl transition-colors">Reset Vizualizare</button>
+            <button 
+              onClick={() => { Cookies.remove('token'); Cookies.remove('role'); router.push('/login'); }} 
+              className="flex items-center gap-2 px-4 py-2 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 rounded-xl text-red-400 text-xs font-black uppercase tracking-widest transition-all"
+              title="Deconectare din cont"
+            >
+              <LogOut className="w-4 h-4" /> Ieșire
+            </button>
+          </div>
         </div>
       </div>
 

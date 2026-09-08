@@ -84,6 +84,7 @@ export default function Dashboard() {
 
   const handleLogout = () => {
     Cookies.remove('token');
+    Cookies.remove('role');
     router.push('/login');
   };
 
@@ -110,7 +111,7 @@ export default function Dashboard() {
           </div>
           <div>
             <span className="text-xl font-black tracking-tighter text-slate-900 dark:text-white uppercase block leading-none italic">DocAI Admin</span>
-            <span title="Codat (prost) de Gemini ✨ si cfp90" className="cursor-help text-[9px] font-black text-indigo-500 uppercase tracking-[0.2em] mt-1 block">v0.6.5 ALPHA</span>
+            <span title="Codat (prost) de Gemini ✨ si cfp90" className="cursor-help text-[9px] font-black text-indigo-500 uppercase tracking-[0.2em] mt-1 block">v0.7.0 BETA</span>
           </div>
         </div>
 

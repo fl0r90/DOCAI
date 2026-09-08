@@ -73,6 +73,14 @@
 - **Arhitectură Ingestion Distribuită (Remote Worker Nodes):**
     - Suport multi-nod pentru workeri asincroni cu `WORKER_ID` și heartbeats în Redis, monitorizați în timp real via `GET /system/workers`.
 
+### Etapa 20: Sistem Unificat de Autentificare & Logout Ubicuos (Admin, Master, Worker) - IMPLEMENTAT (Septembrie 2026)
+- **Accesibilitate Universală Logout:** Buton dedicat de deconectare (`LogOut` icon, acțiune securizată) integrat în toate zonele platformei:
+    - *Master & Worker:* În bara de navigare din dosare (`/cases`), în antetul detaliului de dosar (`/cases/[id]`) și în panoul principal de lucru (`/`).
+    - *Admin:* În panoul de control (`/dashboard`), în bara laterală a configurării LLM (`/dashboard/llm`), în centrul de mentenanță (`/dashboard/updates`), în modulul de analiză relațională (`/dashboard/graph`) și în managementul utilizatorilor (`/users`).
+- **Curățare Criptografică a Sesiunii:** Ștergerea completă și simultană a token-ului JWT (`token`) și a rolului de securitate (`role`) din stocarea cookies înainte de redirecționarea curată către `/login`.
+- **Securizare la Nivel de Transport API (`lib/api.ts`):** Interceptor Axios pentru răspunsuri HTTP `401 Unauthorized` care invalidează automat sesiunea expirată și redirecționează utilizatorul la login fără blocaje de interfață.
+- **Sincronizare Versiune UI:** Alinierea tuturor referințelor vizuale de versiune la `DocAI v0.7.0 BETA` în layout și antete.
+
 ## 4. Configurație Media Stack NAS (XPenology) - Mentenanță Iunie 2026
 - **Download Engine:** qBittorrent (Aplicație nativă Synology).
 - **Automation:** Radarr (Filme) & Sonarr (Seriale) rulate în Docker.
@@ -81,11 +89,11 @@
     - **Download Path (Host):** `/volume1/downloads/complete` (sau `/volume1/Download/complete`).
     - **Remote Path Mapping (Radarr/Sonarr):** `host: 192.168.0.77` | `Remote: /volume1/` | `Local: /data/`.
     - **Media Root:** `/volume1/xpenology/Download/Jellyfin/Filme` (și `Seriale`).
-- **Permisiuni:** Toate folderele de media și download au fost setate la `777` (UID: 1026/abc) pentru a permite importul între aplicația nativă și containere.
+    - **Permisiuni:** Toate folderele de media și download au fost setate la `777` (UID: 1026/abc) pentru a permite importul între aplicația nativă și containere.
 
 
 ---
-*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 18 (Arhitectură Multi-Engine Ollama/vLLM/LM Studio Local & Remote).*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 19 & Etapa 20 (Forensic Intelligence v0.7.0 & Logout Ubicuos).*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:

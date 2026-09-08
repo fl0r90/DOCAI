@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Cookies from 'js-cookie';
 import api from '../../lib/api';
-import { Users, UserPlus, Trash2, Shield, ChevronLeft, Loader2, AlertCircle, Star, StarOff, Sun, Moon } from 'lucide-react';
+import { Users, UserPlus, Trash2, Shield, ChevronLeft, Loader2, AlertCircle, Star, StarOff, Sun, Moon, LogOut } from 'lucide-react';
 import { useTheme } from '../../lib/ThemeProvider';
 
 export default function UserManagement() {
@@ -106,12 +106,19 @@ export default function UserManagement() {
         </div>
         <div className="flex items-center gap-6">
           <button onClick={toggleTheme} className="p-2.5 bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 rounded-xl text-slate-600 dark:text-slate-400 transition-all">
-            {theme === 'dark' ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
+            {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
           </button>
           <div className="text-right">
             <p className="text-sm font-bold text-slate-600 dark:text-slate-300">Admin: <span className="text-blue-600 dark:text-blue-400">@{currentUser?.username}</span></p>
             <Shield className="w-6 h-6 text-blue-600/50 dark:text-blue-500/50 ml-auto mt-1" />
           </div>
+          <button 
+            onClick={() => { Cookies.remove('token'); Cookies.remove('role'); router.push('/login'); }}
+            className="flex items-center gap-2 px-3.5 py-2 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 rounded-xl text-red-600 dark:text-red-400 text-xs font-bold transition-all"
+            title="Deconectare din cont"
+          >
+            <LogOut className="w-4 h-4" /> Ieșire
+          </button>
         </div>
       </nav>
 
