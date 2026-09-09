@@ -79,7 +79,7 @@ services:
       dockerfile: Dockerfile
     image: v2-backend:latest
     container_name: v2-backend
-    runtime: nvidia
+    # runtime: nvidia
     networks: [forensic_net, access_net]
     ports:
       - "8000:8000"
@@ -111,13 +111,13 @@ services:
       - ./shared_data:/app/data
       - ./backups:/app/backups
       - ./models:/app/ollama_models
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
     depends_on:
       db:
         condition: service_healthy

@@ -33,13 +33,21 @@ async def lifespan(app: FastAPI):
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
             conn.commit()
         models.Base.metadata.create_all(bind=forensic_engine)
-        # Migrare idempotentă: coloane adăugate ulterior creării tabelelor
+        # Migrare idempotentă: coloane adăugate ulterior creării tabelelor și eliminare constrângeri cross-db
         with forensic_engine.connect() as conn:
             conn.execute(text("ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS sql TEXT"))
             conn.execute(text("ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS citations JSONB"))
-            conn.execute(text("ALTER TABLE cases ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES users(id)"))
+            conn.execute(text("ALTER TABLE cases ADD COLUMN IF NOT EXISTS created_by INTEGER"))
             conn.execute(text("ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS chunk_index INTEGER"))
             conn.execute(text("ALTER TABLE financial_items ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT now()"))
+            conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_requested INTEGER DEFAULT 0"))
+            conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS priority INTEGER DEFAULT 0"))
+            conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS needs_password_change INTEGER DEFAULT 1"))
+            conn.execute(text("ALTER TABLE cases DROP CONSTRAINT IF EXISTS cases_created_by_fkey"))
+            conn.execute(text("ALTER TABLE case_members DROP CONSTRAINT IF EXISTS case_members_user_id_fkey"))
+            conn.execute(text("ALTER TABLE case_members DROP CONSTRAINT IF EXISTS case_members_added_by_fkey"))
+            conn.execute(text("ALTER TABLE documents DROP CONSTRAINT IF EXISTS documents_user_id_fkey"))
+            conn.execute(text("ALTER TABLE audit_logs DROP CONSTRAINT IF EXISTS audit_logs_user_id_fkey"))
             conn.commit()
         print("[+] Baza de date FORENSIC inițializată.")
     except Exception as e:
@@ -47,10 +55,12 @@ async def lifespan(app: FastAPI):
 
     # 2. Inițializăm Baza de Date AUTH
     try:
-        with auth_engine.connect() as conn:
-            conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-            conn.commit()
         models.Base.metadata.create_all(bind=auth_engine)
+        with auth_engine.connect() as conn:
+            conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_requested INTEGER DEFAULT 0"))
+            conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS priority INTEGER DEFAULT 0"))
+            conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS needs_password_change INTEGER DEFAULT 1"))
+            conn.commit()
         print("[+] Baza de date AUTH inițializată.")
     except Exception as e:
         print(f"[!] Eroare inițializare AUTH: {e}")
@@ -69,6 +79,13 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
     
+    # 4. Sincronizare automată a utilizatorilor între AUTH_DB și FORENSIC_DB
+    try:
+        auth.sync_users_auth_to_forensic()
+        print("[+] Sincronizare utilizatori AUTH -> FORENSIC completă.")
+    except Exception as e:
+        print(f"[!] Eroare sincronizare utilizatori: {e}")
+
     yield
 
 app = FastAPI(

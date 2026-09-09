@@ -14,8 +14,10 @@ class User(Base):
     username = Column(String, unique=True, index=True)
     hashed_password = Column(String)
     role = Column(String, default="investigator")
-    is_active = Column(Boolean, default=True)
+    is_active = Column(Integer, default=1)
     needs_password_change = Column(Integer, default=1)
+    reset_requested = Column(Integer, default=0)
+    priority = Column(Integer, default=0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 class Case(Base):
@@ -25,14 +27,14 @@ class Case(Base):
     description = Column(Text)
     master_id = Column(Integer)
     status = Column(String, default="open")
-    created_by = Column(Integer, ForeignKey("users.id"))
+    created_by = Column(Integer, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 class Document(Base):
     __tablename__ = "documents"
     id = Column(Integer, primary_key=True, index=True)
     case_id = Column(Integer, ForeignKey("cases.id"))
-    user_id = Column(Integer, ForeignKey("users.id")) # renamed from uploaded_by to match migration guide
+    user_id = Column(Integer, index=True) # ID utilizator din auth_db
     filename = Column(String)
     file_hash = Column(String)
     file_path = Column(String)
@@ -109,14 +111,14 @@ class FinancialItem(Base):
 class CaseMember(Base):
     __tablename__ = "case_members"
     case_id = Column(Integer, ForeignKey("cases.id"), primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id"), primary_key=True)
-    added_by = Column(Integer, ForeignKey("users.id"))
+    user_id = Column(Integer, primary_key=True)
+    added_by = Column(Integer)
     added_at = Column(DateTime(timezone=True), server_default=func.now())
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    user_id = Column(Integer, nullable=True, index=True)
     action_type = Column(String)
     details = Column(Text)
     severity = Column(String, default="INFO")

@@ -87,6 +87,24 @@
     - Persistența dosarului selectat (`last_selected_case_id` în `localStorage`), astfel încât la revenirea în Panoul Principal dosarul de lucru rămâne gata selectat cu toate probele și entitățile vizibile.
 - **Ghid Autonom de Deploy (README.md):** Documentarea procedurii complete de lansare pe o mașină nouă via GitHub + LM Studio, fără transfer de arhive sau modele mari pe suport fizic.
 
+### Etapa 21: Integritate Baze Multiple (AUTH vs FORENSIC), Endpoint Schimbare Parolă & Reziliență Rutare Dosare - IMPLEMENTAT (Septembrie 2026)
+- **Implementare Endpoint Schimbare Parolă (`POST /auth/change-password`):**
+    - La prima logare cu conturile implicite (`admin` sau `master`), sistemul forțează schimbarea parolei (`needs_password_change = 1`).
+    - A fost implementat endpoint-ul dedicat `/auth/change-password` care validează lungimea parolei, o criptează prin bcrypt, resetează flag-ul de schimbare forțată (`needs_password_change = 0`) și sincronizează modificarea în ambele baze de date (`auth_db` și `forensic_db`).
+    - Adăugat endpoint `/auth/request-reset` pentru înregistrarea cererilor de recuperare cont direct în baza de date și în audit logs.
+- **Sincronizare Automată a Utilizatorilor & Integritate Referențială Cross-Database:**
+    - Sistemul utilizează două baze de date distincte pe PostgreSQL (`auth_db` pentru identitate și `forensic_db` pentru dosare/probe).
+    - Anterior, utilizatorii erau creați doar în `auth_db`, lăsând tabelul `users` din `forensic_db` gol. La crearea unui dosar nou (`POST /cases`), constrângerea PostgreSQL `cases_created_by_fkey` eșua cu `ForeignKeyViolation (Key created_by=X is not present in table users)`, cauzând eroare 500.
+    - S-a introdus mecanismul de sincronizare bidirecțională automată (`sync_users_auth_to_forensic` la pornirea backend-ului și `sync_single_user_to_forensic` la crearea/actualizarea userilor).
+    - Au fost eliminate constrângerile rigide cross-database la nivel de DB (`cases_created_by_fkey`, `case_members_user_id_fkey`, `case_members_added_by_fkey`, `audit_logs_user_id_fkey`), garantând că operațiunile pe dosare nu sunt blocate chiar dacă bazele de date sunt exportate sau restaurate independent.
+- **Reziliență Rutare API (Trailing Slash & CORS):**
+    - Rutarea pentru dosare acceptă acum ambele variante fără redirecționare 307: `@router.get("")`/`@router.get("/")` și `@router.post("")`/`@router.post("/")`, prevenind pierderea header-ului `Authorization: Bearer` la cererile clientului Axios din frontend.
+    - Asigurată igienizarea automată a numelui dosarului (`trim` + fallback la "Dosar nou") și sincronizarea opțională a nodului `Case` în graful Neo4j.
+- **Prevenire Blocaj la Ștergerea Dosarelor (`AuditLog FK Decoupling`):**
+    - La ștergerea unui dosar (`POST /cases/{id}/delete`), logurile de audit legate de dosar sunt decuplate automat (`case_id = NULL`), prevenind violarea constrângerii `audit_logs_case_id_fkey` și permițând ștergerea completă a dosarului și a probelor sale.
+- **Corecție Tip Dată `User.is_active`:**
+    - Aliniat modelul SQLAlchemy `is_active` ca `Integer` (implicit 1) conform schemei reale a tabelului PostgreSQL, prevenind eroarea `DatatypeMismatch (column is_active is of type integer but expression is of type boolean)`.
+
 ## 4. Configurație Media Stack NAS (XPenology) - Mentenanță Iunie 2026
 - **Download Engine:** qBittorrent (Aplicație nativă Synology).
 - **Automation:** Radarr (Filme) & Sonarr (Seriale) rulate în Docker.
@@ -99,7 +117,7 @@
 
 
 ---
-*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 19 & Etapa 20 (Forensic Intelligence v0.7.0 & Logout Ubicuos).*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 21 (Reparații Autentificare & Gestiune Dosare - Multi-Database Integrity, Password Change & Routing Resilience).*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:

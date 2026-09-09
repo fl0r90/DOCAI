@@ -87,6 +87,7 @@ def _build_case_graph(db: Session, case_id: int):
 # --------------------------------------------------------------------------- #
 # Cases CRUD
 # --------------------------------------------------------------------------- #
+@router.get("")
 @router.get("/")
 def list_cases(user: models.User = Depends(get_current_user), db: Session = Depends(get_forensic_db)):
     q = db.query(models.Case)
@@ -104,18 +105,26 @@ def list_cases(user: models.User = Depends(get_current_user), db: Session = Depe
     return out
 
 
+@router.post("")
 @router.post("/")
 def create_case(payload: dict = Body(...), user: models.User = Depends(get_current_user), db: Session = Depends(get_forensic_db)):
     if user.role == "WORKER":
         raise HTTPException(status_code=403, detail="Rol insuficient.")
+    case_name = (payload.get("name") or "").strip() or "Dosar nou"
     c = models.Case(
-        name=payload.get("name", "Dosar nou"),
-        description=payload.get("description", ""),
+        name=case_name,
+        description=(payload.get("description") or "").strip(),
         created_by=user.id,
         status="open",
     )
     db.add(c); db.commit(); db.refresh(c)
     db.add(models.CaseMember(case_id=c.id, user_id=user.id, added_by=user.id)); db.commit()
+    try:
+        if graph_service.driver:
+            with graph_service.driver.session() as s:
+                s.run("MERGE (c:Case {id: $cid}) SET c.name = $name", cid=c.id, name=c.name)
+    except Exception as e:
+        print(f"[!] Neo4j case create notice: {e}")
     log_event("CASE_CREATED", user_id=user.id, case_id=c.id, details={"name": c.name})
     return {"id": c.id, "name": c.name}
 
@@ -131,6 +140,7 @@ def delete_case(case_id: int, user: models.User = Depends(get_current_user), db:
     db.query(models.ChatMessage).filter(models.ChatMessage.case_id == case_id).delete()
     db.query(models.Document).filter(models.Document.case_id == case_id).delete()
     db.query(models.CaseMember).filter(models.CaseMember.case_id == case_id).delete()
+    db.query(models.AuditLog).filter(models.AuditLog.case_id == case_id).update({models.AuditLog.case_id: None})
     db.query(models.Case).filter(models.Case.id == case_id).delete()
     db.commit()
     try:
@@ -140,7 +150,7 @@ def delete_case(case_id: int, user: models.User = Depends(get_current_user), db:
                 s.run("MATCH (c:Case {id:$cid}) DETACH DELETE c", cid=case_id)
     except Exception as e:
         print(f"[!] Graf cleanup eroare: {e}")
-    log_event("CASE_DELETED", user_id=user.id, case_id=case_id)
+    log_event("CASE_DELETED", user_id=user.id, case_id=None, details={"deleted_case_id": case_id})
     return {"status": "deleted"}
 
 
