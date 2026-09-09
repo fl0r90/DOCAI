@@ -168,13 +168,24 @@
     - Căutarea după `semantic_intent` a fost extinsă pentru a căuta atât în `doc_type` și `filename`, cât și în toate cheile și valorile din `dynamic_attributes`.
     - Citațiile returnate agentului includ automat eticheta `doc_type` pentru conștientizare contextuală imediată.
 
-### Etapa 25: Limită de Context Document de 4096 Caractere & Epurare Istoric Agnostic - IMPLEMENTAT (Septembrie 2026)
+### Etapa 25: Decompunere Întrebări Atomice, Scratchpad Memory, Context 4096 & Zoom Ierarhic - IMPLEMENTAT (Septembrie 2026)
+- **Decompunere Automată pe Ținte Atomice (`decompose_question`):**
+    - Întrebările complexe ale utilizatorului cu multiple aspecte sau cerințe factuale (ex: hash SHA-256 + IP-uri + volum date) sunt sparte automat în componente atomice încă din faza de inițializare, eliminând diluarea atenției („attention dilution”) din LLM.
+- **Memorie Temporară Structurată (Progressive Scratchpad):**
+    - Agentul menține o stare dinamică a fiecărei ținte: `status` (PENDING / RESOLVED / NOT_FOUND) și `confidence` (NONE / LOW / MEDIUM / HIGH), asociate cu faptele verificate și citările `[REF x]`.
+    - Probele confirmate sunt înghețate în memorie cu `Confidence: HIGH`, prevenind regresiile, contrazicerile sau re-evaluările redundante între pașii de investigație.
 - **4096-Caractere Context per Document (`tool_search_text`):**
     - S-a implementat limita de 4096 caractere per document în căutarea contextuală hibridă.
     - Rezultatele candidate sunt agregate la nivel de document (`doc_matches`), păstrând ordonarea de relevanță dată de neuroranker/scor.
     - Pentru orice document sub 4096 de caractere, conținutul integral (`raw_text`) este livrat fără nicio tăiere mecanică sau pierdere de secțiuni (asigurând că amprentele criptografice SHA-256, tabelele de rețea, volumele de date și datele tehnice sunt vizibile simultan în faza 1 a investigației).
     - Pentru documentele mai mari de 4096 de caractere, sistemul decupează o fereastră de 4096 caractere centrată matematic pe fragmentul identificat.
     - Citațiile sunt unificate per document (o singură intrare de citare `[REF x]` per fișier), eliminând citările duplicate pe pagini sau bucăți redundante.
+- **Zoom Ierarhic Contextual la `Confidence: MEDIUM` (`tool_fetch_full_document`):**
+    - Dacă pentru o țintă se găsesc doar indicii parțiale sau ambigue (`Confidence: MEDIUM`), agentul are la dispoziție unealta dedicată `FETCH_FULL_DOCUMENT(doc_id, focus_terms)` pentru a inspecta fișierul integral sau paragrafele adiacente extinse.
+- **Recompunere Finală Rapidă & Optimizare Latență:**
+    - S-a eliminat constrângerea artificială de 5 pași obligatorii.
+    - Când toate țintele atomice din Scratchpad ating `Confidence: HIGH` (ori certitudine de absență în dosar), agentul emite direct raportul consolidat.
+    - Contextul `num_ctx` a fost aliniat dinamic cu parametrul `chat_ctx` din configurația de motor (16.384 tokeni), eliminând alocarea redundantă de 32k pe CPU/RAM.
 - **Epurare & Compresie Istoric Conversație (`_load_history`):**
     - S-a redus fereastra de mesaje din istoric de la 10 la 4 (2 runde complete de întrebare-răspuns).
     - Răspunsurile lungi ale asistentului din mesajele trecute sunt compresate/trunchiate la maximum 1200 de caractere pentru a preveni „bleed-through”-ul (poluarea noului context cu liste masive de persoane sau tabele din interogări anterioare).
@@ -182,7 +193,7 @@
     - Au fost eliminate toate exemplele de domeniu particulare („curs”, „training”, „prezență”, etc.) din prompturile preliminare, descrierile uneltelor (`SEARCH_TEXT`) și din mesajele de avertizare la concluzii negative fără căutare.
 
 ---
-*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 25 (4096-Char Document Context & History Sanitization).*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 25 (Sub-question Decomposition, Progressive Scratchpad Memory, 4096-Char Context & Hierarchical Zoom).*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:
