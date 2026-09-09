@@ -15,6 +15,78 @@ from .llm_client import UnifiedLLMClient
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://llm:11434")
 VLLM_URL = os.getenv("VLLM_URL", "http://v2-vllm:8000/v1")
 
+ROMANIAN_MONTHS = {
+    1: ["ianuarie", "ian"],
+    2: ["februarie", "feb"],
+    3: ["martie", "mar"],
+    4: ["aprilie", "apr"],
+    5: ["mai"],
+    6: ["iunie", "iun"],
+    7: ["iulie", "iul"],
+    8: ["august", "aug"],
+    9: ["septembrie", "sept", "sep"],
+    10: ["octombrie", "oct"],
+    11: ["noiembrie", "nov"],
+    12: ["decembrie", "dec"]
+}
+
+def get_date_variants(text: str) -> list:
+    """
+    Extracts date patterns (e.g. 17.01.2025, 17-01-2025, 17/01/2025, 17 ianuarie 2025)
+    and generates all common variants (dots, hyphens, slashes, Romanian text months, ISO format).
+    """
+    if not text:
+        return []
+    variants = set()
+    # 1. DD[./-]MM[./-]YYYY
+    pattern_dmy = re.findall(r'\b(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\b', text)
+    for d_str, m_str, y_str in pattern_dmy:
+        try:
+            d = int(d_str)
+            m = int(m_str)
+            y = int(y_str)
+            if y < 100:
+                y += 2000
+            if 1 <= d <= 31 and 1 <= m <= 12:
+                variants.add(f"{d:02d}-{m:02d}-{y}")
+                variants.add(f"{d:02d}.{m:02d}.{y}")
+                variants.add(f"{d:02d}/{m:02d}/{y}")
+                variants.add(f"{d}-{m}-{y}")
+                variants.add(f"{d}.{m}.{y}")
+                variants.add(f"{d}/{m}/{y}")
+                variants.add(f"{y}-{m:02d}-{d:02d}")
+                variants.add(f"{y}.{m:02d}.{d:02d}")
+                for m_name in ROMANIAN_MONTHS.get(m, []):
+                    variants.add(f"{d} {m_name} {y}")
+                    variants.add(f"{d:02d} {m_name} {y}")
+        except Exception:
+            pass
+
+    # 2. Match text format: DD <month_name> YYYY
+    pattern_text = re.findall(r'\b(\d{1,2})\s+([a-zA-ZăâîșțĂÂÎȘȚ]+)\s+(\d{4})\b', text, re.IGNORECASE)
+    for d_str, m_name, y_str in pattern_text:
+        m_lower = m_name.lower()
+        matched_m = None
+        for m_idx, m_names in ROMANIAN_MONTHS.items():
+            if any(m_lower.startswith(mn) for mn in m_names):
+                matched_m = m_idx
+                break
+        if matched_m:
+            try:
+                d = int(d_str)
+                y = int(y_str)
+                if 1 <= d <= 31:
+                    variants.add(f"{d:02d}-{matched_m:02d}-{y}")
+                    variants.add(f"{d:02d}.{matched_m:02d}.{y}")
+                    variants.add(f"{d:02d}/{matched_m:02d}/{y}")
+                    variants.add(f"{d}-{matched_m}-{y}")
+                    variants.add(f"{d}.{matched_m}.{y}")
+                    variants.add(f"{y}-{matched_m:02d}-{d:02d}")
+            except Exception:
+                pass
+
+    return list(variants)
+
 class AgenticInvestigator:
     def __init__(self, case_id: int, user_question: str):
         self.case_id = case_id
@@ -28,14 +100,21 @@ class AgenticInvestigator:
         self._pre_process_query()
 
     def _load_history(self):
-        """Loads last 10 messages for context window."""
+        """Loads last 10 messages for context window, excluding the current question if already saved."""
         with SessionLocal() as db:
-            past_msgs = db.query(ChatMessage).filter(ChatMessage.case_id == self.case_id).order_by(ChatMessage.created_at.desc()).limit(10).all()
+            past_msgs = db.query(ChatMessage).filter(ChatMessage.case_id == self.case_id).order_by(ChatMessage.created_at.desc()).limit(11).all()
+            # If the most recent message in DB is the current user question (saved by cases.py before launching), skip it
+            if past_msgs and past_msgs[0].role == "user" and past_msgs[0].content.strip() == self.user_question.strip():
+                past_msgs = past_msgs[1:11]
+            else:
+                past_msgs = past_msgs[:10]
+
             # Reverse to get chronological order
             for m in reversed(past_msgs):
                 # We strip the investigation logs from history to keep context clean
                 clean_content = m.content.split("**LOG INVESTIGATIE:**")[0].strip()
-                self.history.append({"role": m.role, "content": clean_content})
+                if clean_content:
+                    self.history.append({"role": m.role, "content": clean_content})
 
     def _pre_process_query(self):
         """Initial check for obvious entities and dates to seed the prompt."""
@@ -43,24 +122,32 @@ class AgenticInvestigator:
             doc_ids = [d.id for d in db.query(Document).filter(Document.case_id == self.case_id).all()]
             if not doc_ids: return
 
-            # Extract temporal anchors (Years, Months)
+            # Extract temporal anchors (Years, Months, Dates)
             months = ["ianuarie", "februarie", "martie", "aprilie", "mai", "iunie", "iulie", "august", "septembrie", "octombrie", "noiembrie", "decembrie"]
             found_months = [m for m in months if m in self.user_question.lower()]
             found_years = re.findall(r'20\d{2}', self.user_question)
+            found_dates = get_date_variants(self.user_question)
             
             # Extract obvious entities (ALL CAPS)
             anchors = re.findall(r'[A-Z]{3,30}', self.user_question)
             
-            if anchors or found_months or found_years:
+            if anchors or found_months or found_years or found_dates:
                 self.injected_evidence = "--- PRELIMINARY CONTEXT ---\n"
                 self.injected_evidence += f"Detected Subject(s): {', '.join(anchors) if anchors else 'None'}\n"
                 self.injected_evidence += f"Detected Time Constraints: {' '.join(found_months)} {' '.join(found_years)}\n"
+                if found_dates:
+                    self.injected_evidence += f"Detected Explicit Date Variations to Search: {', '.join(found_dates[:6])}\n"
                 
         # Intent Detection
         q_lower = self.user_question.lower()
         if any(k in q_lower for k in ["cati", "câți", "cate", "câte", "total", "suma", "listă completă", "lista completa"]):
             self.injected_evidence += "CRITICAL: The user is asking for a QUANTITATIVE answer or a TOTAL COUNT. You MUST use SEARCH_STRUCTURED_DATA to get accurate counts from the database tables. Do NOT rely on individual text fragments for totals.\n"
         
+        # Attendance / Course / Participants intent
+        attendance_markers = ["cine a fost", "cine a participat", "participanti", "participanți", "prezenti", "prezenți", "absenti", "absenți", "prezenta", "prezență", "curs", "training", "sedinta", "ședință", "registru"]
+        if any(k in q_lower for k in attendance_markers):
+            self.injected_evidence += "CRITICAL ATTENDANCE / PARTICIPANT QUERY: The user is asking about attendees, participants, courses, or meetings. You MUST use SEARCH_TEXT first to search for the attendance register or course document (e.g. concept='prezenta curs', semantic_intent='curs'). Do NOT conclude that no evidence exists without searching document texts via SEARCH_TEXT.\n"
+
         if any(k in q_lower for k in ["plata", "incasare", "suma", "ron", "usd", "achizitie", "pret", "valoare", "cost"]):
             self.injected_evidence += "Suggested Intent: FINANCIAL -> Use SEARCH_STRUCTURED_DATA for hard figures.\n"
         elif any(k in q_lower for k in ["contract", "declaratie", "email", "conversatie", "decizie", "motiv", "cine"]):
@@ -72,7 +159,7 @@ class AgenticInvestigator:
         self.injected_evidence += "Use the specialized tools below to find exact records.\n"
 
     def tool_search_text(self, query: str, semantic_intent: str = ""):
-        """Tool 1: Hybrid Search (Lexical + Vector) in document chunks."""
+        """Tool 1: Hybrid Search (Lexical + Vector + Date-Aware) in document chunks."""
         with SessionLocal() as db:
             all_docs = db.query(Document).filter(Document.case_id == self.case_id).all()
             doc_ids = [d.id for d in all_docs]
@@ -92,14 +179,24 @@ class AgenticInvestigator:
             else:
                 intent_warning = ""
             
-            words = [w.strip() for w in re.findall(r'\w{3,}', query) if len(w) >= 3]
-            if not words: return "No valid keywords for text search."
+            # Extract date variants from both the query AND the user question
+            date_variants = get_date_variants(query)
+            if not date_variants and self.user_question:
+                date_variants = get_date_variants(self.user_question)
 
-            # ... (restul logicii rămâne la fel, dar folosim doc_ids filtrat sau total)
-            # Adăugăm intent_warning la output-ul final
+            words = [w.strip() for w in re.findall(r'\b\w{2,}\b', query) if len(w) >= 2]
+            if not words and not date_variants:
+                return "No valid keywords or dates for text search."
 
+            # 1. Date Exact Search (fetch chunks matching any date variant directly)
+            date_res = []
+            if date_variants:
+                date_conditions = [DocumentChunk.content.ilike(f"%{dv}%") for dv in date_variants]
+                date_res = db.query(DocumentChunk)\
+                    .filter(and_(DocumentChunk.document_id.in_(doc_ids), or_(*date_conditions)))\
+                    .limit(30).all()
 
-            # 1. Semantic Search (Vector)
+            # 2. Semantic Search (Vector)
             query_embedding = None
             try:
                 from .embedding_service import EmbeddingService
@@ -119,23 +216,26 @@ class AgenticInvestigator:
                     db.rollback()
                     print(f"[!] pgvector search error: {e}")
 
-            # 2. Lexical Search (Exact Keyword Match via ILIKE)
-            conditions = [DocumentChunk.content.ilike(f"%{w}%") for w in words]
-            lexical_res = db.query(DocumentChunk)\
-                .filter(and_(DocumentChunk.document_id.in_(doc_ids), or_(*conditions)))\
-                .limit(30).all()
+            # 3. Lexical Search (Exact Keyword Match via ILIKE)
+            lexical_res = []
+            lex_words = [w for w in words if len(w) >= 3]
+            if lex_words:
+                conditions = [DocumentChunk.content.ilike(f"%{w}%") for w in lex_words]
+                lexical_res = db.query(DocumentChunk)\
+                    .filter(and_(DocumentChunk.document_id.in_(doc_ids), or_(*conditions)))\
+                    .limit(30).all()
 
-            # 3. Merge & Deduplicate
+            # 4. Merge & Deduplicate (date_res prioritized first)
             seen_ids = set()
             merged_results = []
-            for r in vector_res + lexical_res:
+            for r in date_res + vector_res + lexical_res:
                 if r.id not in seen_ids:
                     seen_ids.add(r.id)
                     merged_results.append(r)
 
             if not merged_results: return "No text fragments found."
 
-            # 4. Neural Reranking via SentenceTransformers (with Rule-based Fallback)
+            # 5. Neural Reranking via SentenceTransformers (with Rule-based Fallback)
             scored_res = []
             try:
                 from .rerank_service import RerankService
@@ -143,6 +243,18 @@ class AgenticInvestigator:
                 # Rerank query with candidates
                 scored_res = reranker.rerank(query, merged_results, top_k=20)
                 print(f"[+] Successfully reranked {len(merged_results)} candidates using cross-encoder.")
+                if date_variants:
+                    boosted = []
+                    for s, r in scored_res:
+                        boost = 0.0
+                        c_low = r.content.lower()
+                        for dv in date_variants:
+                            if dv.lower() in c_low:
+                                boost += 5.0
+                                break
+                        boosted.append((s + boost, r))
+                    boosted.sort(key=lambda x: x[0], reverse=True)
+                    scored_res = boosted
             except Exception as e:
                 print(f"[!] Reranker failed or not loaded, falling back to keyword scoring: {e}")
                 # Fallback rule-based scorer
@@ -160,6 +272,8 @@ class AgenticInvestigator:
                     for ent in entities:
                         if ent in content_raw: score += 20
                         if ent.lower() in filename_lower: score += 50
+                    for dv in date_variants:
+                        if dv.lower() in content_lower: score += 30
                     return score
 
                 scored_res = sorted(
@@ -228,21 +342,45 @@ class AgenticInvestigator:
             # AGNOSTIC AGGREGATION: If requested, parse Markdown tables directly
             if aggregate:
                 unique_rows = set()
-                # Search across all chunks in this case
-                chunks = db.query(DocumentChunk).filter(DocumentChunk.document_id.in_(doc_ids), DocumentChunk.content.ilike(f"%{subject}%")).all()
+                pattern_variants = get_date_variants(match_pattern) if match_pattern else []
+                if match_pattern and not pattern_variants:
+                    pattern_variants = [match_pattern.lower()]
+                else:
+                    pattern_variants = [v.lower() for v in pattern_variants]
+                
+                subject_terms = [w.strip() for w in re.findall(r'\w{3,}', subject) if len(w) >= 3]
+                chunk_filter = [DocumentChunk.content.ilike(f"%{subject}%")]
+                if subject_terms:
+                    chunk_filter.extend([DocumentChunk.content.ilike(f"%{t}%") for t in subject_terms])
+                if pattern_variants:
+                    chunk_filter.extend([DocumentChunk.content.ilike(f"%{pv}%") for pv in pattern_variants])
+
+                chunks = db.query(DocumentChunk).filter(
+                    DocumentChunk.document_id.in_(doc_ids),
+                    or_(*chunk_filter)
+                ).all()
+
                 for c in chunks:
+                    c_lower = c.content.lower()
+                    chunk_matches_pattern = True
+                    if pattern_variants:
+                        chunk_matches_pattern = any(pv in c_lower for pv in pattern_variants)
+
                     for line in c.content.split('\n'):
                         if "|" in line:
                             is_subject_match = False
-                            if subject.lower() in line.lower():
+                            if subject.lower() in line.lower() or any(t.lower() in line.lower() for t in subject_terms):
                                 is_subject_match = True
-                            elif subject.lower() in c.content.lower() and subject.lower() not in ["prezent", "absent"]:
+                            elif subject.lower() in c_lower and subject.lower() not in ["prezent", "absent"]:
                                 is_subject_match = True
                                 
                             if is_subject_match:
-                                if not match_pattern or match_pattern.lower() in line.lower():
+                                line_matches_pattern = True
+                                if pattern_variants:
+                                    line_matches_pattern = any(pv in line.lower() for pv in pattern_variants) or chunk_matches_pattern
+
+                                if line_matches_pattern:
                                     if not any(hdr in line.lower() for hdr in ["nume si prenume", "email", "status", "---"]):
-                                        # Normalize row for deduplication
                                         clean_line = "|".join([col.strip() for col in line.split("|") if col.strip()])
                                         if clean_line: unique_rows.add(clean_line)
                 
@@ -375,19 +513,44 @@ class AgenticInvestigator:
                     # FALLBACK to AGNOSTIC AGGREGATION if no transactions found
                     # This helps in cases (like Case 6) where only tabular attendance data is available
                     unique_rows = set()
-                    chunks = db.query(DocumentChunk).filter(DocumentChunk.document_id.in_(doc_ids), DocumentChunk.content.ilike(f"%{subject}%")).all()
+                    pattern_variants = get_date_variants(match_pattern or date_filter)
+                    if (match_pattern or date_filter) and not pattern_variants:
+                        pattern_variants = [(match_pattern or date_filter).lower()]
+                    else:
+                        pattern_variants = [v.lower() for v in pattern_variants]
+                    
+                    chunk_filter = [DocumentChunk.content.ilike(f"%{subject}%")]
+                    if search_terms:
+                        chunk_filter.extend([DocumentChunk.content.ilike(f"%{t}%") for t in search_terms])
+                    if pattern_variants:
+                        chunk_filter.extend([DocumentChunk.content.ilike(f"%{pv}%") for pv in pattern_variants])
+
+                    chunks = db.query(DocumentChunk).filter(
+                        DocumentChunk.document_id.in_(doc_ids),
+                        or_(*chunk_filter)
+                    ).all()
+
                     if chunks:
                         for c in chunks:
+                            c_lower = c.content.lower()
+                            chunk_matches_pattern = True
+                            if pattern_variants:
+                                chunk_matches_pattern = any(pv in c_lower for pv in pattern_variants)
+
                             for line in c.content.split('\n'):
                                 if "|" in line:
                                     is_subject_match = False
-                                    if subject.lower() in line.lower():
+                                    if subject.lower() in line.lower() or any(t.lower() in line.lower() for t in search_terms):
                                         is_subject_match = True
-                                    elif subject.lower() in c.content.lower() and subject.lower() not in ["prezent", "absent"]:
+                                    elif subject.lower() in c_lower and subject.lower() not in ["prezent", "absent"]:
                                         is_subject_match = True
                                         
                                     if is_subject_match:
-                                        if not match_pattern or match_pattern.lower() in line.lower():
+                                        line_matches_pattern = True
+                                        if pattern_variants:
+                                            line_matches_pattern = any(pv in line.lower() for pv in pattern_variants) or chunk_matches_pattern
+
+                                        if line_matches_pattern:
                                             if not any(hdr in line.lower() for hdr in ["nume si prenume", "email", "status", "---"]):
                                                 clean_line = "|".join([col.strip() for col in line.split("|") if col.strip()])
                                                 if clean_line: unique_rows.add(clean_line)
@@ -466,7 +629,7 @@ class AgenticInvestigator:
         system_prompt = """You are a Professional Forensic Data Auditor.
 CORE RULES:
 1. AGNOSTICISM: You have no prior knowledge of any persons or events. Answer ONLY using evidence from tools or provided context.
-2. TOOL-USE: Use SEARCH_TEXT or SEARCH_STRUCTURED_DATA to find evidence. If evidence is already provided in the context, do not make redundant calls.
+2. TOOL-USE: Use SEARCH_TEXT or SEARCH_STRUCTURED_DATA to find evidence. If evidence is already provided in the context, do not make redundant calls. NEVER conclude that evidence does not exist without searching document texts via SEARCH_TEXT.
 3. TEMPORAL PRECISION: If the user mentions a date, you MUST use the 'date_filter' parameter (DD.MM.YYYY or MM.YYYY).
 4. LANGUAGE: Think in English, but the FINAL ANSWER must be in ROMANIAN.
 5. PRECISION: Extract specific facts (names, dates, amounts). If info is missing, state it clearly.
@@ -508,12 +671,12 @@ FINAL RESPONSE FORMAT (ROMANIAN):
                 "type": "function",
                 "function": {
                     "name": "SEARCH_TEXT",
-                    "description": "Search for non-financial concepts, statements, contracts, or general context.",
+                    "description": "Search the full text and tables of all case documents (attendance registers, courses, lists of people, contracts, minutes, statements, reports, emails). Always use this when looking for people, attendees, course registers, dates, or non-financial facts.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "concept": {"type": "string", "description": "Keywords to search (e.g. contract imprumut)"},
-                            "semantic_intent": {"type": "string", "description": "Type of document (e.g. CONTRACT, DECLARATIE)."}
+                            "concept": {"type": "string", "description": "Keywords or dates to search (e.g. '17.01.2025 curs prezenta', 'contract imprumut')"},
+                            "semantic_intent": {"type": "string", "description": "Optional type of document (e.g. CURS, CONTRACT, DECLARATIE, PROCES VERBAL)."}
                         },
                         "required": ["concept"]
                     }
@@ -588,6 +751,7 @@ FINAL RESPONSE FORMAT (ROMANIAN):
         })
 
         has_used_tools = False
+        has_used_search_text = False
 
         for step in range(1, 16):
             yield json.dumps({"type": "step", "data": f"Phase {step}: Investigating..."})
@@ -637,6 +801,7 @@ FINAL RESPONSE FORMAT (ROMANIAN):
                 elif "[SEARCH_TEXT]" in content:
                     concept_match = re.search(r"concept:\s*([^\\n]+)", content)
                     if concept_match:
+                        has_used_search_text = True
                         synthetic_tool_calls.append({
                             "function": {
                                 "name": "SEARCH_TEXT",
@@ -655,6 +820,8 @@ FINAL RESPONSE FORMAT (ROMANIAN):
                 for tc in tool_calls:
                     t_name = tc["function"]["name"]
                     t_args = tc["function"]["arguments"]
+                    if t_name == "SEARCH_TEXT":
+                        has_used_search_text = True
                     
                     if isinstance(t_args, str):
                         try:
@@ -717,21 +884,41 @@ FINAL RESPONSE FORMAT (ROMANIAN):
             final_content = assistant_msg.get("content", "").strip()
             
             if "[FINAL RESPONSE]" in final_content or "CONCLUZIE" in final_content.upper():
+                # Guard against premature negative conclusions without text search
+                negative_phrases = [
+                    "nu există dovezi", "nu exista dovezi", "nu există nicio înregistrare",
+                    "nu exista nicio inregistrare", "nu s-au găsit", "nu s-au gasit",
+                    "nu am găsit", "nu am gasit", "nu sunt date", "lipsesc dovezi",
+                    "no evidence", "nu există informații", "nu exista informatii"
+                ]
+                has_negative = any(p in final_content.lower() for p in negative_phrases)
+                if has_negative and not has_used_search_text and step < 5:
+                    messages.append({
+                        "role": "user",
+                        "content": "ATENȚIE AUDITOR: Nu poți concluziona că lipsesc dovezile din dosar fără a căuta în textul integral al documentelor! Apelează SEARCH_TEXT cu cuvinte cheie relevante (inclusiv variațiile de dată și denumirea cursului/activității) pentru a verifica registrele, procesele verbale și rapoartele înainte de a finaliza."
+                    })
+                    continue
+
                 # Extract only the final response part if it's mixed with planning/thinking
                 if "[FINAL RESPONSE]" in final_content:
-                    display_content = final_content.split("[FINAL RESPONSE]")[-1].strip()
+                    parts = final_content.split("[FINAL RESPONSE]")
+                    display_content = parts[-1].strip()
+                    if not display_content and len(parts) > 1 and parts[0].strip():
+                        display_content = parts[0].strip()
                 else:
                     display_content = final_content
                 
-                yield json.dumps({"type": "final", "data": display_content, "citations": self.citations})
-                return
+                if display_content:
+                    yield json.dumps({"type": "final", "data": display_content, "citations": self.citations})
+                    return
 
             if step < 5: # Minim 5 pași dacă nu a găsit răspunsul final
                 messages.append({"role": "user", "content": "Continuă investigația folosind uneltele pentru a găsi dovezi clare (date, sume, nume). Dacă ai terminat, oferă răspunsul final precedat de [FINAL RESPONSE]."})
                 continue
                 
-            yield json.dumps({"type": "final", "data": final_content, "citations": self.citations})
-            return
+            if final_content:
+                yield json.dumps({"type": "final", "data": final_content, "citations": self.citations})
+                return
 
         yield json.dumps({"type": "final", "data": "Am atins limita de 15 pași de investigație. Rezumat parțial bazat pe dovezile găsite:", "citations": self.citations})
 

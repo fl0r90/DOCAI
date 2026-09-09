@@ -116,8 +116,23 @@
     - **Permisiuni:** Toate folderele de media și download au fost setate la `777` (UID: 1026/abc) pentru a permite importul între aplicația nativă și containere.
 
 
+### Etapa 22: Decuplare Asistent Chat în Fundal (Persistență la "Back"), Căutare Temporală Multiformat & Prevenire Concluzii Negative Premature - IMPLEMENTAT (Septembrie 2026)
+- **Decuplare Rulare Investigație în Fundal & Rezistență la Navigare ("Back" Persistence):**
+    - Anterior, generatorul SSE din endpoint-ul `/cases/{case_id}/chat` rula sincron în corpul funcției `stream()`. Dacă utilizatorul naviga înapoi (`router.back()`) sau închidea tab-ul în timpul investigației, conexiunea HTTP era întreruptă, FastAPI arunca `GeneratorExit`, iar codul de salvare a mesajului asistentului din baza de date nu era niciodată executat.
+    - S-a decuplat executarea agentului într-un worker thread dedicat (`threading.Thread(target=run_investigation, daemon=True)`) comunicând cu generatorul HTTP prin `queue.Queue`.
+    - Chiar dacă utilizatorul dă "Back", worker-ul continuă investigația în fundal și salvează garantat răspunsul (`role='assistant'`) în tabelul `chat_messages` din `forensic_db`. La următoarea accesare a dosarului, răspunsul este gata persistat.
+- **Normalizare & Detecție Multiformat de Date Temporale (`get_date_variants`):**
+    - Adăugată extragerea și generarea automată a tuturor formatelor de date (ex: `17.01.2025`, `17-01-2025`, `17/01/2025`, `17 ianuarie 2025`, `2025-01-17`).
+    - În `tool_search_text`, fragmentele care conțin variațiile de dată sunt interogate direct prin `ILIKE` și primesc boost de relevanță în Cross-Encoder Reranker și în scorul de fallback, eliminând ratarea chunk-urilor cauzată de diferențele de punctuație (puncte vs cratime).
+    - În `tool_search_transactions` (atât pe modul `aggregate`, cât și pe fallback), filtrele de căutare potrivesc acum data pe antetul de context al chunk-ului (`Context: ... Data: 17-01-2025`), permițând parsarea automată a tabelelor de prezență unde data este în antetul fișierului și nu pe fiecare rând de tabel.
+- **Prevenire Concluzii Negative Premature ("Anti-Hallucinated Negative Guard"):**
+    - Rezolvată cauza eșecului din mesajul 818, unde agentul apela doar `SEARCH_STRUCTURED_DATA` (care căuta în tranzacții financiare), obținea 0 rânduri și concluziona eronat cu `[CONFIDENCE]: HIGH` că nu există probe, fără a căuta în textul documentelor.
+    - S-a implementat un gardian de integritate în bucla agentului: dacă modelul încearcă să emită un `[FINAL RESPONSE]` cu formulare negativă ("nu există dovezi", "nu s-au găsit"), dar nu a apelat niciodată `SEARCH_TEXT`, concluzia este respinsă automat, iar agentul primește instrucțiunea explicită de a rula `SEARCH_TEXT` înainte de a putea finaliza.
+- **Eliminare Duplicare Întrebare în Istoric (`_load_history`):**
+    - S-a introdus deduplicarea automată în `_load_history` pentru a evita apariția dublă a întrebării utilizatorului în contextul LLM (cauzată de salvarea mesajului utilizator în DB chiar înainte de lansarea agentului).
+
 ---
-*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 21 (Reparații Autentificare & Gestiune Dosare - Multi-Database Integrity, Password Change & Routing Resilience).*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 22 (Decuplare Asistent Chat în Fundal, Căutare Temporală Multiformat & Prevenire Concluzii Negative Premature).*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:

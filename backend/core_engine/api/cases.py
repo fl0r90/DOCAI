@@ -1,6 +1,8 @@
 import os
 import json
 import uuid
+import threading
+import queue
 from collections import defaultdict, deque
 from datetime import datetime
 
@@ -436,7 +438,10 @@ def chat(case_id: int, payload: dict = Body(...), user: models.User = Depends(ge
     db.commit()
     r.delete(f"chat_stop_{case_id}")
 
-    def stream():
+    chunk_queue = queue.Queue()
+    STOP_SENTINEL = object()
+
+    def run_investigation():
         agent = AgenticInvestigator(case_id, question)
         trace_logs = []
         final_content = ""
@@ -445,7 +450,7 @@ def chat(case_id: int, payload: dict = Body(...), user: models.User = Depends(ge
                 if r.exists(f"chat_stop_{case_id}"):
                     r.delete(f"chat_stop_{case_id}")
                     stop_evt = json.dumps({"type": "final", "data": "Investigație oprită de utilizator.", "citations": agent.citations})
-                    yield stop_evt + "\n"
+                    chunk_queue.put(stop_evt)
                     final_content = "Investigație oprită de utilizator."
                     break
                 try:
@@ -456,24 +461,46 @@ def chat(case_id: int, payload: dict = Body(...), user: models.User = Depends(ge
                     final_content = evt.get("data", "")
                 else:
                     trace_logs.append(evt)
-                yield chunk_json + "\n"
+                chunk_queue.put(chunk_json)
         except Exception as e:
             err = json.dumps({"type": "error", "data": str(e)})
-            yield err + "\n"
+            chunk_queue.put(err)
+            if not final_content:
+                final_content = f"Eroare investigație: {e}"
         finally:
-            # Persistăm răspunsul asistentului cu jurnalul de investigație + citate
+            chunk_queue.put(STOP_SENTINEL)
+            # Salvare garantată în baza de date, chiar dacă utilizatorul a navigat Back sau a închis tab-ul
             try:
-                with SessionLocal() as sdb:
+                from ..database import ForensicSessionLocal
+                with ForensicSessionLocal() as sdb:
                     sdb.add(models.ChatMessage(
                         case_id=case_id,
                         role="assistant",
-                        content=final_content,
+                        content=final_content or "Investigație finalizată fără concluzie explicită.",
                         sql=json.dumps(trace_logs, ensure_ascii=False),
                         citations=agent.citations,
                     ))
                     sdb.commit()
+                    print(f"[+] Chat asistent persistat cu succes pentru dosarul {case_id} (caractere={len(final_content)})")
             except Exception as e:
-                print(f"[!] Eroare salvare mesaj asistent: {e}")
+                print(f"[!] Eroare salvare mesaj asistent în fundal: {e}")
+
+    worker_thread = threading.Thread(target=run_investigation, daemon=True)
+    worker_thread.start()
+
+    def stream():
+        try:
+            while True:
+                try:
+                    item = chunk_queue.get(timeout=180)
+                except queue.Empty:
+                    break
+                if item is STOP_SENTINEL:
+                    break
+                yield item + "\n"
+        except GeneratorExit:
+            # Clientul s-a deconectat / a dat Back. Worker-ul continuă în fundal și salvează răspunsul în DB!
+            pass
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")
 
