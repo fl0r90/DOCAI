@@ -302,11 +302,20 @@ def unified_worker_pipeline():
                 if res and res.get("is_finished"):
                     ai_data = res.get("metadata", {})
                     
+                    if ai_data.get("doc_type"):
+                        next_doc.doc_type = ai_data.get("doc_type")
+                    if ai_data.get("doc_date"):
+                        next_doc.doc_date = str(ai_data.get("doc_date"))
+                    if ai_data.get("doc_number"):
+                        next_doc.doc_number = str(ai_data.get("doc_number"))
+                    if ai_data.get("ai_summary"):
+                        next_doc.ai_summary = ai_data.get("ai_summary")
+
                     # ENRICHMENT: Mapăm entitățile AI pe MasterEntities din SQL
                     graph_data = ai_data.get("graph_data", {"entitati": [], "relatii": []})
                     for ent in graph_data.get("entitati", []):
-                        val = ent.get("valoare")
-                        tip = ent.get("tip_entitate")
+                        val = ent.get("valoare") or ent.get("nume")
+                        tip = ent.get("tip_entitate") or ent.get("tip")
                         
                         # Căutăm în SQL dacă avem deja entitatea asta „curată”
                         m_ent = None
@@ -321,31 +330,36 @@ def unified_worker_pipeline():
                             ent["official_name"] = m_ent.official_name
                         else:
                             # Opțional: Dacă e o entitate nouă importantă, o putem crea aici în Master
-                            if tip in ["CUI", "FIRMA"] and len(val) > 3:
+                            if tip in ["CUI", "FIRMA"] and val and len(str(val)) > 3:
                                 try:
                                     new_m = models.MasterEntity(official_name=val, cui_cif_cnp=val if tip == "CUI" else None)
                                     db.add(new_m); db.commit(); db.refresh(new_m)
                                     ent["master_entity_id"] = new_m.id
                                 except: db.rollback()
 
-                    # GENERARE SINTEZA REALA CU LLM
-                    from core_engine.services.llm_service import LLMService
-                    from core_engine.core.config import get_llm_config
-                    llm_synth = LLMService()
-                    synth_prompt = f"### System:\nEști un Auditor Forensic. Generează un REZUMAT EXECUTIV (Sinteză) în limba ROMÂNĂ pentru documentul '{filename}'. Concentrează-te pe scopul documentului, entitățile principale și datele cheie identified. Fii scurt și precis.\n### User:\n{next_doc.raw_text[:8000]}\n"
+                    # Fallback sinteză doar dacă nu a fost generată deja de Grinder
+                    if not next_doc.ai_summary or len(str(next_doc.ai_summary).strip()) < 10:
+                        from core_engine.services.llm_service import LLMService
+                        from core_engine.core.config import get_llm_config
+                        llm_synth = LLMService()
+                        synth_prompt = f"### System:\nEști un Auditor Forensic. Generează un REZUMAT EXECUTIV (Sinteză) în limba ROMÂNĂ pentru documentul '{filename}'. Concentrează-te pe scopul documentului, entitățile principale și datele cheie identified. Fii scurt și precis.\n### User:\n{next_doc.raw_text[:8000]}\n"
+                        
+                        print(f"[*] Generăm sinteza documentului (fallback)...")
+                        try:
+                            cfg = get_llm_config()
+                            narrative_model = cfg.get("specialist_narrative") or cfg.get("active_model") or "gemma4:e4b"
+                            summary_text = asyncio.run(llm_synth.generate(synth_prompt, narrative_model, is_json=False))
+                            next_doc.ai_summary = summary_text
+                        except Exception as e:
+                            print(f"[!] Eroare la generarea sintezei: {e}")
+                            next_doc.ai_summary = "Document procesat, dar sinteza automată a eșuat."
                     
-                    print(f"[*] Generăm sinteza documentului...")
-                    try:
-                        cfg = get_llm_config()
-                        narrative_model = cfg.get("specialist_narrative") or cfg.get("active_model") or "gemma4:e4b"
-                        summary_text = asyncio.run(llm_synth.generate(synth_prompt, narrative_model, is_json=False))
-                        next_doc.ai_summary = summary_text
-                    except Exception as e:
-                        print(f"[!] Eroare la generarea sintezei: {e}")
-                        next_doc.ai_summary = "Document procesat, dar sinteza automată a eșuat."
-                    
-                    # Salvăm metadatele finale (inclusiv entitățile îmbogățite)
+                    # Salvăm metadatele finale (inclusiv atributele dinamice și entitățile îmbogățite)
                     next_doc.doc_metadata = {
+                        "doc_type": next_doc.doc_type,
+                        "doc_date": next_doc.doc_date,
+                        "doc_number": next_doc.doc_number,
+                        "dynamic_attributes": ai_data.get("dynamic_attributes", {}),
                         "financial_data": ai_data.get("financial_data", []), 
                         "outline": ocr_result.get("outline", []),
                         "graph_data": graph_data

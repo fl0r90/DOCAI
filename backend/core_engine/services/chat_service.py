@@ -165,11 +165,25 @@ class AgenticInvestigator:
             doc_ids = [d.id for d in all_docs]
             if not doc_ids: return "No documents in this case."
             
-            # Apply semantic intent filter (search in doc_type OR filename)
+            # Apply semantic intent filter (search in doc_type, filename OR dynamic_attributes)
             if semantic_intent:
-                intent_ids = [d.id for d in all_docs if 
-                             (d.doc_type and semantic_intent.lower() in d.doc_type.lower()) or 
-                             (semantic_intent.lower() in d.filename.lower())]
+                intent_ids = []
+                si_lower = semantic_intent.lower()
+                for d in all_docs:
+                    matched = False
+                    if d.doc_type and si_lower in d.doc_type.lower():
+                        matched = True
+                    elif si_lower in d.filename.lower():
+                        matched = True
+                    elif d.doc_metadata and isinstance(d.doc_metadata, dict):
+                        dyn = d.doc_metadata.get("dynamic_attributes", {})
+                        if isinstance(dyn, dict):
+                            for k, v in dyn.items():
+                                if si_lower in str(k).lower() or si_lower in str(v).lower():
+                                    matched = True
+                                    break
+                    if matched:
+                        intent_ids.append(d.id)
                 
                 if intent_ids:
                     doc_ids = intent_ids
@@ -282,11 +296,30 @@ class AgenticInvestigator:
                     reverse=True
                 )
 
-            # 5. Parent Chunk Zoom & Context Zoom
+            # 5. Document Diversity Selection & Parent Chunk Zoom
+            # Asigură că dacă sunt 15-25 de documente relevante (ex: 17 cursuri),
+            # sistemul include cel mai bun chunk din FIECARE document, fără să le rateze.
+            docs_map = {}
+            for score, r in scored_res:
+                if r.document_id not in docs_map:
+                    docs_map[r.document_id] = []
+                docs_map[r.document_id].append((score, r))
+
+            sorted_doc_ids = sorted(docs_map.keys(), key=lambda did: docs_map[did][0][0], reverse=True)
+
+            selected_chunks = []
+            for did in sorted_doc_ids[:25]:
+                for s, ch in docs_map[did][:2]:
+                    selected_chunks.append((s, ch))
+                    if len(selected_chunks) >= 30:
+                        break
+                if len(selected_chunks) >= 30:
+                    break
+
             final_res = []
             seen_zoom_ids = set()
 
-            for score, r in scored_res[:10]:
+            for score, r in selected_chunks:
                 if r.id in seen_zoom_ids: continue
 
                 doc_obj = db.query(Document).filter(Document.id == r.document_id).first()
@@ -319,7 +352,8 @@ class AgenticInvestigator:
                     "spatial": r.spatial if r.spatial else ""
                 })
 
-                header = f"[REF {citation_id} - {doc_obj.filename if doc_obj else 'Doc'}, Page {r.page_number}]"
+                doc_type_tag = f" | {doc_obj.doc_type}" if (doc_obj and doc_obj.doc_type) else ""
+                header = f"[REF {citation_id} - {doc_obj.filename if doc_obj else 'Doc'}{doc_type_tag}, Page {r.page_number}]"
                 final_res.append(f"{header}: {full_context}")
                 seen_zoom_ids.add(r.id)
                 

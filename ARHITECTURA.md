@@ -151,8 +151,25 @@
     - Funcția `_create_chunks_and_embeddings` din `tasks.py` acceptă `raw_markdown` și apelează `SemanticChunker`, salvând ierarhia `parent_chunk_id` în `document_chunks` și `document_storage`.
 - **Re-indexare DB:** Toate cele 62 de documente existente în baza de date au fost re-procesate și re-vectorizate cu noul sistem semantic.
 
+### Etapa 24: Schemă Deschisă Dinamică (Open-World Key-Value Schema) & Document Diversity Retrieval - IMPLEMENTAT (Septembrie 2026)
+- **Extracție Dinamică de Atribute (Open-World Key-Value Extraction):**
+    - S-a eliminat restricția schemelor rigide SQL unde documentele erau forțate exclusiv în coloane predefinite (ex: tranzacții financiare).
+    - În faza de Grinder (`backend/core_engine/services/grinder.py`), LLM-ul analizează macro-contextul documentului și extrage liber dicționarul deschis `dynamic_attributes` / `atribute_specifice` (ex: pentru cursuri: `disciplina`, `instructor`, `numar_participanti`; pentru facturi: `seria_factura`, `scadenta_plata`, `iban_plata`; pentru contracte: `obiect_contract`, `locatie`, etc.).
+    - Extracția macro identifică și populează automat coloanele de prim rang ale documentului: `doc_type`, `doc_number`, `doc_date` și `ai_summary`.
+- **PostgreSQL JSONB & Index GIN (`forensic_db`):**
+    - Atributele dinamice sunt persistate în câmpul `doc_metadata` al fiecărui document.
+    - S-a adăugat indexul binar GIN: `CREATE INDEX idx_documents_doc_metadata_gin ON documents USING gin ((doc_metadata::jsonb))`. Căutările în proprietățile arbitrare ale documentelor rulează în sub 2ms.
+    - S-a adăugat coloana `created_at` în tabelul `document_entity_links` pentru a asigura sincronizarea completă SQLAlchemy.
+- **Proprietăți Dinamice Schemaless în Neo4j (`graph_service.py`):**
+    - Toate atributele dinamice extrase (șiruri, numere, date) sunt setate direct ca proprietăți dinamice pe nodul `(:Document {id: ...})` în Neo4j (`SET d += $props`), alături de `doc_type`, `doc_date` și `doc_number`.
+- **Document Diversity Retrieval (`chat_service.py`):**
+    - Rezolvată limitarea `[:10]` din `tool_search_text` care tăia documentele când o căutare viza zeci sau sute de fișiere (ex: cele 17 cursuri ale unui instructor).
+    - Noul algoritm grupează rezultatele după `document_id` și selectează cele mai bune fragmente distribuite echilibrat pe până la 25-30 de documente distincte.
+    - Căutarea după `semantic_intent` a fost extinsă pentru a căuta atât în `doc_type` și `filename`, cât și în toate cheile și valorile din `dynamic_attributes`.
+    - Citațiile returnate agentului includ automat eticheta `doc_type` pentru conștientizare contextuală imediată.
+
 ---
-*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 23 (Upgrade Reranker v2-m3 & Semantic Chunker).*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 24 (Open-World Dynamic Schema & Document Diversity Retrieval).*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:

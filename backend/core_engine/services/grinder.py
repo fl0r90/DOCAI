@@ -120,83 +120,126 @@ TABLE CONTENT:
         print(f"[!] Eroare LLM Extracție Tabel Agnostic: {e}")
         return {"entities": []}
 
+async def extract_document_overview(doc_text: str, filename: str, llm: LLMService, model: str) -> Dict[str, Any]:
+    """Extrage tipul de document, numărul, data, sinteza și un dicționar deschis/dinamic de atribute_specifice."""
+    prompt = f"""### System:
+Ești un Expert Auditor Forensic de Date. Analizează conținutul documentului și extrage metadatele esențiale.
+Documentul poate fi de orice natură (registru prezență, curs, extras cont, factură, contract, proces-verbal, fișă utilaj, decizie, declarație, etc.).
+Creează un dicționar deschis și dinamic de 'atribute_specifice' cu proprietățile pe care le consideri cele mai importante pentru anchetă.
+
+Returnează DOAR un JSON valid cu această structură:
+{{
+    "tip_document": "ex: REGISTRU_CURS | FACTURA | EXTRAS_CONT | CONTRACT | PROCES_VERBAL | FISA_UTILAJ | DECLARATIE",
+    "numar_document": "cod / număr sau null",
+    "data_document": "YYYY-MM-DD sau DD-MM-YYYY sau null",
+    "sinteza": "Rezumat executiv de 1-2 fraze despre ce reprezintă documentul și datele esențiale.",
+    "atribute_specifice": {{
+        "<cheie_relevanta_1>": "valoare",
+        "<cheie_relevanta_2>": "valoare"
+    }},
+    "entitati_principale": [
+        {{"nume": "...", "rol": "ex: Furnizor, Client, Instructor, Participant, Emitent, Beneficiar", "tip": "PERSOANA|FIRMA|IBAN|CUI|LOCATIE"}}
+    ]
+}}
+
+### User:
+NUME FISIER: {filename}
+CONTINUT DOCUMENT:
+{doc_text[:6000]}
+"""
+    try:
+        res = await asyncio.wait_for(llm.generate(prompt, model, is_json=True), timeout=120.0)
+        if isinstance(res, dict):
+            return res
+    except Exception as e:
+        print(f"[!] Eroare LLM extract_document_overview ({filename}): {e}")
+    return {}
+
 async def extract_forensic_data(layout_data: Dict, filename: str = "", doc_id: int = 0, current_metadata: dict = None, start_segment: int = 0):
-    """Procesare HIBRIDA AGNOSTICA cu VRAM Marshalling si Scriere Live."""
+    """Procesare HIBRIDĂ AGNOSTICĂ cu Schemă Dinamică (Open-World Key-Value), VRAM Marshalling și Scriere Live."""
     import redis
-    from .entity_resolver import save_entities_to_db # Importăm salvatorul robust
+    from .entity_resolver import save_entities_to_db
     from ..core.config import get_llm_config
     
     r = redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
     llm = LLMService()
     
     cfg = get_llm_config()
-    model = cfg.get("specialist_tabular") or cfg.get("active_model") or "gemma4:e4b"
+    model = cfg.get("active_model") or "gemma4:e4b"
     
-    # Contextul global pentru a ajuta LLM-ul să înțeleagă rolurile
-    _first_chunk = layout_data.get("chunks", [{}]) if isinstance(layout_data, dict) else [{}]
-    global_context = (_first_chunk[0].get("content") or _first_chunk[0].get("text", ""))[:500] if _first_chunk else ""
+    # 1. Extragere text global pentru analiză macro
+    full_text = ""
+    if isinstance(layout_data, dict):
+        full_text = layout_data.get("markdown") or ""
+        if not full_text:
+            chunks = layout_data.get("chunks", [])
+            full_text = "\n".join([c.get("content", "") for c in chunks[:15]])
+    elif isinstance(layout_data, str):
+        full_text = layout_data
+        
+    global_context = full_text[:600]
 
-    res = {
-        "doc_type": "HIBRID_AGNOSTIC_V3",
-        "financial_data": [],
-        "graph_data": {"entitati": [], "relatii": []},
-        "segment_summaries": []
-    }
-
-    items = layout_data.get("items", []) if isinstance(layout_data, dict) else [{"type": "TEXT", "content": layout_data}]
-    total_items = len(items)
+    # Pasul 1: Extracție Macro a Tipului de Document, Sintezei și Atributelor Dinamice
+    r.set(f"doc_progress_{doc_id}", json.dumps({
+        "status": "PROCESSING",
+        "percent": 55,
+        "message": f"Extracție atribute dinamice & clasificare ({filename})..."
+    }))
     
-    print(f"[*] Ingestie AGNOSTICA Live ({filename}) - {total_items} elemente.")
+    overview = await extract_document_overview(full_text, filename, llm, model)
+    
+    all_entities = []
+    
+    # Salvare imediată atribute macro & entități principale
+    if overview:
+        main_ents = overview.get("entitati_principale", [])
+        save_entities_to_db({
+            "metadata": {
+                "tip_document": overview.get("tip_document"),
+                "numar": overview.get("numar_document"),
+                "data": overview.get("data_document")
+            },
+            "analysis": {
+                "summary": overview.get("sinteza")
+            },
+            "entitati": main_ents,
+            "dynamic_attributes": overview.get("atribute_specifice", {})
+        }, doc_id)
+        all_entities.extend(main_ents)
 
-    for idx, item in enumerate(items):
-        # Update UI Status
-        r.set(f"doc_progress_{doc_id}", json.dumps({
-            "status": "PROCESSING",
-            "percent": round((idx / total_items) * 100, 1),
-            "message": f"Analiză {item['type']} ({idx+1}/{total_items})"
-        }))
-
-        if item["type"] in ["TABLE", "TABLE_PART"]:
-            # Extracție AGNOSTICĂ din tabel
+    # Pasul 2: Extracție granulară din tabele (dacă există)
+    items = layout_data.get("items", []) if isinstance(layout_data, dict) else []
+    table_items = [it for it in items if it.get("type") in ["TABLE", "TABLE_PART"]]
+    total_tables = len(table_items)
+    
+    if total_tables > 0:
+        print(f"[*] Extracție tabulară live ({filename}) - {total_tables} tabele găsite.")
+        for idx, item in enumerate(table_items):
+            r.set(f"doc_progress_{doc_id}", json.dumps({
+                "status": "PROCESSING",
+                "percent": round(60 + (idx / total_tables) * 30, 1),
+                "message": f"Analiză tabel ({idx+1}/{total_tables})"
+            }))
             table_res = await extract_entities_from_table(item["content"], llm, context=global_context, model=model)
-            
-            # Mapăm rezultatele în formatul acceptat de save_entities_to_db
             formatted_data = {
                 "entitati": [
-                    {"nume": e["valoare"], "rol": e["rol"], "tip": e["tip_entitate"]} 
+                    {"nume": e["valoare"], "rol": e.get("rol", "Participant"), "tip": e.get("tip_entitate", "PERSOANA")} 
                     for e in table_res.get("entities", [])
                 ]
             }
-            # Salvare imediată în SQL/Neo4j
             save_entities_to_db(formatted_data, doc_id)
-            
-            # Păstrăm și în obiectul de retur pentru metadate doc
-            res["graph_data"]["entitati"].extend(table_res.get("entities", []))
+            all_entities.extend(table_res.get("entities", []))
 
-        elif item["type"] == "TEXT":
-            text = item["content"]
-            if len(text) > 100:
-                try:
-                    prompt = f"""### System:
-Ești un Expert Analyst Forensic. Extrage Entități și Relații.
-Returnează UNICUL obiect JSON valid:
-{{
-    "entitati": [
-        {{"nume": "...", "tip": "FIRMA|PERSOANA|IBAN|CUI", "rol": "..."}}
-    ]
-}}
-### User:
-TEXT: {text[:3000]}
-"""
-                    ai_res = await asyncio.wait_for(llm.generate(prompt, model, is_json=True), timeout=180.0)
-                    if ai_res:
-                        save_entities_to_db(ai_res, doc_id)
-                        res["graph_data"]["entitati"].extend(ai_res.get("entitati", []))
-                except: pass
-
-    await llm.close()
-    return {"metadata": res, "is_finished": True}
-
+    res = {
+        "doc_type": overview.get("tip_document", "GENERAL"),
+        "doc_number": overview.get("numar_document"),
+        "doc_date": overview.get("data_document"),
+        "ai_summary": overview.get("sinteza"),
+        "dynamic_attributes": overview.get("atribute_specifice", {}),
+        "financial_data": [],
+        "graph_data": {"entitati": all_entities, "relatii": []},
+        "segment_summaries": []
+    }
 
     await llm.close()
     return {"metadata": res, "is_finished": True}

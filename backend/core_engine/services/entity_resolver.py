@@ -34,17 +34,27 @@ def save_entities_to_db(extracted_json: dict, doc_id: int = None):
         # 1. Metadate & Analiză (Robust)
         meta = extracted_json.get("metadata", {})
         if isinstance(meta, dict):
-            doc.doc_type = meta.get("tip") or meta.get("tip_document")
-            doc.doc_date = meta.get("data")
-            doc.doc_number = meta.get("numar")
+            tip = meta.get("tip") or meta.get("tip_document")
+            if tip: doc.doc_type = tip
+            data_val = meta.get("data") or meta.get("data_document")
+            if data_val: doc.doc_date = str(data_val)
+            nr_val = meta.get("numar") or meta.get("numar_document")
+            if nr_val: doc.doc_number = str(nr_val)
             try:
                 val = meta.get("valoare") or meta.get("suma") or meta.get("valoare_totala")
                 if val: doc.total_amount = float(val)
             except: pass
 
+        dyn_attrs = extracted_json.get("dynamic_attributes")
+        if dyn_attrs and isinstance(dyn_attrs, dict):
+            curr_meta = dict(doc.doc_metadata or {})
+            curr_meta["dynamic_attributes"] = dyn_attrs
+            doc.doc_metadata = curr_meta
+
         analysis = extracted_json.get("analysis", {})
         if isinstance(analysis, dict):
-            doc.ai_summary = analysis.get("summary")
+            if analysis.get("summary"):
+                doc.ai_summary = analysis.get("summary")
             doc.risk_score = float(analysis.get("risk_score", 0.0))
             doc.risk_analysis = analysis.get("risk_explanation")
 

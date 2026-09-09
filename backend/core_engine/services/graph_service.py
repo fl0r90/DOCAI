@@ -1,5 +1,6 @@
 from neo4j import GraphDatabase
 import os
+import re
 
 class GraphService:
     def __init__(self):
@@ -74,17 +75,38 @@ class GraphService:
         entitati = graph_data.get("entitati", []) or []
         relatii = graph_data.get("relatii", []) or []
 
+        doc_type = (doc_metadata or {}).get("doc_type")
+        doc_date = (doc_metadata or {}).get("doc_date")
+        doc_number = (doc_metadata or {}).get("doc_number")
+
         try:
             with self.driver.session() as session:
                 session.run(
                     """
                     MERGE (d:Document {id: $doc_id})
                     SET d.name = $filename, d.case_id = $case_id, d.master_id = $master_id
+                    SET d.doc_type = coalesce($doc_type, d.doc_type)
+                    SET d.doc_date = coalesce($doc_date, d.doc_date)
+                    SET d.doc_number = coalesce($doc_number, d.doc_number)
                     MERGE (c:Case {id: $case_id})
                     MERGE (d)-[:PART_OF]->(c)
                     """,
                     doc_id=doc_id, filename=filename, case_id=case_id, master_id=master_id,
+                    doc_type=doc_type, doc_date=doc_date, doc_number=doc_number,
                 )
+
+                dyn = (doc_metadata or {}).get("dynamic_attributes", {})
+                if isinstance(dyn, dict):
+                    clean_props = {
+                        re.sub(r'[^a-zA-Z0-9_]', '_', str(k)): v 
+                        for k, v in dyn.items() 
+                        if isinstance(v, (str, int, float, bool))
+                    }
+                    if clean_props:
+                        session.run(
+                            "MATCH (d:Document {id: $doc_id}) SET d += $props",
+                            doc_id=doc_id, props=clean_props
+                        )
 
                 for e in entitati:
                     name, etype, role = self._entity_fields(e)
