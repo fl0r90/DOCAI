@@ -5,6 +5,7 @@ ocr_cache/
 # Date persistente (Baze de date)
 data/
 backend/uploads/
+shared_uploads/
 frontend/.next/
 node_modules/
 
