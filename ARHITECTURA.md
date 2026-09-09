@@ -168,8 +168,21 @@
     - Căutarea după `semantic_intent` a fost extinsă pentru a căuta atât în `doc_type` și `filename`, cât și în toate cheile și valorile din `dynamic_attributes`.
     - Citațiile returnate agentului includ automat eticheta `doc_type` pentru conștientizare contextuală imediată.
 
+### Etapa 25: Limită de Context Document de 4096 Caractere & Epurare Istoric Agnostic - IMPLEMENTAT (Septembrie 2026)
+- **4096-Caractere Context per Document (`tool_search_text`):**
+    - S-a implementat limita de 4096 caractere per document în căutarea contextuală hibridă.
+    - Rezultatele candidate sunt agregate la nivel de document (`doc_matches`), păstrând ordonarea de relevanță dată de neuroranker/scor.
+    - Pentru orice document sub 4096 de caractere, conținutul integral (`raw_text`) este livrat fără nicio tăiere mecanică sau pierdere de secțiuni (asigurând că amprentele criptografice SHA-256, tabelele de rețea, volumele de date și datele tehnice sunt vizibile simultan în faza 1 a investigației).
+    - Pentru documentele mai mari de 4096 de caractere, sistemul decupează o fereastră de 4096 caractere centrată matematic pe fragmentul identificat.
+    - Citațiile sunt unificate per document (o singură intrare de citare `[REF x]` per fișier), eliminând citările duplicate pe pagini sau bucăți redundante.
+- **Epurare & Compresie Istoric Conversație (`_load_history`):**
+    - S-a redus fereastra de mesaje din istoric de la 10 la 4 (2 runde complete de întrebare-răspuns).
+    - Răspunsurile lungi ale asistentului din mesajele trecute sunt compresate/trunchiate la maximum 1200 de caractere pentru a preveni „bleed-through”-ul (poluarea noului context cu liste masive de persoane sau tabele din interogări anterioare).
+- **Agnosticism Total Restabilit:**
+    - Au fost eliminate toate exemplele de domeniu particulare („curs”, „training”, „prezență”, etc.) din prompturile preliminare, descrierile uneltelor (`SEARCH_TEXT`) și din mesajele de avertizare la concluzii negative fără căutare.
+
 ---
-*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 24 (Open-World Dynamic Schema & Document Diversity Retrieval).*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 25 (4096-Char Document Context & History Sanitization).*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:

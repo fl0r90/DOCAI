@@ -87,6 +87,36 @@ def get_date_variants(text: str) -> list:
 
     return list(variants)
 
+def decompose_question(q: str) -> list:
+    """Decomposes a complex multi-part user question into atomic targets (sub-questions)."""
+    targets = []
+    if ":" in q:
+        parts = q.split(":", 1)
+        clauses = re.split(r"[\?,;]|\b(?:si|și|precum și)\b", parts[1])
+        for c in clauses:
+            c = c.strip()
+            if len(c) > 5 and any(w in c.lower() for w in ["care", "ce", "cat", "cât", "cine", "unde", "cand", "când", "amprenta", "adrese", "volum", "suma", "data", "nume", "cati", "câți"]):
+                targets.append(c)
+            elif len(c) > 10:
+                targets.append(c)
+    
+    if not targets:
+        clauses = [c.strip() for c in q.split("?") if c.strip()]
+        if len(clauses) > 1:
+            targets = clauses
+
+    if not targets and any(w in q.lower() for w in [" și ", " si ", " precum și "]):
+        clauses = re.split(r"\b(?:si|și|precum și)\b", q)
+        if len(clauses) > 1 and all(len(c.strip()) > 8 for c in clauses):
+            q_words = ["cine", "ce", "cat", "cât", "care", "cand", "când", "unde", "de ce", "cum"]
+            if any(any(qw in c.lower() for qw in q_words) for c in clauses[1:]):
+                targets = [c.strip() for c in clauses if c.strip()]
+
+    if not targets:
+        targets = [q.strip()]
+        
+    return targets
+
 class AgenticInvestigator:
     def __init__(self, case_id: int, user_question: str):
         self.case_id = case_id
@@ -96,23 +126,40 @@ class AgenticInvestigator:
         self.graph = GraphService()
         self.injected_evidence = ""
         self.history = []
+        self.sub_targets = decompose_question(self.user_question)
+        self.scratchpad = {
+            i: {"target": t, "status": "PENDING", "confidence": "NONE", "fact": "", "citations": []}
+            for i, t in enumerate(self.sub_targets, 1)
+        }
         self._load_history()
         self._pre_process_query()
 
+    def _render_scratchpad(self) -> str:
+        lines = ["=== PROGRESSIVE WORKING MEMORY (TEMPORARY SCRATCHPAD) ==="]
+        for i, data in self.scratchpad.items():
+            status_str = f"[{data['status']} | Confidence: {data['confidence']}]"
+            fact_str = f" -> Evidence: {data['fact']} (Ref: {data['citations']})" if data['fact'] else ""
+            lines.append(f"Target {i}: {data['target']} | {status_str}{fact_str}")
+        lines.append("=========================================================")
+        return "\n".join(lines)
+
     def _load_history(self):
-        """Loads last 10 messages for context window, excluding the current question if already saved."""
+        """Loads last 4 messages (2 turns) for context window, excluding the current question if already saved."""
         with SessionLocal() as db:
-            past_msgs = db.query(ChatMessage).filter(ChatMessage.case_id == self.case_id).order_by(ChatMessage.created_at.desc()).limit(11).all()
+            past_msgs = db.query(ChatMessage).filter(ChatMessage.case_id == self.case_id).order_by(ChatMessage.created_at.desc()).limit(7).all()
             # If the most recent message in DB is the current user question (saved by cases.py before launching), skip it
             if past_msgs and past_msgs[0].role == "user" and past_msgs[0].content.strip() == self.user_question.strip():
-                past_msgs = past_msgs[1:11]
+                past_msgs = past_msgs[1:5]
             else:
-                past_msgs = past_msgs[:10]
+                past_msgs = past_msgs[:4]
 
             # Reverse to get chronological order
             for m in reversed(past_msgs):
                 # We strip the investigation logs from history to keep context clean
                 clean_content = m.content.split("**LOG INVESTIGATIE:**")[0].strip()
+                # Truncate past long assistant messages to prevent prompt context pollution
+                if m.role == "assistant" and len(clean_content) > 1200:
+                    clean_content = clean_content[:1200] + "\n[... Conținut anterior trunchiat pentru economisire context ...]"
                 if clean_content:
                     self.history.append({"role": m.role, "content": clean_content})
 
@@ -138,23 +185,20 @@ class AgenticInvestigator:
                 if found_dates:
                     self.injected_evidence += f"Detected Explicit Date Variations to Search: {', '.join(found_dates[:6])}\n"
                 
-        # Intent Detection
+        # Agnostic Intent Detection
         q_lower = self.user_question.lower()
         if any(k in q_lower for k in ["cati", "câți", "cate", "câte", "total", "suma", "listă completă", "lista completa"]):
             self.injected_evidence += "CRITICAL: The user is asking for a QUANTITATIVE answer or a TOTAL COUNT. You MUST use SEARCH_STRUCTURED_DATA to get accurate counts from the database tables. Do NOT rely on individual text fragments for totals.\n"
-        
-        # Attendance / Course / Participants intent
-        attendance_markers = ["cine a fost", "cine a participat", "participanti", "participanți", "prezenti", "prezenți", "absenti", "absenți", "prezenta", "prezență", "curs", "training", "sedinta", "ședință", "registru"]
-        if any(k in q_lower for k in attendance_markers):
-            self.injected_evidence += "CRITICAL ATTENDANCE / PARTICIPANT QUERY: The user is asking about attendees, participants, courses, or meetings. You MUST use SEARCH_TEXT first to search for the attendance register or course document (e.g. concept='prezenta curs', semantic_intent='curs'). Do NOT conclude that no evidence exists without searching document texts via SEARCH_TEXT.\n"
-
-        if any(k in q_lower for k in ["plata", "incasare", "suma", "ron", "usd", "achizitie", "pret", "valoare", "cost"]):
-            self.injected_evidence += "Suggested Intent: FINANCIAL -> Use SEARCH_STRUCTURED_DATA for hard figures.\n"
-        elif any(k in q_lower for k in ["contract", "declaratie", "email", "conversatie", "decizie", "motiv", "cine"]):
-            self.injected_evidence += "Suggested Intent: CONTEXTUAL -> Use SEARCH_TEXT for semantic details.\n"
+        elif any(k in q_lower for k in ["plata", "incasare", "suma", "ron", "usd", "achizitie", "pret", "valoare", "cost"]):
+            self.injected_evidence += "Suggested Intent: TABULAR / FINANCIAL -> Use SEARCH_STRUCTURED_DATA for hard figures.\n"
+        else:
+            self.injected_evidence += "Suggested Intent: CONTEXTUAL / TEXTUAL -> Use SEARCH_TEXT for document details.\n"
                 
         if anchors:
             self.injected_evidence += "Relational Check: Entities detected. EXPLORE_GRAPH may provide links.\n"
+
+        if self.scratchpad:
+            self.injected_evidence += "\n" + self._render_scratchpad() + "\n"
         
         self.injected_evidence += "Use the specialized tools below to find exact records.\n"
 
@@ -296,75 +340,175 @@ class AgenticInvestigator:
                     reverse=True
                 )
 
-            # 5. Document Diversity Selection & Parent Chunk Zoom
-            # Asigură că dacă sunt 15-25 de documente relevante (ex: 17 cursuri),
-            # sistemul include cel mai bun chunk din FIECARE document, fără să le rateze.
-            docs_map = {}
-            for score, r in scored_res:
-                if r.document_id not in docs_map:
-                    docs_map[r.document_id] = []
-                docs_map[r.document_id].append((score, r))
+            # 5. Document-Level Context Assembly (Limit 4096 characters per document)
+            # Grupează rezultatele pe documente pentru a elimina duplicările și a oferi context complet până la 4096 caractere per document.
+            DOC_CONTEXT_LIMIT = 4096
+            MAX_DOCS_RETURNED = 8
+            MAX_TOTAL_CHARS = 25000
 
-            sorted_doc_ids = sorted(docs_map.keys(), key=lambda did: docs_map[did][0][0], reverse=True)
+            doc_matches = {}  # doc_id -> list of (score, chunk)
+            top_score = scored_res[0][0] if scored_res else 0.0
+            min_score_threshold = 0.03 if top_score > 0.2 else -999.0
 
-            selected_chunks = []
-            for did in sorted_doc_ids[:25]:
-                for s, ch in docs_map[did][:2]:
-                    selected_chunks.append((s, ch))
-                    if len(selected_chunks) >= 30:
-                        break
-                if len(selected_chunks) >= 30:
-                    break
+            for s, r in scored_res:
+                if s < min_score_threshold and len(doc_matches) >= 3:
+                    continue
+                if r.document_id not in doc_matches:
+                    doc_matches[r.document_id] = []
+                doc_matches[r.document_id].append((s, r))
 
             final_res = []
-            seen_zoom_ids = set()
+            total_chars_accumulated = 0
 
-            for score, r in selected_chunks:
-                if r.id in seen_zoom_ids: continue
+            for doc_id, chunk_list in list(doc_matches.items())[:MAX_DOCS_RETURNED]:
+                if total_chars_accumulated >= MAX_TOTAL_CHARS:
+                    break
 
-                doc_obj = db.query(Document).filter(Document.id == r.document_id).first()
-                citation_id = len(self.citations) + 1
-                
-                # Check for Parent Chunk
-                parent_chunk = None
-                if getattr(r, "parent_chunk_id", None):
-                    parent_chunk = db.query(DocumentChunk).filter(DocumentChunk.id == r.parent_chunk_id).first()
-                
-                if parent_chunk:
-                    full_context = parent_chunk.content
-                    print(f"[*] Parent-Child Match: loading Parent Chunk for Child Chunk {r.id}")
+                best_score, best_chunk = chunk_list[0]
+                doc_obj = db.query(Document).filter(Document.id == doc_id).first()
+                if not doc_obj:
+                    continue
+
+                page_num = getattr(best_chunk, 'page_number', 1) or 1
+                doc_context = ""
+
+                if doc_obj.raw_text:
+                    raw = doc_obj.raw_text.strip()
+                    if len(raw) <= DOC_CONTEXT_LIMIT:
+                        # Documentul complet încape în limita de 4096 caractere (fidelitate maximă)
+                        doc_context = raw
+                    else:
+                        # Fereastră centrată de 4096 caractere în jurul celui mai relevant fragment
+                        needle = re.sub(r'^\[Doc:[^\]]*\]\s*', '', best_chunk.content).strip()
+                        search_sub = needle[:min(60, len(needle))].strip() if needle else ""
+                        pos = raw.find(search_sub) if search_sub else -1
+
+                        if pos == -1 and len(needle) > 80:
+                            pos = raw.find(needle[20:70])
+
+                        if pos != -1:
+                            half = DOC_CONTEXT_LIMIT // 2
+                            start = max(0, pos - half)
+                            end = min(len(raw), start + DOC_CONTEXT_LIMIT)
+                            if end - start < DOC_CONTEXT_LIMIT and start > 0:
+                                start = max(0, end - DOC_CONTEXT_LIMIT)
+                        else:
+                            all_doc_chunks = db.query(DocumentChunk.id).filter(DocumentChunk.document_id == doc_id).order_by(DocumentChunk.id).all()
+                            c_ids = [c[0] for c in all_doc_chunks]
+                            idx = c_ids.index(best_chunk.id) if best_chunk.id in c_ids else 0
+                            ratio = idx / max(1, len(c_ids))
+                            pos = int(ratio * len(raw))
+                            half = DOC_CONTEXT_LIMIT // 2
+                            start = max(0, pos - half)
+                            end = min(len(raw), start + DOC_CONTEXT_LIMIT)
+                            if end - start < DOC_CONTEXT_LIMIT and start > 0:
+                                start = max(0, end - DOC_CONTEXT_LIMIT)
+
+                        prefix = "[... Fragment anterior omis ...]\n" if start > 0 else ""
+                        suffix = "\n[... Fragment ulterior omis ...]" if end < len(raw) else ""
+                        doc_context = prefix + raw[start:end] + suffix
                 else:
-                    # Fallback context zoom
-                    full_context = ""
-                    prev_c = db.query(DocumentChunk).filter(DocumentChunk.document_id == r.document_id, DocumentChunk.id < r.id).order_by(DocumentChunk.id.desc()).first()
-                    if prev_c: full_context += prev_c.content + " "
-                    full_context += r.content
-                    next_c = db.query(DocumentChunk).filter(DocumentChunk.document_id == r.document_id, DocumentChunk.id > r.id).order_by(DocumentChunk.id.asc()).first()
-                    if next_c: full_context += " " + next_c.content
+                    # Fallback dacă raw_text lipsește
+                    all_chunks = db.query(DocumentChunk).filter(DocumentChunk.document_id == doc_id).order_by(DocumentChunk.page_number, DocumentChunk.id).all()
+                    accum = []
+                    cur_len = 0
+                    for c in all_chunks:
+                        if cur_len + len(c.content) > DOC_CONTEXT_LIMIT:
+                            break
+                        accum.append(c.content)
+                        cur_len += len(c.content)
+                    doc_context = "\n\n".join(accum) if accum else best_chunk.content[:DOC_CONTEXT_LIMIT]
 
-                # Înregistrăm citatul pentru interfață
+                if not doc_context.strip():
+                    continue
+
+                total_chars_accumulated += len(doc_context)
+                citation_id = len(self.citations) + 1
+
                 self.citations.append({
                     "id": citation_id,
-                    "doc_id": r.document_id,
-                    "page": r.page_number,
-                    "content": r.content[:300],
+                    "doc_id": doc_obj.id,
+                    "page": page_num,
+                    "content": doc_context[:300],
                     "filename": doc_obj.filename if doc_obj else "unknown",
-                    "spatial": r.spatial if r.spatial else ""
+                    "spatial": getattr(best_chunk, "spatial", "") or ""
                 })
 
                 doc_type_tag = f" | {doc_obj.doc_type}" if (doc_obj and doc_obj.doc_type) else ""
-                header = f"[REF {citation_id} - {doc_obj.filename if doc_obj else 'Doc'}{doc_type_tag}, Page {r.page_number}]"
-                final_res.append(f"{header}: {full_context}")
-                seen_zoom_ids.add(r.id)
-                
+                dyn_meta = ""
+                if doc_obj.doc_metadata and isinstance(doc_obj.doc_metadata, dict):
+                    dyn = doc_obj.doc_metadata.get("dynamic_attributes")
+                    if dyn and isinstance(dyn, dict):
+                        dyn_strs = [f"{k}: {v}" for k, v in dyn.items() if v and not isinstance(v, (dict, list))]
+                        if dyn_strs:
+                            dyn_meta = f" | {', '.join(dyn_strs[:5])}"
+
+                header = f"[REF {citation_id} - {doc_obj.filename if doc_obj else 'Doc'}{doc_type_tag}{dyn_meta}, Pagina {page_num}]"
+                final_res.append(f"{header}:\n{doc_context}")
+
             graph_context = ""
             entities_to_query = re.findall(r'\b[A-Z]{3,}\b', query) + [w for w in words if len(w) >= 4]
             if entities_to_query:
                 subgraph_info = self.graph.get_entity_subgraph(entities_to_query, limit=10)
                 if subgraph_info:
                     graph_context = f"\n\n--- RELATIONAL GRAPH CONTEXT (Neo4j Connections) ---\n{subgraph_info}"
-                    
+
             return "\n\n".join(final_res) + graph_context
+
+    def tool_fetch_full_document(self, doc_id: int, focus_terms: str = ""):
+        """Tool: Retrieve complete full-text (up to 4096 characters or expanded context window) of a specific document when confidence is MEDIUM."""
+        with SessionLocal() as db:
+            doc_obj = db.query(Document).filter(Document.id == doc_id).first()
+            if not doc_obj:
+                return f"Document ID {doc_id} not found."
+            
+            citation_id = len(self.citations) + 1
+            raw = doc_obj.raw_text.strip() if doc_obj.raw_text else ""
+            if not raw:
+                chunks = db.query(DocumentChunk).filter(DocumentChunk.document_id == doc_id).order_by(DocumentChunk.page_number, DocumentChunk.id).all()
+                raw = "\n\n".join([c.content for c in chunks])
+            
+            # If document fits in 4096, return it completely; otherwise center on focus_terms
+            DOC_CONTEXT_LIMIT = 4096
+            if len(raw) <= DOC_CONTEXT_LIMIT or not focus_terms:
+                doc_context = raw[:DOC_CONTEXT_LIMIT]
+            else:
+                words = [w.strip() for w in re.findall(r'\b\w{3,}\b', focus_terms)]
+                pos = -1
+                for w in words:
+                    pos = raw.lower().find(w.lower())
+                    if pos != -1: break
+                if pos != -1:
+                    start = max(0, pos - (DOC_CONTEXT_LIMIT // 2))
+                    end = min(len(raw), start + DOC_CONTEXT_LIMIT)
+                    if end - start < DOC_CONTEXT_LIMIT and start > 0:
+                        start = max(0, end - DOC_CONTEXT_LIMIT)
+                    prefix = "[... Fragment anterior omis ...]\n" if start > 0 else ""
+                    suffix = "\n[... Fragment ulterior omis ...]" if end < len(raw) else ""
+                    doc_context = prefix + raw[start:end] + suffix
+                else:
+                    doc_context = raw[:DOC_CONTEXT_LIMIT]
+            
+            self.citations.append({
+                "id": citation_id,
+                "doc_id": doc_obj.id,
+                "page": 1,
+                "content": doc_context[:300],
+                "filename": doc_obj.filename if doc_obj else f"Doc_{doc_id}",
+                "spatial": ""
+            })
+            
+            doc_type_tag = f" | {doc_obj.doc_type}" if doc_obj.doc_type else ""
+            dyn_meta = ""
+            if doc_obj.doc_metadata and isinstance(doc_obj.doc_metadata, dict):
+                dyn = doc_obj.doc_metadata.get("dynamic_attributes")
+                if dyn and isinstance(dyn, dict):
+                    dyn_strs = [f"{k}: {v}" for k, v in dyn.items() if v and not isinstance(v, (dict, list))]
+                    if dyn_strs:
+                        dyn_meta = f" | {', '.join(dyn_strs[:5])}"
+            
+            header = f"[REF {citation_id} - FULL DOC: {doc_obj.filename}{doc_type_tag}{dyn_meta}, Pagina 1]"
+            return f"{header}:\n{doc_context}"
 
     def tool_search_transactions(self, subject: str, date_filter: str = "", match_pattern: str = "", aggregate: bool = False, limit: int = 100):
         """Tool 2: Structured search with AGNOSTIC aggregation capability."""
@@ -660,27 +804,29 @@ class AgenticInvestigator:
     def run(self):
         yield json.dumps({"type": "status", "data": "Forensic Agent is thinking..."})
         
-        system_prompt = """You are a Professional Forensic Data Auditor.
+        system_prompt = """You are a Professional Forensic Data Auditor equipped with PROGRESSIVE WORKING MEMORY.
 CORE RULES:
 1. AGNOSTICISM: You have no prior knowledge of any persons or events. Answer ONLY using evidence from tools or provided context.
-2. TOOL-USE: Use SEARCH_TEXT or SEARCH_STRUCTURED_DATA to find evidence. If evidence is already provided in the context, do not make redundant calls. NEVER conclude that evidence does not exist without searching document texts via SEARCH_TEXT.
-3. TEMPORAL PRECISION: If the user mentions a date, you MUST use the 'date_filter' parameter (DD.MM.YYYY or MM.YYYY).
+2. ATOMIC TARGET RESOLUTION: The question is decomposed into atomic targets in your WORKING MEMORY.
+   - Use SEARCH_TEXT or SEARCH_STRUCTURED_DATA to find evidence.
+   - For each target where conclusive evidence is found with citations, treat it as Confidence: HIGH and record the verified fact.
+   - If evidence for a target is partial or ambiguous, treat it as Confidence: MEDIUM. You MUST use FETCH_FULL_DOCUMENT(doc_id) to inspect the complete document context or surrounding paragraphs before concluding.
+3. FINAL RECOMPOSITION: When all targets have reached Confidence: HIGH (either resolved with facts or verified NOT FOUND in all documents), immediately output the [FINAL RESPONSE] synthesizing all verified findings.
 4. LANGUAGE: Think in English, but the FINAL ANSWER must be in ROMANIAN.
 5. PRECISION: Extract specific facts (names, dates, amounts). If info is missing, state it clearly.
-6. SCOPE: Answer strictly the current question. Use chat history when the question is a follow-up to the ongoing topic. When a new entity or subject is introduced, answer exclusively about it without including past topics.
+6. SCOPE: Answer strictly the current question. When a new entity or subject is introduced, answer exclusively using evidence for that query without including past topics or unrelated entities.
 7. CITATIONS: Every fact MUST be cited using [x], matching the [REF x] from observations.
-8. AGNOSTIC COUNTING: When asked to count (e.g. "Câți?"), you MUST list the unique names/entities found in the [FACTS] section to prove deduplication. Exclude specific statuses (like "Absent") if explicitly requested.
-9. FINALITY: If you have sufficient evidence to answer the question, you MUST provide the [FINAL RESPONSE] immediately, even in the first step.
+8. FINALITY: If you have sufficient evidence to answer all targets, you MUST provide the [FINAL RESPONSE] immediately, even in the first or second step.
 
 FINAL RESPONSE FORMAT (ROMANIAN):
 [FACTS]
-- List of specific facts and unique entities found with citations [x].
+- List of specific facts and unique entities found with citations [x], addressing each target.
 [ANALYSIS]
 - Brief reasoning connecting the facts. Highlight [CONTRADICTIONS] here.
 [CONCLUSION]
-- The direct answer to the user's question.
+- The direct answer to the user's question addressing all decomposed targets.
 [MISSING EVIDENCE]
-- Relevant data that was NOT found.
+- Relevant data that was NOT found (or "N/A" if all targets were fully confirmed).
 [CONFIDENCE]: LOW/MEDIUM/HIGH"""
         
         tools = [
@@ -705,14 +851,29 @@ FINAL RESPONSE FORMAT (ROMANIAN):
                 "type": "function",
                 "function": {
                     "name": "SEARCH_TEXT",
-                    "description": "Search the full text and tables of all case documents (attendance registers, courses, lists of people, contracts, minutes, statements, reports, emails). Always use this when looking for people, attendees, course registers, dates, or non-financial facts.",
+                    "description": "Search the full text and tables of all case documents. Use this to find textual records, technical specifications, reports, minutes, contracts, declarations, or unstructured evidence.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "concept": {"type": "string", "description": "Keywords or dates to search (e.g. '17.01.2025 curs prezenta', 'contract imprumut')"},
-                            "semantic_intent": {"type": "string", "description": "Optional type of document (e.g. CURS, CONTRACT, DECLARATIE, PROCES VERBAL)."}
+                            "concept": {"type": "string", "description": "Keywords, entity names, identifiers, or dates to search."},
+                            "semantic_intent": {"type": "string", "description": "Optional type of document (e.g. RAPORT, CONTRACT, DECLARATIE, PROCES VERBAL)."}
                         },
                         "required": ["concept"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "FETCH_FULL_DOCUMENT",
+                    "description": "Retrieve the complete text (up to 4096 characters or expanded context window) of a specific document ID. Use this when confidence for a target is MEDIUM to inspect surrounding paragraphs or verify details.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "doc_id": {"type": "integer", "description": "Document ID to inspect in full."},
+                            "focus_terms": {"type": "string", "description": "Optional keywords to center the expanded window around."}
+                        },
+                        "required": ["doc_id"]
                     }
                 }
             },
@@ -797,13 +958,14 @@ FINAL RESPONSE FORMAT (ROMANIAN):
             if step > 1 and not has_used_tools and step < 4:
                 messages.append({"role": "user", "content": "You haven't used any tools yet. Use SEARCH_TEXT or SEARCH_STRUCTURED_DATA to find evidence before concluding."})
             
+            chat_ctx = int(UnifiedLLMClient.get_engine_config().get("chat_ctx", 16384))
             try:
                 chat_res = UnifiedLLMClient.chat_step(
                     messages=messages,
                     tools=current_tools,
                     model=self.active_model,
                     temperature=0.0,
-                    num_ctx=32768
+                    num_ctx=chat_ctx
                 )
                 assistant_msg = {
                     "role": "assistant",
@@ -889,6 +1051,11 @@ FINAL RESPONSE FORMAT (ROMANIAN):
                         )
                     elif t_name == "SEARCH_TEXT":
                         observation = self.tool_search_text(t_args.get("concept", ""), t_args.get("semantic_intent", ""))
+                    elif t_name == "FETCH_FULL_DOCUMENT":
+                        observation = self.tool_fetch_full_document(
+                            doc_id=int(t_args.get("doc_id", 0)) if isinstance(t_args, dict) else 0,
+                            focus_terms=t_args.get("focus_terms", "") if isinstance(t_args, dict) else ""
+                        )
                     elif t_name == "EXPLORE_GRAPH":
                         observation = self.tool_explore_graph(t_args.get("entity", ""))
                     elif t_name == "TIMELINE":
@@ -917,23 +1084,17 @@ FINAL RESPONSE FORMAT (ROMANIAN):
             # If no tools called, we check if we have the final answer
             final_content = assistant_msg.get("content", "").strip()
             
-            if "[FINAL RESPONSE]" in final_content or "CONCLUZIE" in final_content.upper():
-                # Guard against premature negative conclusions without text search
-                negative_phrases = [
-                    "nu există dovezi", "nu exista dovezi", "nu există nicio înregistrare",
-                    "nu exista nicio inregistrare", "nu s-au găsit", "nu s-au gasit",
-                    "nu am găsit", "nu am gasit", "nu sunt date", "lipsesc dovezi",
-                    "no evidence", "nu există informații", "nu exista informatii"
-                ]
-                has_negative = any(p in final_content.lower() for p in negative_phrases)
-                if has_negative and not has_used_search_text and step < 5:
-                    messages.append({
-                        "role": "user",
-                        "content": "ATENȚIE AUDITOR: Nu poți concluziona că lipsesc dovezile din dosar fără a căuta în textul integral al documentelor! Apelează SEARCH_TEXT cu cuvinte cheie relevante (inclusiv variațiile de dată și denumirea cursului/activității) pentru a verifica registrele, procesele verbale și rapoartele înainte de a finaliza."
-                    })
-                    continue
-
-                # Extract only the final response part if it's mixed with planning/thinking
+            is_final_candidate = (
+                "[FINAL RESPONSE]" in final_content or 
+                "[FACTS]" in final_content or 
+                "[CONCLUSION]" in final_content or 
+                "CONCLUZIE" in final_content.upper() or
+                "[CONCLUZIE]" in final_content or
+                "CONFIDENCE: HIGH" in final_content.upper()
+            )
+            
+            if is_final_candidate and has_used_tools:
+                # Extract clean final response part if it's mixed with planning/thinking
                 if "[FINAL RESPONSE]" in final_content:
                     parts = final_content.split("[FINAL RESPONSE]")
                     display_content = parts[-1].strip()
@@ -946,11 +1107,11 @@ FINAL RESPONSE FORMAT (ROMANIAN):
                     yield json.dumps({"type": "final", "data": display_content, "citations": self.citations})
                     return
 
-            if step < 5: # Minim 5 pași dacă nu a găsit răspunsul final
-                messages.append({"role": "user", "content": "Continuă investigația folosind uneltele pentru a găsi dovezi clare (date, sume, nume). Dacă ai terminat, oferă răspunsul final precedat de [FINAL RESPONSE]."})
+            if not has_used_tools and step < 4:
+                messages.append({"role": "user", "content": "Continuă investigația folosind uneltele (SEARCH_TEXT, FETCH_FULL_DOCUMENT, SEARCH_STRUCTURED_DATA) pentru a găsi dovezi clare înainte de a concluziona."})
                 continue
                 
-            if final_content:
+            if final_content and has_used_tools:
                 yield json.dumps({"type": "final", "data": final_content, "citations": self.citations})
                 return
 
