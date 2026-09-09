@@ -1,8 +1,9 @@
 import os
 from PIL import Image
 import pytesseract
-from docling.document_converter import DocumentConverter
+from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.datamodel.pipeline_options import PdfPipelineOptions, RapidOcrOptions
+from docling.datamodel.base_models import InputFormat
 
 class OCRService:
     def __init__(self):
@@ -19,7 +20,11 @@ class OCRService:
 
     def _get_converter(self):
         if self.converter is None:
-            self.converter = DocumentConverter(pipeline_options=self.pipeline_options)
+            self.converter = DocumentConverter(
+                format_options={
+                    InputFormat.PDF: PdfFormatOption(pipeline_options=self.pipeline_options)
+                }
+            )
         return self.converter
 
     def process_file(self, file_path: str) -> dict:
