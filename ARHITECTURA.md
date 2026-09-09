@@ -131,13 +131,34 @@
 - **Eliminare Duplicare Întrebare în Istoric (`_load_history`):**
     - S-a introdus deduplicarea automată în `_load_history` pentru a evita apariția dublă a întrebării utilizatorului în contextul LLM (cauzată de salvarea mesajului utilizator în DB chiar înainte de lansarea agentului).
 
+### Etapa 23: Upgrade Reranker (BAAI/bge-reranker-v2-m3) & Chunker Semantic Structurat (Markdown, Tabele & Parent-Child) - IMPLEMENTAT (Septembrie 2026)
+- **Upgrade Reranker la `BAAI/bge-reranker-v2-m3`:**
+    - Înlocuit modelul vechi `BAAI/bge-reranker-base` (care era centrat pe engleză/chineză) cu modelul multilingv de generație nouă `BAAI/bge-reranker-v2-m3`.
+    - Reranker-ul rulează forțat pe CPU (`device='cpu'`) în containerul `v2-backend`, lăsând VRAM-ul dedicat 100% instanței LLM. Rularea pe CPU durează sub 1 secundă pentru zeci de candidați.
+    - Oferă o granularitate excepțională pentru limba română (pe query-uri de control pe registre de cursuri și facturi a atins scoruri calibrate de relevanță de ~0.94 pentru chunk-ul relevant vs ~0.000016 pentru chunk-uri irelevante).
+    - Suportă configurare flexibilă prin variabila de mediu `RERANKER_MODEL`.
+- **Implementare `SemanticChunker` (`backend/core_engine/services/chunker_service.py`):**
+    - S-a eliminat decuparea mecanică la 350 de caractere care secționa cuvinte, numere, CNP-uri și fragmenta tabelele în linii orfane.
+    - Noul modul `SemanticChunker` analizează ierarhia Markdown (`#`, `##`, `###`), paragrafele și tabelele.
+    - **Păstrare Tabele:** Tabelele Markdown până în 2500 de caractere sunt păstrate 100% intacte într-un singur chunk. Blocurile consecutive de tabel despărțite de linii goale la conversia Docling sunt unite automat.
+    - **Tabele Mari:** Pentru tabele extinse (> 2500 caractere), tăierea se face exclusiv între rânduri întregi, iar primele 2 rânduri de antet ale tabelului sunt replicate automat pe fiecare slice rezultat pentru a păstra semnificația coloanelor.
+    - **Breadcrumbs Contextuale:** Fiecare chunk primește automat antetul de context: `[Doc: <nume_fișier> | <Cale Header>]`.
+    - **Hierarchical Parent-Child Retrieval:** Generează bucăți `Parent Chunk` (context larg până la 4500 caractere pentru sinteza LLM) și bucăți `Child Chunk` (cu embedding calculat prin `BAAI/bge-m3` pentru căutare spectrală în `pgvector`).
+- **Păstrarea Embedder-ului `BAAI/bge-m3`:**
+    - Modelul `BAAI/bge-m3` (1024 dimensiuni, suport nativ de până la 8192 tokeni context) a fost păstrat deoarece este deja calibrat pe schema tabelelor `document_chunks` și `document_storage` din PostgreSQL (`vector(1024)`).
+- **Corecții Pipeline OCR & Ingestion (`ocr_service.py` & `tasks.py`):**
+    - Tabelele extrase de Docling sunt adăugate acum garantat atât în `items`, cât și în `chunks`, asigurând că nicio informație tabulară nu se pierde la indexare.
+    - Funcția `_create_chunks_and_embeddings` din `tasks.py` acceptă `raw_markdown` și apelează `SemanticChunker`, salvând ierarhia `parent_chunk_id` în `document_chunks` și `document_storage`.
+- **Re-indexare DB:** Toate cele 62 de documente existente în baza de date au fost re-procesate și re-vectorizate cu noul sistem semantic.
+
 ---
-*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 22 (Decuplare Asistent Chat în Fundal, Căutare Temporală Multiformat & Prevenire Concluzii Negative Premature).*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 23 (Upgrade Reranker v2-m3 & Semantic Chunker).*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:
 1. **Agentic Investigator Loop:** Sistemul functioneaza printr-o bucla `AgenticInvestigator` care alterneaza faze de rationament (`Thinking`) cu faze de actiune (`Tool Use`). Acest lucru previne halucinatiile deoarece modelul trebuie sa astepte observatia (datele extrase).
 2. **Quant Integrity Protocol (Financial Data):** Daca query-ul implica sume (bani), cantitati, bilanturi, agentului i se blocheaza accesul la rezultatele fragmentate ale vector-search-ului. E fortat prin prompt injectat sa apeleze `SEARCH_STRUCTURED_DATA`, care randeaza aggregari din baza de date relationala (PostgreSQL).
-3. **Hybrid Search cu Reranker:** Pentru text (contracte, extrase), se apeleaza `SEARCH_TEXT`. Vectorii sunt adusi din extensia `pgvector`, apoi rerankati cu `BAAI/bge-reranker-base` pentru a asigura densitatea informatiei (Cross-Encoder).
+3. **Hybrid Search cu Reranker:** Pentru text (contracte, extrase), se apeleaza `SEARCH_TEXT`. Vectorii sunt adusi din extensia `pgvector` (folosind `BAAI/bge-m3`), apoi rerankati cu `BAAI/bge-reranker-v2-m3` (Cross-Encoder multilingv de înaltă rezoluție) pentru a asigura densitatea si relevanta informatiei.
 4. **Early Stop Mechanism:** Agentul nu e fortat sa ajunga la pasul 15. Imediat ce are `[FACTS]` complete care raspund integral la intrebarea utilizatorului, opreste bucla si emite o concluzie.
 5. **Graph Search (Harta Documentului):** Utilizand `Neo4j`, cand agentul gaseste entitati (nume de companii), poate extrage conexiunile ierarhice (actionariat, auto-tranzactionare, management overlap).
+

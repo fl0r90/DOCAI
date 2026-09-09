@@ -82,6 +82,12 @@ def process_document(file_path: str):
                     if bbox:
                         table_spatial = f"l={bbox.l},t={bbox.t},r={bbox.r},b={bbox.b}"
                 items.append({"type": "TABLE", "content": table_md, "page": page_no, "spatial": table_spatial})
+                chunks.append({
+                    "content": table_md,
+                    "page": page_no,
+                    "spatial": table_spatial,
+                    "is_table": True
+                })
 
         return {
             "markdown": md_text,

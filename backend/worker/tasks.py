@@ -78,64 +78,112 @@ def extract_financial_regex(text_content):
         except: continue
     return transactions
 
-def split_into_child_chunks(text, chunk_size=350, overlap=50):
-    if len(text) <= chunk_size:
-        return [text]
-    chunks = []
-    start = 0
-    while start < len(text):
-        end = start + chunk_size
-        chunks.append(text[start:end])
-        start += (chunk_size - overlap)
-        if start >= len(text) - overlap:
-            break
-    return chunks
+from core_engine.services.chunker_service import semantic_chunker
 
-def _create_chunks_and_embeddings(doc_id, chunks_data, filename="unknown"):
-    if not chunks_data: return []
-    print(f"[*] Procesare vectori Parent-Child pre-commit...")
-    try: requests.post(f"{OLLAMA_URL}/api/generate", json={"model": "mistral:latest", "keep_alive": 0}, timeout=5)
-    except: pass
+def _create_chunks_and_embeddings(doc_id, chunks_data, filename="unknown", raw_markdown=None):
+    if not chunks_data and not raw_markdown:
+        return []
+    print(f"[*] Semantic Parent-Child Vector Indexing for doc {doc_id} ({filename})...")
+    try:
+        requests.post(f"{OLLAMA_URL}/api/generate", json={"model": "mistral:latest", "keep_alive": 0}, timeout=5)
+    except Exception:
+        pass
+        
     inserted_ids = []
+    
+    # Extract markdown if passed in chunks_data dict
+    chunks_list = []
+    if isinstance(chunks_data, dict):
+        raw_markdown = raw_markdown or chunks_data.get("markdown")
+        chunks_list = chunks_data.get("chunks", [])
+    elif isinstance(chunks_data, list):
+        chunks_list = chunks_data
+
+    # Generate semantic chunks
+    if raw_markdown and len(raw_markdown.strip()) > 10:
+        semantic_chunks = semantic_chunker.chunk_markdown(raw_markdown, filename=filename)
+    else:
+        # Fallback if no raw markdown is present
+        semantic_chunks = []
+        for item in chunks_list:
+            content = (item.get("content") or item.get("text", "")) if isinstance(item, dict) else item
+            page_no = item.get("page", 1) if isinstance(item, dict) else 1
+            spatial = item.get("spatial", "") if isinstance(item, dict) else ""
+            if not content or len(content.strip()) < 5:
+                continue
+            if semantic_chunker.is_table_block(content):
+                tbl_chunks = semantic_chunker.chunk_table(content, context_header=f"[Doc: {filename}]")
+                for tc in tbl_chunks:
+                    semantic_chunks.append({
+                        "content": tc,
+                        "parent_content": content,
+                        "is_table": True,
+                        "page_number": page_no,
+                        "spatial": spatial
+                    })
+            else:
+                txt_chunks = semantic_chunker.split_narrative(content, context_header=f"[Doc: {filename}]")
+                for tc in txt_chunks:
+                    semantic_chunks.append({
+                        "content": tc,
+                        "parent_content": content,
+                        "is_table": False,
+                        "page_number": page_no,
+                        "spatial": spatial
+                    })
+
+    if not semantic_chunks:
+        return []
+
     with SafeSession() as db:
         db.execute(text("DELETE FROM document_chunks WHERE document_id = :id"), {"id": doc_id})
         parent_uuid = uuid.uuid5(uuid.NAMESPACE_DNS, f"doc_{doc_id}")
         db.execute(text("DELETE FROM document_storage WHERE parent_doc_id = :p_id"), {"p_id": str(parent_uuid)})
         db.flush()
-        
+
         child_idx = 0
-        for idx, item in enumerate(chunks_data):
-            content = (item.get("content") or item.get("text", "")) if isinstance(item, dict) else item
-            page_no = item.get("page", 1) if isinstance(item, dict) else 1
-            spatial = item.get("spatial", "") if isinstance(item, dict) else ""
-            if not content or len(content.strip()) < 5: continue
-            safe_content = "".join(c for c in content if c.isprintable() or c in "\n\r\t")
-            
-            # 1. Creăm și salvăm Parent Chunk (fără embedding)
+        from collections import OrderedDict
+        parent_groups = OrderedDict()
+        for c in semantic_chunks:
+            p_content = c.get("parent_content") or c["content"]
+            if p_content not in parent_groups:
+                parent_groups[p_content] = []
+            parent_groups[p_content].append(c)
+
+        for p_content, children in parent_groups.items():
+            safe_parent = "".join(ch for ch in p_content if ch.isprintable() or ch in "\n\r\t")
+            first_child = children[0]
+            page_no = first_child.get("page_number", 1)
+            spatial = first_child.get("spatial", "")
+
+            # 1. Save Parent Chunk (embedding=None)
             parent_chunk = models.DocumentChunk(
                 document_id=doc_id,
-                content=safe_content,
+                content=safe_parent,
                 page_number=page_no,
                 spatial=spatial,
                 embedding=None,
                 parent_chunk_id=None
             )
             db.add(parent_chunk)
-            db.flush()  # Generăm parent_chunk.id
-            
-            # 2. Spargem în Child Chunks și calculăm embeddings
-            child_texts = split_into_child_chunks(safe_content, chunk_size=350, overlap=50)
-            for c_text in child_texts:
-                if len(c_text.strip()) < 5: continue
+            db.flush()
+
+            # 2. Save Child Chunks with embeddings
+            for child in children:
+                child_content = child["content"]
+                safe_child = "".join(ch for ch in child_content if ch.isprintable() or ch in "\n\r\t")
+                if len(safe_child.strip()) < 5:
+                    continue
+
                 success = False
                 for attempt in range(2):
                     try:
                         from core_engine.services.embedding_service import EmbeddingService
-                        embedding = EmbeddingService.get_embedding(c_text[:3500])
+                        embedding = EmbeddingService.get_embedding(safe_child[:3500])
                         if embedding:
                             new_child = models.DocumentChunk(
                                 document_id=doc_id,
-                                content=c_text,
+                                content=safe_child,
                                 page_number=page_no,
                                 spatial=spatial,
                                 embedding=embedding,
@@ -143,17 +191,23 @@ def _create_chunks_and_embeddings(doc_id, chunks_data, filename="unknown"):
                             )
                             db.add(new_child)
                             db.flush()
-                            inserted_ids.append({"id": new_child.id, "content": c_text})
-                            
-                            # Upsert în document_storage
+                            inserted_ids.append({"id": new_child.id, "content": safe_child})
+
+                            # Upsert in document_storage
                             upsert_document_chunk(
-                                db, 
+                                db,
                                 {
-                                    "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, f"chunk_{doc_id}_{child_idx}")), 
-                                    "parent_doc_id": str(parent_uuid), 
-                                    "content": c_text, 
-                                    "metadata": {"filename": filename, "page": page_no, "spatial": spatial, "parent_chunk_id": parent_chunk.id}
-                                }, 
+                                    "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, f"chunk_{doc_id}_{child_idx}")),
+                                    "parent_doc_id": str(parent_uuid),
+                                    "content": safe_child,
+                                    "metadata": {
+                                        "filename": filename,
+                                        "page": page_no,
+                                        "spatial": spatial,
+                                        "parent_chunk_id": parent_chunk.id,
+                                        "is_table": child.get("is_table", False)
+                                    }
+                                },
                                 embedding
                             )
                             child_idx += 1
@@ -162,20 +216,21 @@ def _create_chunks_and_embeddings(doc_id, chunks_data, filename="unknown"):
                     except Exception as e:
                         print(f"[!] Error creating embedding for child chunk: {e}")
                         time.sleep(1)
-                
+
                 if not success:
                     new_child = models.DocumentChunk(
                         document_id=doc_id,
-                        content=c_text,
+                        content=safe_child,
                         page_number=page_no,
                         spatial=spatial,
                         parent_chunk_id=parent_chunk.id
                     )
                     db.add(new_child)
                     db.flush()
-                    inserted_ids.append({"id": new_child.id, "content": c_text})
-                    
+                    inserted_ids.append({"id": new_child.id, "content": safe_child})
+
         db.commit()
+    print(f"[+] Successfully indexed {len(inserted_ids)} child chunks under {len(parent_groups)} parent chunks for doc {doc_id}.")
     return inserted_ids
 
 def unified_worker_pipeline():
@@ -233,7 +288,7 @@ def unified_worker_pipeline():
 
                 # 4. EMBEDDINGS (pgvector)
                 r.set(f"doc_progress_{doc_id}", json.dumps({"status": "RAG", "percent": 40, "eta_seconds": 60, "message": "Indexare Vectorială..."}))
-                chunks_info = _create_chunks_and_embeddings(doc_id, ocr_result.get("chunks", []), filename=filename)
+                chunks_info = _create_chunks_and_embeddings(doc_id, ocr_result, filename=filename, raw_markdown=ocr_result.get("markdown", ""))
                 
                 # 5. STRUCTURED EXTRACTION (Grinder - LLM JSON Mode)
                 # Stergem datele vechi financiare in caz de re-procesare
