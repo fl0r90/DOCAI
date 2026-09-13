@@ -188,9 +188,13 @@ class AgenticInvestigator:
             for m in reversed(past_msgs):
                 # We strip the investigation logs from history to keep context clean
                 clean_content = m.content.split("**LOG INVESTIGATIE:**")[0].strip()
-                # Truncate past long assistant messages to prevent prompt context pollution
-                if m.role == "assistant" and len(clean_content) > 1200:
-                    clean_content = clean_content[:1200] + "\n[... Conținut anterior trunchiat pentru economisire context ...]"
+                # Compact past assistant messages to prevent prompt context pollution and anchor drift
+                if m.role == "assistant":
+                    if "[CONCLUSION]" in clean_content:
+                        conclusion_part = clean_content.split("[CONCLUSION]")[-1].split("[MISSING EVIDENCE]")[0].strip()
+                        clean_content = f"[CONCLUZIE RUNDA ANTERIOARĂ]: {conclusion_part[:500]}"
+                    elif len(clean_content) > 600:
+                        clean_content = clean_content[:600] + "\n[... Conținut anterior sintetizat ...]"
                 if clean_content:
                     self.history.append({"role": m.role, "content": clean_content})
 
@@ -209,12 +213,27 @@ class AgenticInvestigator:
             # Extract obvious entities (ALL CAPS)
             anchors = re.findall(r'[A-Z]{3,30}', self.user_question)
             
-            if anchors or found_months or found_years or found_dates:
+            # Extract document/invoice codes (e.g. FACT-2023-0245, CTR-104, AGR-2024-0089)
+            doc_codes = re.findall(r'\b[A-Z]{2,6}[-_/]\d{2,4}[-_/]\d{2,6}\b', self.user_question, re.IGNORECASE)
+            if not doc_codes:
+                doc_codes = re.findall(r'\b(?:FACT|CTR|AGR|NOR|AVZ|ACT)[-_/0-9]+\b', self.user_question, re.IGNORECASE)
+
+            if anchors or found_months or found_years or found_dates or doc_codes:
                 self.injected_evidence = "--- PRELIMINARY CONTEXT ---\n"
                 self.injected_evidence += f"Detected Subject(s): {', '.join(anchors) if anchors else 'None'}\n"
                 self.injected_evidence += f"Detected Time Constraints: {' '.join(found_months)} {' '.join(found_years)}\n"
                 if found_dates:
                     self.injected_evidence += f"Detected Explicit Date Variations to Search: {', '.join(found_dates[:6])}\n"
+                if doc_codes:
+                    self.injected_evidence += f"Detected Document/Invoice Code(s): {', '.join(doc_codes)}\n"
+                    short_codes = []
+                    for dc in doc_codes:
+                        nums = re.findall(r'\d{2,}', dc)
+                        if nums:
+                            short_codes.extend([nums[-1], nums[-1].lstrip('0')])
+                    short_codes = list(dict.fromkeys(short_codes))
+                    if short_codes:
+                        self.injected_evidence += f"ACTION RULE: When searching for these codes, run SEARCH_TEXT with just the code alone (e.g. concept='{doc_codes[0]}') to find the invoice/contract, AND search bank statements/transactions with the short number (e.g. concept='{short_codes[0]}' or concept='virament {short_codes[0]}') to locate the payment.\n"
                 
         # Agnostic Multi-Domain Intent Detection
         q_lower = self.user_question.lower()
@@ -252,9 +271,9 @@ class AgenticInvestigator:
             doc_ids = [d.id for d in all_docs]
             if not doc_ids: return "No documents in this case."
             
-            # Apply semantic intent filter (search in doc_type, filename OR dynamic_attributes)
+            # Apply semantic intent preference (search in doc_type, filename OR dynamic_attributes)
+            intent_doc_ids = set()
             if semantic_intent:
-                intent_ids = []
                 si_lower = semantic_intent.lower()
                 for d in all_docs:
                     matched = False
@@ -270,15 +289,7 @@ class AgenticInvestigator:
                                     matched = True
                                     break
                     if matched:
-                        intent_ids.append(d.id)
-                
-                if intent_ids:
-                    doc_ids = intent_ids
-                else:
-                    # Fallback: warn but continue search in all documents
-                    intent_warning = f"Note: No documents found matching type/name '{semantic_intent}'. Searching all docs instead.\n"
-            else:
-                intent_warning = ""
+                        intent_doc_ids.add(d.id)
             
             # Extract date variants from both the query AND the user question
             date_variants = get_date_variants(query)
@@ -326,6 +337,15 @@ class AgenticInvestigator:
                     .filter(and_(DocumentChunk.document_id.in_(doc_ids), or_(*conditions)))\
                     .limit(30).all()
 
+            # 3a. Compound Token Exact Search (e.g. FACT-2023-0245, CTR-104, AGRO-CHIM)
+            compound_res = []
+            compound_tokens = re.findall(r'\b[A-Za-z0-9]+(?:[-_/][A-Za-z0-9]+)+\b', query)
+            if compound_tokens:
+                compound_conditions = [DocumentChunk.content.ilike(f"%{ct}%") for ct in compound_tokens]
+                compound_res = db.query(DocumentChunk)\
+                    .filter(and_(DocumentChunk.document_id.in_(doc_ids), or_(*compound_conditions)))\
+                    .limit(20).all()
+
             # 3b. Positional Search (End/Epilogue/Signatures vs Start/Preamble)
             positional_res = []
             q_full_lower = (query + " " + (self.user_question or "")).lower()
@@ -342,10 +362,10 @@ class AgenticInvestigator:
                     .limit(10).all()
                 positional_res.extend(start_chunks)
 
-            # 4. Merge & Deduplicate (date_res and positional_res prioritized)
+            # 4. Merge & Deduplicate (compound, date and positional prioritized)
             seen_ids = set()
             merged_results = []
-            for r in date_res + positional_res + vector_res + lexical_res:
+            for r in compound_res + date_res + positional_res + vector_res + lexical_res:
                 if r.id not in seen_ids:
                     seen_ids.add(r.id)
                     merged_results.append(r)
@@ -360,15 +380,18 @@ class AgenticInvestigator:
                 # Rerank query with candidates
                 scored_res = reranker.rerank(query, merged_results, top_k=20)
                 print(f"[+] Successfully reranked {len(merged_results)} candidates using cross-encoder.")
-                if date_variants:
+                if intent_doc_ids or date_variants:
                     boosted = []
                     for s, r in scored_res:
                         boost = 0.0
-                        c_low = r.content.lower()
-                        for dv in date_variants:
-                            if dv.lower() in c_low:
-                                boost += 5.0
-                                break
+                        if intent_doc_ids and r.document_id in intent_doc_ids:
+                            boost += 2.0
+                        if date_variants:
+                            c_low = r.content.lower()
+                            for dv in date_variants:
+                                if dv.lower() in c_low:
+                                    boost += 5.0
+                                    break
                         boosted.append((s + boost, r))
                     boosted.sort(key=lambda x: x[0], reverse=True)
                     scored_res = boosted
@@ -862,9 +885,22 @@ Obiectivul investigației / Întrebare:
                     else:
                         pattern_variants = [v.lower() for v in pattern_variants]
                     
-                    chunk_filter = [DocumentChunk.content.ilike(f"%{subject}%")]
-                    if search_terms:
-                        chunk_filter.extend([DocumentChunk.content.ilike(f"%{t}%") for t in search_terms])
+                    # Extract numeric suffixes from pattern (e.g. FACT-2023-0245 -> '0245', '245')
+                    if match_pattern:
+                        num_parts = re.findall(r'\d{2,}', match_pattern)
+                        for np in num_parts:
+                            pattern_variants.append(np.lower())
+                            if np.startswith('0') and len(np) > 1:
+                                pattern_variants.append(np.lstrip('0').lower())
+                    pattern_variants = list(dict.fromkeys(pattern_variants))
+
+                    clean_subject_terms = [t.lower() for t in search_terms if t.lower() not in ["sc", "s.c.", "srl", "s.r.l.", "sa", "s.a.", "pfa", "srl."]]
+                    
+                    chunk_filter = []
+                    if clean_subject_terms:
+                        chunk_filter.extend([DocumentChunk.content.ilike(f"%{t}%") for t in clean_subject_terms])
+                    else:
+                        chunk_filter.append(DocumentChunk.content.ilike(f"%{subject}%"))
                     if pattern_variants:
                         chunk_filter.extend([DocumentChunk.content.ilike(f"%{pv}%") for pv in pattern_variants])
 
@@ -883,9 +919,9 @@ Obiectivul investigației / Întrebare:
                             for line in c.content.split('\n'):
                                 if "|" in line:
                                     is_subject_match = False
-                                    if subject.lower() in line.lower() or any(t.lower() in line.lower() for t in search_terms):
+                                    if any(t in line.lower() for t in clean_subject_terms) or subject.lower() in line.lower():
                                         is_subject_match = True
-                                    elif subject.lower() in c_lower and subject.lower() not in ["prezent", "absent"]:
+                                    elif any(t in c_lower for t in clean_subject_terms) and subject.lower() not in ["prezent", "absent"]:
                                         is_subject_match = True
                                         
                                     if is_subject_match:
@@ -1131,7 +1167,7 @@ FINAL RESPONSE FORMAT (ROMANIAN):
         # Add current question with injected evidence
         messages.append({
             "role": "user", 
-            "content": f"EVIDENCE ALREADY IN CONTEXT:\n{self.injected_evidence}\n\nQUESTION: {self.user_question}\n\nREMINDER: You are an Agnostic Auditor. If the answer is in the context above, give the [FINAL RESPONSE] now. If not, use tools. Deduplicate names and follow exclusion rules (e.g. no absentees)."
+            "content": f"EVIDENCE ALREADY IN CONTEXT:\n{self.injected_evidence}\n\nQUESTION: {self.user_question}\n\nREMINDER: You are an Agnostic Forensic Auditor. Follow these rules strictly:\n1. If the question mentions specific invoices, contracts, or entities, you MUST search for them using SEARCH_TEXT or SEARCH_STRUCTURED_DATA before concluding.\n2. When searching for payments or invoices, search both the full code (e.g. 'FACT-2023-0245') and the short number (e.g. '245' or '0245') across bank statements.\n3. Compute exact math: due dates (issue date + payment term), delay days against bank statement dates, and penalty formulas (amount * rate * days).\n4. NEVER conclude that a document, invoice, or payment is missing without searching for its numeric identifier and vendor name via SEARCH_TEXT."
         })
 
         has_used_tools = False
@@ -1335,6 +1371,19 @@ FINAL RESPONSE FORMAT (ROMANIAN):
                 if display_content:
                     yield json.dumps({"type": "final", "data": display_content, "citations": self.citations})
                     return
+
+            # ANTI-SURRENDER FORENSIC GUARD:
+            # If the model tries to conclude early that documents/payments are missing, reject surrender and push it to search
+            is_surrender = any(phrase in final_content.lower() for phrase in [
+                "nu există", "nu au fost găsite", "nu a fost găsit", "lipsesc dovezi", 
+                "imposibilă determinarea", "nu cuprind tranzacția", "nu există dovezi", "nu pot furniza"
+            ])
+            if is_surrender and step < 5 and not has_used_search_text:
+                messages.append({
+                    "role": "user", 
+                    "content": "FORENSIC DIRECTIVE: Do NOT conclude early that documents or payments are missing. You have not thoroughly used SEARCH_TEXT. Execute SEARCH_TEXT now for: 1) Specific invoice codes (e.g. 'FACT-2023-0245'); 2) Short numeric forms (e.g. '245'); 3) Bank statement keywords ('extras', 'virament', vendor name). Find the proof before concluding."
+                })
+                continue
 
             if not has_used_tools and step < 4:
                 messages.append({"role": "user", "content": "Continuă investigația folosind uneltele (SEARCH_TEXT, FETCH_FULL_DOCUMENT, SEARCH_STRUCTURED_DATA) pentru a găsi dovezi clare înainte de a concluziona."})
