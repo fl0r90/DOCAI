@@ -27,5 +27,6 @@ WhiteSpaceConflict/
 .aider*
 *.log
 backend/logs/
-*.tsbuildinfo
 *.png
+test_documents/
+backend/test_documents/

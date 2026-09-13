@@ -272,8 +272,23 @@
     - *Extragere Automată a Numerelor Scurte:* `_pre_process_query` și fallback-ul `SEARCH_STRUCTURED_DATA` extrag automat sufixele numerice (`0245`, `245`) și elimină sufixele comerciale zgomotoase (`SC`, `SRL`, `SA`) pentru potrivire instantă în tabelele de extrase bancare.
     - *Sanitizarea Istoricului Multi-Turn:* Mesajele anterioare ale asistentului din istoric sunt condensate exclusiv la concluzia finală, prevenind poluarea promptului cu cearceafuri de `[FACTS]` din runde trecute.
 
+### Etapa 34: Qwen 3.8 Multi-Model Resident Architecture & Truncate Resilience - IMPLEMENTAT (Septembrie 2026)
+- **Problemă rezolvată (Model thrashing, erori 500 template renderer și limitări de context):**
+    - Trecerea la un model de raționament criminalistic de înaltă precizie (Qwen 3.8-27B) a scos la iveală gâtuiri critice în containerul Docker de inferență și în manipularea contextului de tool-calling:
+        1. Containerul Ollama rula o versiune învechită (0.20.2) care nu recunoștea arhitectura `qwen35` (eroare 500/404).
+        2. Setarea `OLLAMA_MAX_LOADED_MODELS=1` determina evacuarea modelului Qwen (17.7 GB) la fiecare pas de căutare pentru a încărca `bge-m3` (embeddings), cauzând întârzieri de 25s per pas și risipă masivă de I/O.
+        3. Fereastra `chat_ctx = 8192` declanșa algoritmul intern de trunchiere din Ollama (`prompt.go:36`), care la observații mari de unelte arunca primul mesaj non-system (întrebarea utilizatorului), declanșând eroarea fatală `no user query found in messages` din validatorul Qwen 3.8 (`qwen35.go:196`).
+        4. Gărzile din `chat_service.py` conțineau referințe hardcodate la întrebarea anterioară, forțând modelul să răspundă repetat la aceeași temă.
+- **Arhitectura actualizată (`chat_service.py`, `llm_client.py`, `docker-compose.yml`):**
+    - *Upgrade Ollama 0.34.0 & Qwen 3.8 (27.3B):* Integrarea modelului Qwen 3.8 cu speculative decoding (`draft-mtp`), capabilități native de function-calling și lanț intern de gândire (*thinking*).
+    - *Coexistență Multi-Model (`OLLAMA_MAX_LOADED_MODELS=3`):* Ambele modele (`qwen3.8:latest` și `bge-m3:latest`) rămân rezidente permanent în RAM/VRAM, eliminând complet model thrashing-ul.
+    - *Extindere Context la 32K & Dezactivare Trunchiere Oarbă (`truncate: False`):* Creșterea ferestrei de chat la 32.768 tokeni și transmiterea flag-ului `"truncate": False` către Ollama, garantând integritatea absolută a întrebării utilizatorului în istoricul mesajelor.
+    - *Plafonare Observații Unelte (`observation[:3500]`):* Limitarea dimensiunii fiecărui rezultat de unealtă pentru a preveni explozia memoriei de lucru.
+    - *Restabilirea Agnosticismului Total:* Epurarea oricăror directive particulare, menținând doar ghidaje generice de căutare a codurilor alfanumerice și documentelor menționate de utilizator.
+    - *Validare Experimentală Reușită:* Testat și certificat pe calcule matematice încrucișate complexe: Contract vs Factură vs Extras Bancar (penalități 49 zile) și Factură vs Extras Bancar vs Borderou Tichete de Cântar (deficit 61.50 tone / prejudiciu 67.650 RON).
+
 ---
-*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 33 (Anti-Surrender Forensic Guard & Compound Code Retrieval Resilience).*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 34 (Qwen 3.8 Multi-Model Resident Architecture & Truncate Resilience).*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:

@@ -132,6 +132,7 @@ class UnifiedLLMClient:
                 "model": active_model,
                 "messages": messages,
                 "stream": False,
+                "truncate": False,
                 "options": {
                     "temperature": temperature,
                     "num_ctx": num_ctx
@@ -140,8 +141,20 @@ class UnifiedLLMClient:
             if tools:
                 payload["tools"] = tools
 
-            resp = requests.post(url, json=payload, timeout=1800)
-            resp.raise_for_status()
+            roles_summary = [f"{m.get('role')}(len={len(m.get('content') or '')})" for m in messages]
+            print(f"[OLLAMA_STEP] Model={active_model}, Messages={len(messages)}, Roles={roles_summary}")
+            try:
+                resp = requests.post(url, json=payload, timeout=1800)
+                resp.raise_for_status()
+            except requests.exceptions.RequestException as rex:
+                err_body = getattr(resp, 'text', str(rex)) if 'resp' in locals() else str(rex)
+                print(f"[OLLAMA_ERROR] {rex} | Response body: {err_body}")
+                try:
+                    payload_dump = json.dumps(payload, ensure_ascii=False)
+                    print(f"[OLLAMA_ERROR_DUMP] Full payload: {payload_dump[:3000]}")
+                except Exception:
+                    pass
+                raise
             data = resp.json()
             msg = data.get("message") or {}
             content = msg.get("content") or ""

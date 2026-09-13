@@ -1167,7 +1167,7 @@ FINAL RESPONSE FORMAT (ROMANIAN):
         # Add current question with injected evidence
         messages.append({
             "role": "user", 
-            "content": f"EVIDENCE ALREADY IN CONTEXT:\n{self.injected_evidence}\n\nQUESTION: {self.user_question}\n\nREMINDER: You are an Agnostic Forensic Auditor. Follow these rules strictly:\n1. If the question mentions specific invoices, contracts, or entities, you MUST search for them using SEARCH_TEXT or SEARCH_STRUCTURED_DATA before concluding.\n2. When searching for payments or invoices, search both the full code (e.g. 'FACT-2023-0245') and the short number (e.g. '245' or '0245') across bank statements.\n3. Compute exact math: due dates (issue date + payment term), delay days against bank statement dates, and penalty formulas (amount * rate * days).\n4. NEVER conclude that a document, invoice, or payment is missing without searching for its numeric identifier and vendor name via SEARCH_TEXT."
+            "content": f"EVIDENCE ALREADY IN CONTEXT:\n{self.injected_evidence}\n\nQUESTION: {self.user_question}\n\nREMINDER: You are an Agnostic Forensic Auditor. Follow these rules strictly:\n1. If the question mentions specific invoices, contracts, codes, or entities, you MUST search for them using SEARCH_TEXT or SEARCH_STRUCTURED_DATA before concluding.\n2. When searching for payments, invoices, or deliveries, search both the full alphanumeric reference and the numeric identifier across bank statements, ledgers, and delivery documents.\n3. Compute exact math on any figures, dates, delays, quantities, or financial differences asked in the question.\n4. NEVER conclude that a document, invoice, payment, or delivery record is missing without thoroughly searching for its identifiers and partner names via SEARCH_TEXT."
         })
 
         has_used_tools = False
@@ -1339,7 +1339,7 @@ FINAL RESPONSE FORMAT (ROMANIAN):
                     
                     tool_msg = {
                         "role": "tool",
-                        "content": observation
+                        "content": observation[:3500] if len(observation) > 3500 else observation
                     }
                     if tc.get("id"):
                         tool_msg["tool_call_id"] = tc["id"]
@@ -1359,7 +1359,7 @@ FINAL RESPONSE FORMAT (ROMANIAN):
             )
             
             # 1. ANTI-SURRENDER FORENSIC GUARD:
-            # If the model tries to conclude early that documents/payments are missing, reject surrender and push it to search
+            # If the model tries to conclude early that documents/payments/records are missing, reject surrender and push it to search
             is_surrender = any(phrase in final_content.lower() for phrase in [
                 "nu există", "nu au fost găsite", "nu a fost găsit", "lipsesc dovezi", 
                 "imposibilă determinarea", "nu cuprind tranzacția", "nu există dovezi", "nu pot furniza"
@@ -1367,20 +1367,7 @@ FINAL RESPONSE FORMAT (ROMANIAN):
             if is_surrender and step < 5 and not has_used_search_text:
                 messages.append({
                     "role": "user", 
-                    "content": "FORENSIC DIRECTIVE: Do NOT conclude early that documents or payments are missing. You have not thoroughly used SEARCH_TEXT. Execute SEARCH_TEXT now for: 1) Specific invoice codes (e.g. 'FACT-2023-0245'); 2) Short numeric forms (e.g. '245'); 3) Bank statement keywords ('extras', 'virament', vendor name). Find the proof before concluding."
-                })
-                continue
-
-            # 2. MULTI-TARGET COMPLETENESS GUARD (Bank statements / Payment delays / Penalties):
-            # Prevent model from stopping after only finding the invoice without answering the payment and penalty targets
-            q_low = self.user_question.lower()
-            needs_bank_audit = any(k in q_low for k in ["extras", "bancar", "bancare", "virament", "zile de întârziere", "zile de intarziere", "penalit"])
-            has_computed_delay = any(k in final_content.lower() for k in ["zile de întârziere", "zile de intarziere", "zile intarziere", "penalități", "penalitati", "10.12.2023", "penalizare"])
-            
-            if needs_bank_audit and not has_computed_delay and step < 6:
-                messages.append({
-                    "role": "user",
-                    "content": "You identified the invoice, but you have NOT answered all parts of the question! Search the bank statements ('EXTRAS BANCAR' or search for '245') to find when this invoice was actually paid, calculate the exact number of days of delay past due date, and compute the 0.15%/day delay penalties. Search for '245' or bank statements now."
+                    "content": "FORENSIC DIRECTIVE: Do NOT conclude early that documents or transactions are missing. You have not thoroughly explored the evidence. Execute SEARCH_TEXT now for: 1) Specific document/invoice codes or numbers mentioned in the user question; 2) Relevant entity names; 3) Document types (e.g. borderou, aviz, extras, factura). Find the concrete proof before concluding."
                 })
                 continue
 
