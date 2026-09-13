@@ -251,8 +251,17 @@
     - *Căutare Hibridă cu Ancore Poziționale (`tool_search_text`):* Când o întrebare țintește sfârșitul sau începutul unui document, primele/ultimele calupuri sunt injectate garantat în setul de candidați înainte de reranking, prevenind omiterea epilogului sau anexelor.
     - *System Prompt Multi-Domeniu & Rigoare Criminalistică:* Instrucțiuni explicite pentru contracte (părți, clauze, răspundere), chat-uri (cronologie, expeditor/destinatar, timestamp-uri), finanțe și cărți, interzicând speculațiile și forțând raportarea la `[MISSING EVIDENCE]` când datele lipsesc.
 
+### Etapa 32: Visual Knowledge Graph Decluttering & Master Toolbar Standardization - IMPLEMENTAT (Septembrie 2026)
+- **Decluttering Graf Relații („Analiză Suveică” - `cases/[id]/page.tsx`):**
+    - *Eliminare Zgomot Textual (Label Avalanche):* Etichetele text nu se mai randează global peste toate nodurile simultan. Afișarea se face selectiv și inteligent doar pe nodul activ la hover (`hoverNode`), nodul selectat prin click (`selectedNode`), vecinii săi direcți și rezultatele căutării live.
+    - *Etichete lizibile cu Badge Pill:* Fiecare etichetă este trunchiată elegant (max 22 caractere) și randată pe canvas cu un fundal rotunjit semi-transparent (`ctx.roundRect`), asigurând lizibilitate fără suprapuneri chiar și peste muchii sau aglomerări dense.
+    - *Fizică d3 Aerisită:* Forță de respingere mărită (`charge: -400`, `distanceMax: 800`, `link distance: 85`) cu decay stabil și auto-zoomToFit la deschidere.
+    - *Relocare Buton Recentrează:* Mutat din centrul pânzei direct în bara superioară a modalului alături de controalele analitice (Lider, Cartel).
+- **Uniformizare UI Toolbar Master (`cases/[id]/page.tsx` și `cases/page.tsx`):**
+    - Toate elementele din bara superioară (Theme toggle, Badge-ul modelului LLM activ, butoanele Raport Audit, Harta Relații, Briefing, Dosar Nou și Ieșire) sunt aliniate strict la o înălțime de `h-9` (36px), `rounded-xl` și `gap-2.5`, eliminând discrepanțele vizuale de dimensiuni și margini arbitrare.
+
 ---
-*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 29 (3-Speed Hybrid OCR), Etapa 30 (Chat State Persistence) și Etapa 31 (Multi-Domain Forensic Prompt & Positional Retrieval).*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 29 (3-Speed Hybrid OCR), Etapa 30 (Chat State Persistence), Etapa 31 (Multi-Domain Forensic Prompt & Positional Retrieval) și Etapa 32 (Graph Decluttering & Header Standardization).*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:

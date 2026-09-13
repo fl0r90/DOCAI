@@ -104,25 +104,26 @@ export default function Cases() {
           <div className="flex items-center gap-4">
             <button 
               onClick={toggleTheme}
-              className="p-2.5 bg-slate-100 dark:bg-white/5 hover:bg-slate-200 dark:hover:bg-white/10 rounded-xl text-slate-600 dark:text-slate-400 transition-all border border-slate-200 dark:border-white/5"
+              className="w-9 h-9 flex items-center justify-center bg-slate-100 dark:bg-white/5 hover:bg-slate-200 dark:hover:bg-white/10 rounded-xl text-slate-600 dark:text-slate-400 transition-all border border-slate-200 dark:border-white/5 shrink-0"
+              title="Comutare temă"
             >
               {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
             </button>
-            <div className="hidden md:flex items-center gap-2 px-3 py-1.5 bg-blue-500/10 border border-blue-500/20 rounded-lg">
-              <Brain className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
-              <span className="text-[10px] font-black text-blue-600 dark:text-blue-400 uppercase tracking-widest">Model: {activeModel}</span>
+            <div className="hidden md:flex items-center gap-2 px-3 h-9 bg-blue-500/10 border border-blue-500/20 rounded-xl shrink-0">
+              <Brain className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
+              <span className="text-[11px] font-black text-blue-600 dark:text-blue-400 uppercase tracking-widest leading-none">Model: {activeModel}</span>
             </div>
             {user?.role && user.role !== 'WORKER' && (
               <button 
                 onClick={() => setIsCreating(true)}
-                className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 hover:bg-blue-500 rounded-xl text-xs font-black uppercase tracking-widest transition-all shadow-lg shadow-blue-500/20 text-white"
+                className="flex items-center gap-2 px-4 h-9 bg-blue-600 hover:bg-blue-500 rounded-xl text-xs font-black uppercase tracking-widest transition-all shadow-lg shadow-blue-500/20 text-white shrink-0"
               >
                 <Plus className="w-4 h-4" /> Dosar Nou
               </button>
             )}
             <button 
               onClick={handleLogout}
-              className="flex items-center gap-2 px-4 py-2.5 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 rounded-xl text-red-600 dark:text-red-400 text-xs font-black uppercase tracking-widest transition-all"
+              className="flex items-center gap-2 px-3.5 h-9 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 rounded-xl text-red-600 dark:text-red-400 text-xs font-black uppercase tracking-widest transition-all shrink-0"
               title="Deconectare din cont"
             >
               <LogOut className="w-4 h-4" /> Ieșire

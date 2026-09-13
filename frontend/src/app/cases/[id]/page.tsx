@@ -61,6 +61,7 @@ export default function CaseDetail() {
   const [highlightNodes, setHighlightNodes] = useState(new Set());
   const [highlightLinks, setHighlightLinks] = useState(new Set());
   const [selectedNode, setSelectedNode] = useState<any>(null);
+  const [hoverNode, setHoverNode] = useState<any>(null);
   const [nodeColors, setNodeColors] = useState<Record<string, string>>({});
   const [nodeVals, setNodeVals] = useState<Record<string, number>>({});
   const [graphSearch, setGraphSearch] = useState('');
@@ -634,6 +635,17 @@ export default function CaseDetail() {
     return { nodes: visibleNodes, links: visibleLinks };
   }, [graphData, timeline, currentTimeIndex]);
 
+  useEffect(() => {
+    if (showGraph && graphRef.current) {
+      const fg = graphRef.current;
+      fg.d3Force('charge')?.strength(-400)?.distanceMax(800);
+      fg.d3Force('link')?.distance(85);
+      setTimeout(() => {
+        fg.zoomToFit?.(400, 60);
+      }, 400);
+    }
+  }, [showGraph]);
+
   return (
     <div className="h-screen w-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-200 flex flex-col font-sans transition-colors duration-300 overflow-hidden">
       {/* HEADER */}
@@ -658,20 +670,21 @@ export default function CaseDetail() {
             <div className="h-10 w-[1px] bg-slate-200 dark:bg-white/10" />
             <h1 className="text-xl font-black text-slate-900 dark:text-white uppercase truncate max-w-md italic">{caseInfo?.name || 'Încărcare...'}</h1>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2.5">
             <button 
               onClick={toggleTheme}
-              className="p-2.5 bg-slate-100 dark:bg-white/5 hover:bg-slate-200 dark:hover:bg-white/10 rounded-xl text-slate-600 dark:text-slate-400 transition-all border border-slate-200 dark:border-white/5"
+              className="w-9 h-9 flex items-center justify-center bg-slate-100 dark:bg-white/5 hover:bg-slate-200 dark:hover:bg-white/10 rounded-xl text-slate-600 dark:text-slate-400 transition-all border border-slate-200 dark:border-white/5 shrink-0"
+              title="Comutare temă"
             >
               {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
             </button>
-            <div className="hidden xl:flex items-center gap-2 px-3 py-1.5 bg-blue-500/5 border border-blue-500/10 rounded-lg mr-2">
-              <Brain className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
-              <span className="text-[10px] font-black text-blue-600 dark:text-blue-400 uppercase tracking-widest">{activeModel}</span>
+            <div className="hidden xl:flex items-center gap-2 px-3 h-9 bg-blue-500/10 border border-blue-500/20 rounded-xl shrink-0">
+              <Brain className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
+              <span className="text-[11px] font-black text-blue-600 dark:text-blue-400 uppercase tracking-widest leading-none">{activeModel}</span>
             </div>
             <button 
               onClick={handleDownloadReport}
-              className="flex items-center gap-2 px-4 py-2 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/20 rounded-xl text-rose-600 dark:text-rose-400 text-sm font-bold transition-all"
+              className="flex items-center gap-2 px-3.5 h-9 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/20 rounded-xl text-rose-600 dark:text-rose-400 text-xs font-bold transition-all shrink-0"
             >
               <ScrollText className="w-4 h-4" /> Raport Audit
             </button>
@@ -691,15 +704,15 @@ export default function CaseDetail() {
                 setShowGraph(true); 
               } catch (err) { alert("Eroare încărcare graf."); }
               finally { setIsGraphLoading(false); }
-            }} className="flex items-center gap-2 px-4 py-2 bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/20 rounded-xl text-indigo-600 dark:text-indigo-400 text-sm font-bold transition-all">
+            }} className="flex items-center gap-2 px-3.5 h-9 bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/20 rounded-xl text-indigo-600 dark:text-indigo-400 text-xs font-bold transition-all shrink-0">
               <Database className="w-4 h-4" /> Harta Relații
             </button>
-            <button onClick={() => setShowBriefing(true)} className="flex items-center gap-2 px-4 py-2 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/20 rounded-xl text-blue-600 dark:text-blue-400 text-sm font-bold transition-all">
+            <button onClick={() => setShowBriefing(true)} className="flex items-center gap-2 px-3.5 h-9 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/20 rounded-xl text-blue-600 dark:text-blue-400 text-xs font-bold transition-all shrink-0">
               <Brain className="w-4 h-4" /> Briefing
             </button>
             <button 
               onClick={() => { Cookies.remove('token'); Cookies.remove('role'); router.push('/login'); }}
-              className="flex items-center gap-2 px-3.5 py-2 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 rounded-xl text-red-600 dark:text-red-400 text-sm font-bold transition-all ml-1"
+              className="flex items-center gap-2 px-3.5 h-9 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 rounded-xl text-red-600 dark:text-red-400 text-xs font-bold transition-all shrink-0"
               title="Deconectare din cont"
             >
               <LogOut className="w-4 h-4" /> Ieșire
@@ -1148,36 +1161,41 @@ export default function CaseDetail() {
             <h2 className="text-white font-bold uppercase tracking-tight text-sm flex items-center gap-2">
               <Database className="w-4 h-4 text-indigo-400" /> Analiză Suveică
             </h2>
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2.5">
               <div className="relative group">
                 <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-slate-500" />
-                <input value={graphSearch} onChange={e => setGraphSearch(e.target.value)} placeholder="Caută în hartă..." className="bg-slate-950 border border-white/10 rounded-lg pl-8 pr-2 py-1 text-[9px] w-40 focus:border-blue-500 outline-none transition-all" />
+                <input value={graphSearch} onChange={e => setGraphSearch(e.target.value)} placeholder="Caută în hartă..." className="bg-slate-950 border border-white/10 rounded-lg pl-8 pr-2 py-1 text-[9px] w-40 focus:border-blue-500 outline-none transition-all text-white" />
               </div>
-              <button onClick={handleFindLeader} disabled={isAnalyzing} className="px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/20 rounded-lg text-[9px] font-black uppercase">Lider</button>
-              <button onClick={handleDetectCartel} disabled={isAnalyzing} className="px-3 py-1.5 bg-fuchsia-500/10 hover:bg-fuchsia-500/20 text-fuchsia-400 border border-fuchsia-500/20 rounded-lg text-[9px] font-black uppercase">Cartel</button>
-              <input value={pathSource} onChange={e => setPathSource(e.target.value)} placeholder="Sursă" className="bg-slate-950 border border-white/10 rounded-lg px-2 py-1 text-[9px] w-20 focus:border-indigo-500 outline-none" />
-              <input value={pathTarget} onChange={e => setPathTarget(e.target.value)} placeholder="Destinație" className="bg-slate-950 border border-white/10 rounded-lg px-2 py-1 text-[9px] w-20 focus:border-indigo-500 outline-none" />
-              <button onClick={handleShortestPath} className="p-1.5 bg-indigo-600 rounded-lg"><Route className="w-3.5 h-3.5 text-white"/></button>
-              <button onClick={() => { setHighlightNodes(new Set()); setHighlightLinks(new Set()); setSelectedNode(null); setNodeColors({}); setNodeVals({}); }} className="p-2 hover:bg-white/10 rounded-full text-slate-400"><RotateCcw className="w-4 h-4" /></button>
-              <button onClick={() => setShowGraph(false)} className="p-2 hover:bg-white/10 rounded-full text-slate-400"><X className="w-6 h-6" /></button>
+              <button 
+                onClick={() => graphRef.current?.zoomToFit(400, 60)} 
+                className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-[9px] font-black uppercase tracking-wider flex items-center gap-1 shadow-sm transition-all"
+                title="Recentrează și încadrează tot graful"
+              >
+                <Crosshair className="w-3 h-3" /> Recentrează
+              </button>
+              <button onClick={handleFindLeader} disabled={isAnalyzing} className="px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/20 rounded-lg text-[9px] font-black uppercase transition-all">Lider</button>
+              <button onClick={handleDetectCartel} disabled={isAnalyzing} className="px-3 py-1.5 bg-fuchsia-500/10 hover:bg-fuchsia-500/20 text-fuchsia-400 border border-fuchsia-500/20 rounded-lg text-[9px] font-black uppercase transition-all">Cartel</button>
+              <input value={pathSource} onChange={e => setPathSource(e.target.value)} placeholder="Sursă" className="bg-slate-950 border border-white/10 rounded-lg px-2 py-1 text-[9px] w-20 focus:border-indigo-500 outline-none text-white" />
+              <input value={pathTarget} onChange={e => setPathTarget(e.target.value)} placeholder="Destinație" className="bg-slate-950 border border-white/10 rounded-lg px-2 py-1 text-[9px] w-20 focus:border-indigo-500 outline-none text-white" />
+              <button onClick={handleShortestPath} className="p-1.5 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-white transition-all" title="Traseu cel mai scurt"><Route className="w-3.5 h-3.5 text-white"/></button>
+              <button onClick={() => { setHighlightNodes(new Set()); setHighlightLinks(new Set()); setSelectedNode(null); setHoverNode(null); setNodeColors({}); setNodeVals({}); }} className="p-2 hover:bg-white/10 rounded-full text-slate-400 transition-colors" title="Resetează selecția"><RotateCcw className="w-4 h-4" /></button>
+              <button onClick={() => setShowGraph(false)} className="p-2 hover:bg-white/10 rounded-full text-slate-400 transition-colors" title="Închide graful"><X className="w-6 h-6" /></button>
             </div>
           </div>
           
           <div className="flex-1 relative bg-slate-950 overflow-hidden" onClick={() => handleNodeClick(null)}>
-            {/* Recentrează Probele */}
-            <div className="absolute top-6 left-1/2 -translate-x-1/2 z-50">
-                <button 
-                    onClick={() => graphRef.current?.zoomToFit(400)}
-                    className="px-6 py-3 bg-indigo-600 hover:bg-indigo-500 border border-white/20 rounded-2xl text-[11px] font-black uppercase tracking-widest transition-all shadow-[0_0_30px_rgba(79,70,229,0.4)]"
-                >
-                    Recentrează Probele
-                </button>
-            </div>
-
-            <ForceGraph2D ref={graphRef} graphData={filteredData} nodeLabel="name" 
+            <ForceGraph2D 
+              ref={graphRef} 
+              graphData={filteredData} 
+              nodeLabel="name" 
               width={typeof window !== 'undefined' ? window.innerWidth : 1200}
               height={typeof window !== 'undefined' ? window.innerHeight - 80 : 800}
+              warmupTicks={70}
+              cooldownTicks={120}
+              d3AlphaDecay={0.02}
+              d3VelocityDecay={0.3}
               onNodeClick={(node, e) => { e.stopPropagation(); handleNodeClick(node); }}
+              onNodeHover={node => setHoverNode(node)}
               nodeColor={node => {
                 if (graphSearch && !(node as any).name.toLowerCase().includes(graphSearch.toLowerCase())) return 'rgba(255,255,255,0.02)';
                 if (highlightNodes.size > 0 && !highlightNodes.has(node.id)) return 'rgba(255,255,255,0.03)';
@@ -1191,25 +1209,63 @@ export default function CaseDetail() {
               }}
               linkColor={link => {
                 if (highlightLinks.has(link)) return 'rgba(99, 102, 241, 1)';
-                return 'rgba(255,255,255,0.3)'; // Mai vizibile
+                return 'rgba(255,255,255,0.2)';
               }}
-              linkWidth={link => highlightLinks.has(link) ? 3 : 1.5}
+              linkWidth={link => highlightLinks.has(link) ? 3 : 1.2}
               linkDirectionalParticles={link => highlightLinks.has(link) ? 6 : 0}
-              nodeCanvasObjectMode={node => (highlightNodes.has(node.id) || !highlightNodes.size) ? 'after' : undefined}
+              nodeCanvasObjectMode={node => {
+                const isHovered = hoverNode && hoverNode.id === node.id;
+                const isSelected = selectedNode && selectedNode.id === node.id;
+                const isNeighbor = highlightNodes.size > 0 && highlightNodes.has(node.id);
+                const isSearchMatch = Boolean(graphSearch && (node as any).name?.toLowerCase().includes(graphSearch.toLowerCase()));
+                if (isHovered || isSelected || isNeighbor || isSearchMatch) return 'after';
+                return undefined;
+              }}
               nodeCanvasObject={(node: any, ctx, globalScale) => {
-                // Nu afișăm label-uri dacă suntem la zoom out mare (performance + clarity)
-                if (globalScale < 1.2 && highlightNodes.size === 0) return;
-
                 const label = node.name || node.valoare || node.filename || node.id || "Necunoscut";
-                const fontSize = (node.label === "DOC" ? 14 : 12) / globalScale;
-                ctx.font = `${fontSize}px Inter, Sans-Serif`; 
+                const isSelected = selectedNode && selectedNode.id === node.id;
+                const isHovered = hoverNode && hoverNode.id === node.id;
                 
-                ctx.fillStyle = 'rgba(255, 255, 255, 0.85)'; 
-                ctx.textAlign = 'center'; 
-                ctx.textBaseline = 'top';
+                const displayLabel = (isSelected || isHovered) 
+                  ? label 
+                  : (label.length > 24 ? label.slice(0, 22) + '...' : label);
+
+                const fontSize = Math.max(9, Math.min(13, 12 / globalScale));
+                ctx.font = `600 ${fontSize}px Inter, sans-serif`;
                 
+                const textWidth = ctx.measureText(displayLabel).width;
                 const boudingRadius = Math.log2((nodeVals[node.id] || (node as any).val || 5) + 1) * 3 + 2;
-                ctx.fillText(label, node.x, node.y + boudingRadius + 2);
+                const paddingX = 6;
+                const paddingY = 2.5;
+                const rectX = node.x - textWidth / 2 - paddingX;
+                const rectY = node.y + boudingRadius + 3;
+                const rectWidth = textWidth + paddingX * 2;
+                const rectHeight = fontSize + paddingY * 2;
+                const radius = 4;
+
+                // Pill background badge
+                ctx.fillStyle = isSelected 
+                  ? 'rgba(79, 70, 229, 0.95)' 
+                  : (isHovered ? 'rgba(30, 41, 59, 0.95)' : 'rgba(15, 23, 42, 0.9)');
+                ctx.strokeStyle = isSelected 
+                  ? 'rgba(199, 210, 254, 0.9)' 
+                  : (isHovered ? 'rgba(99, 102, 241, 0.8)' : 'rgba(255, 255, 255, 0.2)');
+                ctx.lineWidth = 1;
+                
+                ctx.beginPath();
+                if (typeof (ctx as any).roundRect === 'function') {
+                  (ctx as any).roundRect(rectX, rectY, rectWidth, rectHeight, radius);
+                } else {
+                  ctx.rect(rectX, rectY, rectWidth, rectHeight);
+                }
+                ctx.fill();
+                ctx.stroke();
+
+                // Text
+                ctx.fillStyle = isSelected ? '#ffffff' : (isHovered ? '#93c5fd' : 'rgba(255, 255, 255, 0.95)');
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(displayLabel, node.x, rectY + rectHeight / 2);
               }}
             />
 
