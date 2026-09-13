@@ -260,8 +260,20 @@
 - **Uniformizare UI Toolbar Master (`cases/[id]/page.tsx` și `cases/page.tsx`):**
     - Toate elementele din bara superioară (Theme toggle, Badge-ul modelului LLM activ, butoanele Raport Audit, Harta Relații, Briefing, Dosar Nou și Ieșire) sunt aliniate strict la o înălțime de `h-9` (36px), `rounded-xl` și `gap-2.5`, eliminând discrepanțele vizuale de dimensiuni și margini arbitrare.
 
+### Etapa 33: Anti-Surrender Forensic Guard & Compound Code Retrieval Resilience - IMPLEMENTAT (Septembrie 2026)
+- **Problemă rezolvată (Capitulare prematură și rigiditate la coduri/extrase):**
+    - În investigații complexe cu zeci de acte, modelele LLM compacte tindeau să capituleze prematur (în faza 2-3) declarând că lipsesc probele („nu există facturi/plăți”) dacă prima interogare SQL eșua sau dacă termenii din întrebare erau prea denși.
+    - Când modelul specifica un `semantic_intent` (ex: `CONTRACT`), acesta funcționa ca un filtru dur (`doc_ids = intent_ids`), blocând accesul la facturile și extrasele bancare asociate.
+    - În extrasele de cont bancar, numerele de facturi apar adesea prescurtate (ex: `fact 245` în loc de `FACT-2023-0245`), iar `SEARCH_STRUCTURED_DATA` eșua din cauza lipsei de flexibilitate pe sufixe numerice și entități juridice.
+- **Arhitectura actualizată (`chat_service.py`):**
+    - *Anti-Surrender Forensic Guard:* În bucla `AgenticInvestigator.run()`, dacă agentul încearcă să emită un răspuns de capitulare/dovezi lipsă înainte de faza 5 fără a fi explorat căutarea de text cu unelte, sistemul respinge oprirea și injectează o directivă criminalistică obligatorie de a căuta codul scurt și cuvintele cheie ale furnizorului/extraselor.
+    - *Prioritizare Intentivă Soft în loc de Hard-Exclusion:* `semantic_intent` în `tool_search_text` nu mai aruncă restul documentelor din dosar, ci aplică un boost pe candidații relevanți menținând restul bazei deschisă pentru referințe încrucișate.
+    - *Căutare Exactă pe Tokeni Compuși (`compound_res`):* Căutare dedicată pe tokeni cu cratimă/slash (`FACT-2023-0245`, `AGRO-CHIM`) direct în chunk-uri înainte de reranking.
+    - *Extragere Automată a Numerelor Scurte:* `_pre_process_query` și fallback-ul `SEARCH_STRUCTURED_DATA` extrag automat sufixele numerice (`0245`, `245`) și elimină sufixele comerciale zgomotoase (`SC`, `SRL`, `SA`) pentru potrivire instantă în tabelele de extrase bancare.
+    - *Sanitizarea Istoricului Multi-Turn:* Mesajele anterioare ale asistentului din istoric sunt condensate exclusiv la concluzia finală, prevenind poluarea promptului cu cearceafuri de `[FACTS]` din runde trecute.
+
 ---
-*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 29 (3-Speed Hybrid OCR), Etapa 30 (Chat State Persistence), Etapa 31 (Multi-Domain Forensic Prompt & Positional Retrieval) și Etapa 32 (Graph Decluttering & Header Standardization).*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 33 (Anti-Surrender Forensic Guard & Compound Code Retrieval Resilience).*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:
