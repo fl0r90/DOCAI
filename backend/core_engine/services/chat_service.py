@@ -1358,6 +1358,32 @@ FINAL RESPONSE FORMAT (ROMANIAN):
                 "CONFIDENCE: HIGH" in final_content.upper()
             )
             
+            # 1. ANTI-SURRENDER FORENSIC GUARD:
+            # If the model tries to conclude early that documents/payments are missing, reject surrender and push it to search
+            is_surrender = any(phrase in final_content.lower() for phrase in [
+                "nu există", "nu au fost găsite", "nu a fost găsit", "lipsesc dovezi", 
+                "imposibilă determinarea", "nu cuprind tranzacția", "nu există dovezi", "nu pot furniza"
+            ])
+            if is_surrender and step < 5 and not has_used_search_text:
+                messages.append({
+                    "role": "user", 
+                    "content": "FORENSIC DIRECTIVE: Do NOT conclude early that documents or payments are missing. You have not thoroughly used SEARCH_TEXT. Execute SEARCH_TEXT now for: 1) Specific invoice codes (e.g. 'FACT-2023-0245'); 2) Short numeric forms (e.g. '245'); 3) Bank statement keywords ('extras', 'virament', vendor name). Find the proof before concluding."
+                })
+                continue
+
+            # 2. MULTI-TARGET COMPLETENESS GUARD (Bank statements / Payment delays / Penalties):
+            # Prevent model from stopping after only finding the invoice without answering the payment and penalty targets
+            q_low = self.user_question.lower()
+            needs_bank_audit = any(k in q_low for k in ["extras", "bancar", "bancare", "virament", "zile de întârziere", "zile de intarziere", "penalit"])
+            has_computed_delay = any(k in final_content.lower() for k in ["zile de întârziere", "zile de intarziere", "zile intarziere", "penalități", "penalitati", "10.12.2023", "penalizare"])
+            
+            if needs_bank_audit and not has_computed_delay and step < 6:
+                messages.append({
+                    "role": "user",
+                    "content": "You identified the invoice, but you have NOT answered all parts of the question! Search the bank statements ('EXTRAS BANCAR' or search for '245') to find when this invoice was actually paid, calculate the exact number of days of delay past due date, and compute the 0.15%/day delay penalties. Search for '245' or bank statements now."
+                })
+                continue
+
             if is_final_candidate and has_used_tools:
                 # Extract clean final response part if it's mixed with planning/thinking
                 if "[FINAL RESPONSE]" in final_content:
@@ -1371,19 +1397,6 @@ FINAL RESPONSE FORMAT (ROMANIAN):
                 if display_content:
                     yield json.dumps({"type": "final", "data": display_content, "citations": self.citations})
                     return
-
-            # ANTI-SURRENDER FORENSIC GUARD:
-            # If the model tries to conclude early that documents/payments are missing, reject surrender and push it to search
-            is_surrender = any(phrase in final_content.lower() for phrase in [
-                "nu există", "nu au fost găsite", "nu a fost găsit", "lipsesc dovezi", 
-                "imposibilă determinarea", "nu cuprind tranzacția", "nu există dovezi", "nu pot furniza"
-            ])
-            if is_surrender and step < 5 and not has_used_search_text:
-                messages.append({
-                    "role": "user", 
-                    "content": "FORENSIC DIRECTIVE: Do NOT conclude early that documents or payments are missing. You have not thoroughly used SEARCH_TEXT. Execute SEARCH_TEXT now for: 1) Specific invoice codes (e.g. 'FACT-2023-0245'); 2) Short numeric forms (e.g. '245'); 3) Bank statement keywords ('extras', 'virament', vendor name). Find the proof before concluding."
-                })
-                continue
 
             if not has_used_tools and step < 4:
                 messages.append({"role": "user", "content": "Continuă investigația folosind uneltele (SEARCH_TEXT, FETCH_FULL_DOCUMENT, SEARCH_STRUCTURED_DATA) pentru a găsi dovezi clare înainte de a concluziona."})
