@@ -131,12 +131,15 @@ async def upload_files(
         
         if existing: continue
 
-        file_path = os.path.join(UPLOADS_DIR, file.filename)
+        # Sanitize filename (support folder upload where webkitRelativePath contains directory prefix)
+        clean_filename = os.path.basename(file.filename)
+        file_path = os.path.join(UPLOADS_DIR, clean_filename)
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
             
         new_doc = models.Document(
-            filename=file.filename,
+            filename=clean_filename,
             file_hash=file_hash,
             case_id=case_id,
             user_id=current_user.id,
@@ -144,7 +147,7 @@ async def upload_files(
         )
         db.add(new_doc)
         db.commit()
-        log_event("DOCUMENT_UPLOADED", user_id=current_user.id, case_id=case_id, details={"filename": file.filename})
+        log_event("DOCUMENT_UPLOADED", user_id=current_user.id, case_id=case_id, details={"filename": clean_filename})
     
     return {"status": "queued"}
 
