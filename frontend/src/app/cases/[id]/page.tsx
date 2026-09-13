@@ -71,6 +71,7 @@ export default function CaseDetail() {
   const [messages, setMessages] = useState<any[]>([]);
   const [question, setQuestion] = useState('');
   const [isChatLoading, setIsChatLoading] = useState(false);
+  const [backgroundChatStatus, setBackgroundChatStatus] = useState<any>(null);
   const [streamingMessage, setStreamingMessage] = useState<{
     role: string, 
     content: string, 
@@ -283,6 +284,22 @@ export default function CaseDetail() {
           fetchProgress(doc.id);
         }
       });
+
+      // Verificăm dacă există o investigație activă în fundal pe server
+      try {
+        const sRes = await api.get(`/cases/${caseId}/chat/status`);
+        if (sRes.data?.is_running) {
+          setBackgroundChatStatus(sRes.data);
+        } else {
+          setBackgroundChatStatus((prev: any) => {
+            if (prev?.is_running) {
+              // Investigatia tocmai s-a finalizat, reîncărcăm automat istoricul
+              api.get(`/cases/${caseId}/chat`).then(cRes => setMessages(cRes.data));
+            }
+            return null;
+          });
+        }
+      } catch (e) {}
     } catch (err) { console.error("Error", err); }
   };
 
@@ -351,8 +368,8 @@ export default function CaseDetail() {
     }
   };
 
-  const handleAsk = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleAsk = async (e?: React.FormEvent | React.SyntheticEvent) => {
+    if (e) e.preventDefault();
     if (!question.trim() || isChatLoading) return;
     
     const userMsg = { role: 'user', id: Date.now(), content: question };
@@ -894,6 +911,39 @@ export default function CaseDetail() {
             );
             })}
 
+            {/* Indicator investigație activă în fundal (supraviețuire la refresh / tab închis) */}
+            {!streamingMessage && backgroundChatStatus?.is_running && (
+              <div className="flex justify-start">
+                <div className="max-w-[85%] rounded-3xl p-5 bg-white dark:bg-slate-900 border-2 border-amber-500/30 shadow-2xl relative overflow-hidden">
+                  <div className="absolute top-0 left-0 w-full h-1 bg-amber-500/10 overflow-hidden">
+                     <div className="h-full bg-amber-500 animate-pulse" style={{ width: '100%' }}></div>
+                  </div>
+                  <div className="flex justify-between items-start mb-2">
+                    <p className="text-[10px] font-black text-amber-500 uppercase tracking-widest flex items-center gap-2">
+                      <Loader2 className="w-3 h-3 animate-spin" /> Investigație activă pe server...
+                    </p>
+                    <button 
+                      onClick={async () => {
+                        await api.post(`/cases/${caseId}/chat/stop`);
+                        setBackgroundChatStatus(null);
+                        fetchData();
+                      }}
+                      className="px-2 py-1 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 rounded-lg text-[9px] font-black text-red-500 uppercase transition-all flex items-center gap-1"
+                    >
+                      <Square className="w-2 h-2 fill-current" /> Stop
+                    </button>
+                  </div>
+                  <div className="text-xs text-slate-700 dark:text-slate-300 font-medium py-1.5 flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-amber-500 animate-ping shrink-0" />
+                    <span>{backgroundChatStatus.step || "Analiză în curs de desfășurare pe server..."}</span>
+                  </div>
+                  <p className="text-[10px] text-slate-400 dark:text-slate-500 italic mt-1">
+                    Procesul rulează pe server chiar dacă schimbi pagina sau dai refresh. Rezultatul va fi afișat automat aici când este gata.
+                  </p>
+                </div>
+              </div>
+            )}
+
             {/* Mesajul de Streaming ACTIV */}
             {streamingMessage && (
               <div className="flex justify-start">
@@ -994,8 +1044,24 @@ export default function CaseDetail() {
           </div>
           <div className="p-8 bg-white/50 dark:bg-slate-950 border-t border-slate-200 dark:border-white/5">
             <form onSubmit={handleAsk} className="relative group">
-              <input value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="Interoghează dosarul..." className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-white/10 rounded-2xl px-6 py-5 text-sm font-medium text-slate-900 dark:text-white focus:outline-none focus:border-blue-500/50 transition-all shadow-sm" />
-              <button type="submit" disabled={isChatLoading} className="absolute right-3 top-3 bottom-3 px-6 bg-blue-600 hover:bg-blue-500 rounded-xl text-xs font-black uppercase transition-all flex items-center gap-2 text-white">
+              <textarea
+                value={question}
+                onChange={(e) => setQuestion(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleAsk();
+                  }
+                }}
+                rows={1}
+                placeholder="Interoghează dosarul... (Enter pentru trimitere, Shift+Enter pentru linie nouă)"
+                className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-white/10 rounded-2xl pl-6 pr-48 py-4 text-sm font-medium text-slate-900 dark:text-white focus:outline-none focus:border-blue-500/50 transition-all shadow-sm resize-none min-h-[58px] max-h-[160px] leading-relaxed"
+              />
+              <button
+                type="submit"
+                disabled={isChatLoading || !question.trim()}
+                className="absolute right-3 top-2.5 bottom-2.5 px-6 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed rounded-xl text-xs font-black uppercase transition-all flex items-center gap-2 text-white shadow-sm"
+              >
                 {isChatLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />} Interoghează
               </button>
             </form>

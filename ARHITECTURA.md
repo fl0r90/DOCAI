@@ -192,8 +192,57 @@
 - **Agnosticism Total Restabilit:**
     - Au fost eliminate toate exemplele de domeniu particulare („curs”, „training”, „prezență”, etc.) din prompturile preliminare, descrierile uneltelor (`SEARCH_TEXT`) și din mesajele de avertizare la concluzii negative fără căutare.
 
+### Etapa 26: Motor Dinamic de Calcul ETA și Urmărire Progres Live (DocProgressTracker) - IMPLEMENTAT (Septembrie 2026)
+- **Eliminarea Estimărilor Statice Hardcodate:**
+    - Anterior, timpii ETA erau fixați rigid la 120s (OCR), 60s (RAG) și 300s (AI Grinder), ignorând dimensiunea documentului, iar în etapele intermediare din Grinder câmpul `eta_seconds` lipsea, forțând UI-ul în starea statică `'calculând...'`.
+    - În frontend, lipsa cheilor `current_segment` și `total_segments` producea afișajul `Segment undefined / undefined`.
+- **Serviciu Centralizat `DocProgressTracker` (`core_engine/services/progress_tracker.py`):**
+    - *Detecție Atomică a Volumului:* Inspectare instantanee PyMuPDF (`fitz`) la start pentru calculul numărului real de pagini (`total_pages`).
+    - *Ticker Asincron de Fundal (Daemon Thread):* Pe durata apelurilor blocante (Docling RapidOCR și sinteză LLM), un thread de fundal decrementează ETA secundă cu secundă în Redis (`doc_progress_{doc_id}`) și estimează pagina curentă (`pag ~X/Y`), oferind o bară de progres lină (5% -> 38%) fără înghețarea interfeței.
+    - *Calibrare Adaptivă a Vitezei:* Măsurarea vitezei efective per pagină din OCR pentru re-calibrarea dinamică a etapelor aval (RAG și Grinder).
+    - *Monitorizare Granulară RAG:* Urmărirea progresului chunk cu chunk în bucla de embeddings (`processed_children / total_children`), cu recalcularea mediei mobile de latență și avans procentual (40% -> 60%).
+    - *Urmărire Granulară Grinder:* Descompunerea etapei de analiză forensică pe pași atomici (Sinteză macro + fiecare tabel auditat), garantând că `current_segment` și `total_segments` sunt întotdeauna numere întregi coerente.
+### Etapa 27: Injectare Dinamică de Context & Eliminare Puncte Oarbe (Context-Aware Document Sizing) - IMPLEMENTAT (Septembrie 2026)
+- **Eliminarea Limitei Artificiale Hardcodate de 4096 Caractere:**
+    - Anterior, uneltele de căutare (`SEARCH_TEXT` și `FETCH_FULL_DOCUMENT`) decupau forțat o fereastră de maximum 4096 de caractere per document, indiferent de capacitatea reală a contextului LLM. Acest lucru ducea la pierderea contextului narativ la persoana I (ex: mențiunea numelui pe copertă și descrierea locului de muncă/activităților la câteva pagini distanță).
+- **Calcul Dinamic al Bugetului Util de Text (`_get_context_budget`):**
+    - Sistemul inspectează direct parametrul activ `chat_ctx` (ex: 16.384 sau 32.768 tokeni).
+    - Rezervă o marjă de 3.200 tokeni pentru prompt-ul de sistem, unelte, istoricul de conversație, raționamentul interior (`<think>`) și răspunsul final.
+    - Transformă tot restul ferestrei de context în capacitate utilă de caractere (~3.5 caractere / token). La 16.384 tokeni, bugetul este de **~46.000 de caractere**, permițând injectarea INTEGRALĂ (100%) a documentelor de până la 39.000 de caractere.
+- **Validare & Fidelitate Factuală:**
+    - Testat cu succes pe documente reale de peste 22.000 de caractere (`Puterea bibliotecii în modelarea unei societăți informate`), unde întregul text este acum injectat dintr-o singură privire în `SEARCH_TEXT`, incluzând toate capitolele, studiile de caz locale și observațiile autoarei fără nicio trunchiere.
+
+### Etapa 28: Rolling Scratchpad Engine (Audit Progresiv Fără Limită de Context) - IMPLEMENTAT (Septembrie 2026)
+- **Problemă rezolvată (Sinteză pe Documente Voluminoase):**
+    - Chiar și cu mărirea ferestrei de context (Etapa 27), documentele extrem de mari (cărți, volume de sute de pagini, dosare penale masive de 200.000 - 1.000.000 de caractere) depășesc limita utilă dintr-un singur apel. RAG-ul clasic prin similitudine vectorială tinde să extragă doar cele mai dense fragmente semantice (ex: capitolele din mijloc), omițând debutul sau epilogul cărții.
+- **Arhitectura Rolling Scratchpad (`run_rolling_scratchpad_digest`):**
+    - *Partiționare Dinamică cu Overlap:* Documentul este împărțit în calupuri consecutive de ~32.000 de caractere cu o zonă de siguranță de 1.000 de caractere suprapunere pentru a nu rupe fraze sau idei.
+    - *Acumulare Progresivă în Memoria de Lucru:* Fiecărui calup i se aplică un prompt forensic riguros care primește starea curentă a Scratchpad-ului și noul calup de text. LLM-ul păstrează dovezile anterioare, extrage probele și evoluțiile noi și actualizează memoria de lucru condensată.
+    - *Acoperire 100% Garantată:* Toate paginile sunt auditate filă cu filă fără omisiuni. La final, agentul primește un distilat consolidat cu citare completă `[REF x]`.
+    - *Feedback Live prin SSE:* Fiecare calup analizat emite mesaje de status în timp real în fluxul SSE (`📖 [Rolling Scratchpad X/Y]...`), permițând utilizatorului să urmărească investigația pas cu pas fără impresia că sistemul este blocat.
+- **Integrare Agnostică & Unelte:**
+    - Noua unealtă `ROLLING_SCRATCHPAD_AUDIT` adăugată în arsenalul agentului.
+    - `FETCH_FULL_DOCUMENT` a fost extins astfel încât dacă un document depășește bugetul util de context, declanșează automat mecanismul iterativ în loc să trunchieze mecanic conținutul.
+    - Pre-procesorul de query (`_pre_process_query`) recunoaște intențiile de analiză de ansamblu/evoluție și ghidează direct agentul către modul progresiv.
+
+### Etapa 29: Motor Hibrid OCR cu 3 Viteze (3-Speed Hybrid OCR Engine) - IMPLEMENTAT (Septembrie 2026)
+- **Problemă rezolvată (Optimizare masivă a ingestiei OCR):**
+    - Anterior, Docling rula întotdeauna cu OCR activat (`do_ocr = True` prin RapidOCR), chiar și pe PDF-uri 100% native digitale. Aceasta ducea la timpi mari de conversie (40-60 secunde pentru cărți sau documente lungi de text nativ) și la instanțierea repetată a convertoarelor la fiecare document.
+- **Arhitectura cu 3 Viteze (`ocr_service.py`):**
+    - *Viteza 1 (Digital Fast-Path):* Verificare eșantionată a paginilor cu PyMuPDF (`fitz`). Dacă textul nativ depășește media de 80 caractere/pagină, Docling rulează cu `do_ocr = False` printr-un convertor singleton dedicat. Timp de conversie: **1-3 secunde** chiar și pentru sute de pagini, cu fidelitate de 100% a textului digital.
+    - *Viteza 2 (Scanned PDF - Singleton RapidOCR):* Pentru PDF-uri scanate (fără strat digital), se folosește un convertor singleton Docling cu `RapidOcrOptions()` la nivel de proces, eliminând reîncărcarea modelelor ONNX între fișiere.
+    - *Viteza 3 (Vision AI Fallback):* Pentru fișiere imagine pure (`.jpg`, `.jpeg`, `.png`, `.webp`) sau scanări extrem de degradate unde OCR-ul clasic extrage sub 50 de caractere, imaginea este optimizată (max 1024px JPEG) și transmisă modelului Vision (`gemma4:e4b` pe Ollama) pentru transcriere markdown fidelă, cu fallback terțiar pe Tesseract.
+
+### Etapa 30: Persistență Stare Chat & Reziliență la Refresh/Tab Închis - IMPLEMENTAT (Septembrie 2026)
+- **Problemă rezolvată (Pierderea feedback-ului vizual la F5):**
+    - Când o investigație LLM complexă durează mai multe minute (ex: Rolling Scratchpad pe CPU), un refresh accidental în browser sau închiderea tab-ului distrugea conexiunea SSE locală. Utilizatorul vedea doar întrebarea fără niciun indicator de viață, deși serverul muncea la 700% CPU în fundal.
+- **Sincronizare de Stare prin Redis & Polling:**
+    - În `run_investigation` (`api/cases.py`), la fiecare pas sau raționament (`thought`/`step`), starea live a investigației este salvată în Redis: `chat_status_{case_id}`.
+    - Adăugat endpoint rapid `GET /cases/{case_id}/chat/status`.
+    - În frontend (`cases/[id]/page.tsx`), la încărcare și la fiecare 5 secunde, interfața interoghează starea din Redis. Dacă investigația este activă, afișează un card pulsing de status cu pasul curent și buton de Stop. Când investigația se finalizează, istoricul de mesaje este reîncărcat automat cu răspunsul complet persistat în Postgres.
+
 ---
-*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 25 (Sub-question Decomposition, Progressive Scratchpad Memory, 4096-Char Context & Hierarchical Zoom).*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 29 (3-Speed Hybrid OCR Engine) și Etapa 30 (Chat State Persistence).*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:

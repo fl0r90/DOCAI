@@ -143,6 +143,38 @@ class AgenticInvestigator:
         lines.append("=========================================================")
         return "\n".join(lines)
 
+    @staticmethod
+    def _get_context_budget() -> dict:
+        """
+        Calculează dinamic bugetul de caractere disponibil pentru injectarea documentelor
+        pe baza ferestrei de context active (chat_ctx din system_settings / LLM engine).
+        """
+        try:
+            from ..core.config import get_llm_config
+            cfg = get_llm_config()
+            chat_ctx = int(cfg.get("chat_ctx", 16384))
+        except Exception:
+            chat_ctx = 16384
+
+        # Rezervăm tokeni pentru:
+        # - System prompt & unelte: ~1200 tokeni
+        # - Istoric conversație & întrebare utilizator: ~800 tokeni
+        # - Raționament intern (<think>) & sinteză răspuns final: ~1200 tokeni
+        reserved_tokens = 3200
+        available_tokens = max(4000, chat_ctx - reserved_tokens)
+
+        # Conversie token -> caractere pentru limba română & markdown (~3.5 chars / token)
+        max_total_chars = int(available_tokens * 3.5)
+
+        # Limită per document: până la 85% din bugetul total dacă e document unic sau dominant
+        doc_context_limit = int(max_total_chars * 0.85)
+
+        return {
+            "chat_ctx": chat_ctx,
+            "max_total_chars": max_total_chars,
+            "doc_context_limit": doc_context_limit
+        }
+
     def _load_history(self):
         """Loads last 4 messages (2 turns) for context window, excluding the current question if already saved."""
         with SessionLocal() as db:
@@ -191,6 +223,8 @@ class AgenticInvestigator:
             self.injected_evidence += "CRITICAL: The user is asking for a QUANTITATIVE answer or a TOTAL COUNT. You MUST use SEARCH_STRUCTURED_DATA to get accurate counts from the database tables. Do NOT rely on individual text fragments for totals.\n"
         elif any(k in q_lower for k in ["plata", "incasare", "suma", "ron", "usd", "achizitie", "pret", "valoare", "cost"]):
             self.injected_evidence += "Suggested Intent: TABULAR / FINANCIAL -> Use SEARCH_STRUCTURED_DATA for hard figures.\n"
+        elif any(k in q_lower for k in ["tot parcursul", "toata cartea", "toată cartea", "evolutia", "evoluția", "de la debut", "complet", "exhaustiv", "sinteză globală", "sinteza globala"]):
+            self.injected_evidence += "Suggested Intent: EXHAUSTIVE DOCUMENT AUDIT -> Use ROLLING_SCRATCHPAD_AUDIT to traverse all document chapters/pages and accumulate a comprehensive forensic scratchpad without missing any section.\n"
         else:
             self.injected_evidence += "Suggested Intent: CONTEXTUAL / TEXTUAL -> Use SEARCH_TEXT for document details.\n"
                 
@@ -340,11 +374,12 @@ class AgenticInvestigator:
                     reverse=True
                 )
 
-            # 5. Document-Level Context Assembly (Limit 4096 characters per document)
-            # Grupează rezultatele pe documente pentru a elimina duplicările și a oferi context complet până la 4096 caractere per document.
-            DOC_CONTEXT_LIMIT = 4096
-            MAX_DOCS_RETURNED = 8
-            MAX_TOTAL_CHARS = 25000
+            # 5. Dynamic Context-Aware Document Assembly
+            # Calculează dinamic volumul de text injectat pe măsura ferestrei active (chat_ctx)
+            budget = self._get_context_budget()
+            DOC_CONTEXT_LIMIT = budget["doc_context_limit"]
+            MAX_TOTAL_CHARS = budget["max_total_chars"]
+            MAX_DOCS_RETURNED = 6
 
             doc_matches = {}  # doc_id -> list of (score, chunk)
             top_score = scored_res[0][0] if scored_res else 0.0
@@ -455,45 +490,150 @@ class AgenticInvestigator:
 
             return "\n\n".join(final_res) + graph_context
 
+    def run_rolling_scratchpad_digest(self, doc_id: int, focus_query: str):
+        """
+        Generator de investigație iterativă (Rolling Scratchpad) pentru documente voluminoase/cărți.
+        Parcurge 100% din text în calupuri consecutive, menținând și actualizând memoria de lucru.
+        Produce tupluri: (status_message, is_final, final_observation)
+        """
+        with SessionLocal() as db:
+            doc_obj = None
+            if doc_id and doc_id > 0:
+                doc_obj = db.query(Document).filter(Document.id == doc_id).first()
+            if not doc_obj:
+                all_docs = db.query(Document).filter(Document.case_id == self.case_id).all()
+                if not all_docs:
+                    yield ("Nu există documente în dosar.", True, "No documents found.")
+                    return
+                doc_obj = max(all_docs, key=lambda d: len(d.raw_text or "") if d.raw_text else 0)
+
+            raw = doc_obj.raw_text.strip() if doc_obj.raw_text else ""
+            if not raw:
+                chunks = db.query(DocumentChunk).filter(DocumentChunk.document_id == doc_obj.id).order_by(DocumentChunk.page_number, DocumentChunk.id).all()
+                raw = "\n\n".join([c.content for c in chunks])
+
+            if not raw:
+                yield (f"Documentul {doc_obj.filename} nu conține text.", True, "Document contains no extractable text.")
+                return
+
+            budget = self._get_context_budget()
+            chat_ctx = budget["chat_ctx"]
+            doc_limit = budget["doc_context_limit"]
+
+            # Dacă documentul încape lejer într-un singur context, îl returnăm direct
+            if len(raw) <= doc_limit:
+                citation_id = len(self.citations) + 1
+                self.citations.append({
+                    "id": citation_id,
+                    "doc_id": doc_obj.id,
+                    "page": 1,
+                    "content": raw[:300],
+                    "filename": doc_obj.filename,
+                    "spatial": "full_text"
+                })
+                header = f"[REF {citation_id} - FULL DOC: {doc_obj.filename}, Pagina 1]"
+                yield ("Documentul încape integral în context.", True, f"{header}:\n{raw}")
+                return
+
+            # Partiționare în calupuri dinamice de ~32.000 caractere cu 1.000 caractere overlap
+            batch_size = min(32000, max(14000, int(doc_limit * 0.75)))
+            overlap = 1000
+            slices = []
+            curr_pos = 0
+            while curr_pos < len(raw):
+                end_pos = min(len(raw), curr_pos + batch_size)
+                slices.append((curr_pos, end_pos, raw[curr_pos:end_pos]))
+                if end_pos >= len(raw):
+                    break
+                curr_pos = end_pos - overlap
+
+            total_batches = len(slices)
+            current_scratchpad = ""
+            effective_query = focus_query or self.user_question
+
+            yield (f"Pornire Rolling Scratchpad pentru '{doc_obj.filename}' ({len(raw):,} car., {total_batches} calupuri)...", False, "")
+
+            for idx, (s_start, s_end, batch_text) in enumerate(slices, 1):
+                yield (f"📖 [Rolling Scratchpad {idx}/{total_batches}] Analiză text ({s_start:,} - {s_end:,} car.)...", False, "")
+
+                prompt_scratch = f"""Ești un Auditor Investigativ și Cercetător Textual Riguros.
+Obiectivul investigației / Întrebare:
+{effective_query}
+
+=== MEMORIE DE LUCRU CURENTĂ (SCRATCHPAD ACUMULAT ANTERIOR) ===
+{current_scratchpad if current_scratchpad else "[Gol - Acesta este primul calup din debutul documentului]"}
+
+=== CALUPUL CURENT ({idx}/{total_batches}) din '{doc_obj.filename}' (Offset caractere {s_start:,} - {s_end:,} din {len(raw):,}) ===
+{batch_text}
+
+=== INSTRUCȚIUNI FORENSICE STRICTE ===
+1. Analizează textul fragmentului curent în raport direct cu Obiectivul investigației.
+2. Extrage TOATE faptele concrete, tezele, autorii citați, termenii specifici, personajele, evoluția argumentelor și citatele relevante din acest fragment.
+3. Actualizează MEMORIA DE LUCRU (SCRATCHPAD):
+   - PĂSTREAZĂ faptele și citatele relevante deja extrase anterior (nu șterge descoperirile din capitolele trecute!).
+   - ADAUGĂ noile probe identificate în acest calup.
+   - MENȚIONEAZĂ explicit orice evoluție, contrast sau răsturnare de perspectivă apărută.
+   - Păstrează textul condensat și telegrafic (fără introduceri de politețe sau meta-comentarii).
+4. Răspunde EXCLUSIV cu noul SCRATCHPAD sintetizat în limba română (format bullet-points structurat)."""
+
+                try:
+                    res = UnifiedLLMClient.chat_step(
+                        messages=[{"role": "user", "content": prompt_scratch}],
+                        tools=None,
+                        model=self.active_model,
+                        temperature=0.0,
+                        num_ctx=chat_ctx
+                    )
+                    new_scratch = res.get("content", "").strip()
+                    if new_scratch:
+                        current_scratchpad = new_scratch
+                except Exception as ex:
+                    yield (f"Avertisment la calupul {idx}: {ex}", False, "")
+
+            citation_id = len(self.citations) + 1
+            self.citations.append({
+                "id": citation_id,
+                "doc_id": doc_obj.id,
+                "page": 1,
+                "content": current_scratchpad[:400],
+                "filename": doc_obj.filename,
+                "spatial": "rolling_scratchpad_digest"
+            })
+
+            final_header = f"[REF {citation_id} - ROLLING SCRATCHPAD DIGEST ({doc_obj.filename} - Acoperire 100% în {total_batches} calupuri)]"
+            final_observation = f"{final_header}:\n{current_scratchpad}"
+            yield (f"Finalizat Rolling Scratchpad pe tot documentul ({total_batches}/{total_batches} calupuri)!", True, final_observation)
+
     def tool_fetch_full_document(self, doc_id: int, focus_terms: str = ""):
-        """Tool: Retrieve complete full-text (up to 4096 characters or expanded context window) of a specific document when confidence is MEDIUM."""
+        """Tool: Retrieve complete full-text or progressive scratchpad digest when document exceeds context window."""
         with SessionLocal() as db:
             doc_obj = db.query(Document).filter(Document.id == doc_id).first()
             if not doc_obj:
                 return f"Document ID {doc_id} not found."
             
-            citation_id = len(self.citations) + 1
             raw = doc_obj.raw_text.strip() if doc_obj.raw_text else ""
             if not raw:
                 chunks = db.query(DocumentChunk).filter(DocumentChunk.document_id == doc_id).order_by(DocumentChunk.page_number, DocumentChunk.id).all()
                 raw = "\n\n".join([c.content for c in chunks])
             
-            # If document fits in 4096, return it completely; otherwise center on focus_terms
-            DOC_CONTEXT_LIMIT = 4096
-            if len(raw) <= DOC_CONTEXT_LIMIT or not focus_terms:
-                doc_context = raw[:DOC_CONTEXT_LIMIT]
-            else:
-                words = [w.strip() for w in re.findall(r'\b\w{3,}\b', focus_terms)]
-                pos = -1
-                for w in words:
-                    pos = raw.lower().find(w.lower())
-                    if pos != -1: break
-                if pos != -1:
-                    start = max(0, pos - (DOC_CONTEXT_LIMIT // 2))
-                    end = min(len(raw), start + DOC_CONTEXT_LIMIT)
-                    if end - start < DOC_CONTEXT_LIMIT and start > 0:
-                        start = max(0, end - DOC_CONTEXT_LIMIT)
-                    prefix = "[... Fragment anterior omis ...]\n" if start > 0 else ""
-                    suffix = "\n[... Fragment ulterior omis ...]" if end < len(raw) else ""
-                    doc_context = prefix + raw[start:end] + suffix
-                else:
-                    doc_context = raw[:DOC_CONTEXT_LIMIT]
-            
+            budget = self._get_context_budget()
+            DOC_CONTEXT_LIMIT = budget["doc_context_limit"]
+
+            # Dacă documentul depășește bugetul de context, executăm digestia iterativă Rolling Scratchpad
+            if len(raw) > DOC_CONTEXT_LIMIT:
+                final_obs = ""
+                for _, is_final, res in self.run_rolling_scratchpad_digest(doc_id, focus_terms or self.user_question):
+                    if is_final:
+                        final_obs = res
+                return final_obs
+
+            # Altfel, returnăm documentul integral
+            citation_id = len(self.citations) + 1
             self.citations.append({
                 "id": citation_id,
                 "doc_id": doc_obj.id,
                 "page": 1,
-                "content": doc_context[:300],
+                "content": raw[:300],
                 "filename": doc_obj.filename if doc_obj else f"Doc_{doc_id}",
                 "spatial": ""
             })
@@ -508,7 +648,7 @@ class AgenticInvestigator:
                         dyn_meta = f" | {', '.join(dyn_strs[:5])}"
             
             header = f"[REF {citation_id} - FULL DOC: {doc_obj.filename}{doc_type_tag}{dyn_meta}, Pagina 1]"
-            return f"{header}:\n{doc_context}"
+            return f"{header}:\n{raw}"
 
     def tool_search_transactions(self, subject: str, date_filter: str = "", match_pattern: str = "", aggregate: bool = False, limit: int = 100):
         """Tool 2: Structured search with AGNOSTIC aggregation capability."""
@@ -809,8 +949,8 @@ CORE RULES:
 1. AGNOSTICISM: You have no prior knowledge of any persons or events. Answer ONLY using evidence from tools or provided context.
 2. ATOMIC TARGET RESOLUTION: The question is decomposed into atomic targets in your WORKING MEMORY.
    - Use SEARCH_TEXT or SEARCH_STRUCTURED_DATA to find evidence.
-   - For each target where conclusive evidence is found with citations, treat it as Confidence: HIGH and record the verified fact.
-   - If evidence for a target is partial or ambiguous, treat it as Confidence: MEDIUM. You MUST use FETCH_FULL_DOCUMENT(doc_id) to inspect the complete document context or surrounding paragraphs before concluding.
+   - For broad, multi-chapter or whole-book questions, or when analyzing the evolution of ideas across an entire document, you MUST use ROLLING_SCRATCHPAD_AUDIT to traverse all pages and accumulate complete forensic evidence without omissions.
+   - If evidence for a target is partial or ambiguous, use FETCH_FULL_DOCUMENT(doc_id) or ROLLING_SCRATCHPAD_AUDIT to inspect complete document context before concluding.
 3. FINAL RECOMPOSITION: When all targets have reached Confidence: HIGH (either resolved with facts or verified NOT FOUND in all documents), immediately output the [FINAL RESPONSE] synthesizing all verified findings.
 4. LANGUAGE: Think in English, but the FINAL ANSWER must be in ROMANIAN.
 5. PRECISION: Extract specific facts (names, dates, amounts). If info is missing, state it clearly.
@@ -830,6 +970,21 @@ FINAL RESPONSE FORMAT (ROMANIAN):
 [CONFIDENCE]: LOW/MEDIUM/HIGH"""
         
         tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "ROLLING_SCRATCHPAD_AUDIT",
+                    "description": "Read and audit an entire large document (or book/dossier) across ALL pages using progressive rolling context windows and an accumulating scratchpad. Guarantees 100% full-text coverage without missing early, middle, or ending chapters. Ideal for complex multi-chapter synthesis, comparative analysis, or exhaustive evidence gathering.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "doc_id": {"type": "integer", "description": "Document ID to audit in full. If omitted or 0, audits the primary/largest document in the case."},
+                            "focus_query": {"type": "string", "description": "The specific question, topics, or themes to track and extract across all pages."}
+                        },
+                        "required": ["focus_query"]
+                    }
+                }
+            },
             {
                 "type": "function",
                 "function": {
@@ -866,7 +1021,7 @@ FINAL RESPONSE FORMAT (ROMANIAN):
                 "type": "function",
                 "function": {
                     "name": "FETCH_FULL_DOCUMENT",
-                    "description": "Retrieve the complete text (up to 4096 characters or expanded context window) of a specific document ID. Use this when confidence for a target is MEDIUM to inspect surrounding paragraphs or verify details.",
+                    "description": "Retrieve the complete text (dynamically sized to match the active context window) of a specific document ID. Use this when confidence for a target is MEDIUM to inspect surrounding paragraphs or verify details.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -1004,6 +1159,30 @@ FINAL RESPONSE FORMAT (ROMANIAN):
                                 "arguments": {"concept": concept_match.group(1).strip()}
                             }
                         })
+                elif "[ROLLING_SCRATCHPAD_AUDIT]" in content:
+                    query_match = re.search(r"focus_query:\s*([^\\n]+)", content)
+                    doc_match = re.search(r"doc_id:\s*(\d+)", content)
+                    synthetic_tool_calls.append({
+                        "function": {
+                            "name": "ROLLING_SCRATCHPAD_AUDIT",
+                            "arguments": {
+                                "doc_id": int(doc_match.group(1)) if doc_match else 0,
+                                "focus_query": query_match.group(1).strip() if query_match else self.user_question
+                            }
+                        }
+                    })
+                elif "[FETCH_FULL_DOCUMENT]" in content:
+                    doc_match = re.search(r"doc_id:\s*(\d+)", content)
+                    focus_match = re.search(r"focus_terms:\s*([^\\n]+)", content)
+                    synthetic_tool_calls.append({
+                        "function": {
+                            "name": "FETCH_FULL_DOCUMENT",
+                            "arguments": {
+                                "doc_id": int(doc_match.group(1)) if doc_match else 0,
+                                "focus_terms": focus_match.group(1).strip() if focus_match else ""
+                            }
+                        }
+                    })
 
             if content:
                 yield json.dumps({"type": "observation", "data": f"Thinking: {content}"})
@@ -1051,11 +1230,27 @@ FINAL RESPONSE FORMAT (ROMANIAN):
                         )
                     elif t_name == "SEARCH_TEXT":
                         observation = self.tool_search_text(t_args.get("concept", ""), t_args.get("semantic_intent", ""))
+                    elif t_name == "ROLLING_SCRATCHPAD_AUDIT":
+                        t_doc_id = int(t_args.get("doc_id", 0)) if isinstance(t_args, dict) else 0
+                        t_focus = (t_args.get("focus_query") or t_args.get("focus_terms") or self.user_question) if isinstance(t_args, dict) else self.user_question
+                        for status_msg, is_final, final_obs in self.run_rolling_scratchpad_digest(t_doc_id, t_focus):
+                            yield json.dumps({"type": "observation", "data": status_msg})
+                            if is_final:
+                                observation = final_obs
                     elif t_name == "FETCH_FULL_DOCUMENT":
-                        observation = self.tool_fetch_full_document(
-                            doc_id=int(t_args.get("doc_id", 0)) if isinstance(t_args, dict) else 0,
-                            focus_terms=t_args.get("focus_terms", "") if isinstance(t_args, dict) else ""
-                        )
+                        t_doc_id = int(t_args.get("doc_id", 0)) if isinstance(t_args, dict) else 0
+                        t_focus = (t_args.get("focus_terms") or self.user_question) if isinstance(t_args, dict) else ""
+                        with SessionLocal() as db_chk:
+                            d_chk = db_chk.query(Document).filter(Document.id == t_doc_id).first()
+                            d_len = len(d_chk.raw_text or "") if d_chk else 0
+                        budget = self._get_context_budget()
+                        if d_len > budget["doc_context_limit"]:
+                            for status_msg, is_final, final_obs in self.run_rolling_scratchpad_digest(t_doc_id, t_focus):
+                                yield json.dumps({"type": "observation", "data": status_msg})
+                                if is_final:
+                                    observation = final_obs
+                        else:
+                            observation = self.tool_fetch_full_document(doc_id=t_doc_id, focus_terms=t_focus)
                     elif t_name == "EXPLORE_GRAPH":
                         observation = self.tool_explore_graph(t_args.get("entity", ""))
                     elif t_name == "TIMELINE":

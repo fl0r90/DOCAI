@@ -80,7 +80,7 @@ def extract_financial_regex(text_content):
 
 from core_engine.services.chunker_service import semantic_chunker
 
-def _create_chunks_and_embeddings(doc_id, chunks_data, filename="unknown", raw_markdown=None):
+def _create_chunks_and_embeddings(doc_id, chunks_data, filename="unknown", raw_markdown=None, tracker=None):
     if not chunks_data and not raw_markdown:
         return []
     print(f"[*] Semantic Parent-Child Vector Indexing for doc {doc_id} ({filename})...")
@@ -150,6 +150,11 @@ def _create_chunks_and_embeddings(doc_id, chunks_data, filename="unknown", raw_m
                 parent_groups[p_content] = []
             parent_groups[p_content].append(c)
 
+        total_children = sum(len(ch_list) for ch_list in parent_groups.values())
+        if tracker:
+            tracker.start_rag_phase(total_children)
+
+        processed_children = 0
         for p_content, children in parent_groups.items():
             safe_parent = "".join(ch for ch in p_content if ch.isprintable() or ch in "\n\r\t")
             first_child = children[0]
@@ -170,9 +175,12 @@ def _create_chunks_and_embeddings(doc_id, chunks_data, filename="unknown", raw_m
 
             # 2. Save Child Chunks with embeddings
             for child in children:
+                processed_children += 1
                 child_content = child["content"]
                 safe_child = "".join(ch for ch in child_content if ch.isprintable() or ch in "\n\r\t")
                 if len(safe_child.strip()) < 5:
+                    if tracker:
+                        tracker.update_rag_chunk(processed_children)
                     continue
 
                 success = False
@@ -229,7 +237,12 @@ def _create_chunks_and_embeddings(doc_id, chunks_data, filename="unknown", raw_m
                     db.flush()
                     inserted_ids.append({"id": new_child.id, "content": safe_child})
 
+                if tracker:
+                    tracker.update_rag_chunk(processed_children)
+
         db.commit()
+        if tracker:
+            tracker.finish_rag_phase()
     print(f"[+] Successfully indexed {len(inserted_ids)} child chunks under {len(parent_groups)} parent chunks for doc {doc_id}.")
     return inserted_ids
 
@@ -265,21 +278,30 @@ def unified_worker_pipeline():
                 "current_doc": filename
             }), ex=60)
             print(f"[*] --- START [{worker_id}]: {filename} ---")
+            file_path = os.path.join("/app/uploads", filename)
+            if not os.path.exists(file_path): file_path = os.path.join("/app/shared_uploads", filename)
+
+            from core_engine.services.progress_tracker import DocProgressTracker
+            tracker = DocProgressTracker(doc_id, filename, file_path, redis_client=r)
+
             with SafeSession() as db:
                 next_doc = db.query(models.Document).filter(models.Document.id == doc_id).first()
                 resolver = EntityResolver(db_session=db)
                 
                 # 1. VRAM MARSHALLING (Eliberăm Ollama pentru Docling)
-                r.set(f"doc_progress_{doc_id}", json.dumps({"status": "OCR", "percent": 10, "eta_seconds": 120, "message": "OCR structural (GPU)..."}))
+                tracker.start_ocr_phase()
                 _unload_ollama()
-                
-                file_path = os.path.join("/app/uploads", filename)
-                if not os.path.exists(file_path): file_path = os.path.join("/app/shared_uploads", filename)
                 
                 # 2. DOCLING OCR
                 ocr_result = process_document(file_path)
                 if not ocr_result or "error" in ocr_result: 
+                    tracker.fail("OCR structural a eșuat.")
                     next_doc.status = "FAILED"; db.commit(); continue
+                
+                items = ocr_result.get("items", []) if isinstance(ocr_result, dict) else []
+                num_tables = len([it for it in items if it.get("type") in ["TABLE", "TABLE_PART"]])
+                tracker.finish_ocr_phase(num_tables=num_tables)
+
                 next_doc.raw_text = ocr_result.get("markdown", ""); db.commit()
 
                 # 3. VRAM MARSHALLING (Eliberăm PyTorch pentru Ollama)
@@ -287,16 +309,14 @@ def unified_worker_pipeline():
                 if torch.cuda.is_available(): torch.cuda.empty_cache()
 
                 # 4. EMBEDDINGS (pgvector)
-                r.set(f"doc_progress_{doc_id}", json.dumps({"status": "RAG", "percent": 40, "eta_seconds": 60, "message": "Indexare Vectorială..."}))
-                chunks_info = _create_chunks_and_embeddings(doc_id, ocr_result, filename=filename, raw_markdown=ocr_result.get("markdown", ""))
+                chunks_info = _create_chunks_and_embeddings(doc_id, ocr_result, filename=filename, raw_markdown=ocr_result.get("markdown", ""), tracker=tracker)
                 
                 # 5. STRUCTURED EXTRACTION (Grinder - LLM JSON Mode)
                 # Stergem datele vechi financiare in caz de re-procesare
                 db.query(models.FinancialItem).filter(models.FinancialItem.document_id == doc_id).delete()
                 db.commit()
 
-                r.set(f"doc_progress_{doc_id}", json.dumps({"status": "AI_GRINDER", "percent": 60, "eta_seconds": 300, "message": "Audit Cifre & Entități (LLM)..."}))
-                res = asyncio.run(extract_forensic_data(ocr_result, filename, doc_id))
+                res = asyncio.run(extract_forensic_data(ocr_result, filename, doc_id, tracker=tracker))
                 
                 # 6. GRAPH SYNC & FINAL SYNTHESIS
                 if res and res.get("is_finished"):
@@ -339,6 +359,7 @@ def unified_worker_pipeline():
 
                     # Fallback sinteză doar dacă nu a fost generată deja de Grinder
                     if not next_doc.ai_summary or len(str(next_doc.ai_summary).strip()) < 10:
+                        tracker.start_synthesis()
                         from core_engine.services.llm_service import LLMService
                         from core_engine.core.config import get_llm_config
                         llm_synth = LLMService()
@@ -365,6 +386,7 @@ def unified_worker_pipeline():
                         "graph_data": graph_data
                     }
                     
+                    tracker.start_graph_sync()
                     case_obj = db.query(models.Case).filter(models.Case.id == next_doc.case_id).first()
                     graph_service.sync_document_to_graph(
                         doc_id, 
@@ -375,8 +397,10 @@ def unified_worker_pipeline():
                     )
                 
                 next_doc.status = "COMPLETED"; db.commit()
-                r.set(f"doc_progress_{doc_id}", json.dumps({"status": "COMPLETED", "percent": 100, "message": "Succes."}))
+                tracker.complete()
         except Exception as e: 
+            if 'tracker' in locals() and tracker:
+                tracker.fail(str(e))
             print(f"[!] Eroare Worker Pipeline: {e}")
             time.sleep(5)
 if __name__ == "__main__":

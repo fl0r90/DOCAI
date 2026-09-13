@@ -437,6 +437,12 @@ def chat(case_id: int, payload: dict = Body(...), user: models.User = Depends(ge
     db.add(models.ChatMessage(case_id=case_id, role="user", content=question))
     db.commit()
     r.delete(f"chat_stop_{case_id}")
+    r.set(f"chat_status_{case_id}", json.dumps({
+        "is_running": True,
+        "step": "Inițializare investigație...",
+        "question": question,
+        "started_at": datetime.utcnow().isoformat()
+    }), ex=3600)
 
     chunk_queue = queue.Queue()
     STOP_SENTINEL = object()
@@ -461,6 +467,21 @@ def chat(case_id: int, payload: dict = Body(...), user: models.User = Depends(ge
                     final_content = evt.get("data", "")
                 else:
                     trace_logs.append(evt)
+
+                # Actualizăm starea în Redis pentru supraviețuire la refresh / tab închis
+                step_text = ""
+                if evt.get("type") == "thought":
+                    step_text = f"Raționament: {evt.get('data', '')[:100]}..."
+                elif evt.get("type") == "step":
+                    step_text = evt.get("data", "")
+                if step_text:
+                    r.set(f"chat_status_{case_id}", json.dumps({
+                        "is_running": True,
+                        "step": step_text,
+                        "question": question,
+                        "updated_at": datetime.utcnow().isoformat()
+                    }), ex=3600)
+
                 chunk_queue.put(chunk_json)
         except Exception as e:
             err = json.dumps({"type": "error", "data": str(e)})
@@ -469,6 +490,7 @@ def chat(case_id: int, payload: dict = Body(...), user: models.User = Depends(ge
                 final_content = f"Eroare investigație: {e}"
         finally:
             chunk_queue.put(STOP_SENTINEL)
+            r.delete(f"chat_status_{case_id}")
             # Salvare garantată în baza de date, chiar dacă utilizatorul a navigat Back sau a închis tab-ul
             try:
                 from ..database import ForensicSessionLocal
@@ -503,6 +525,18 @@ def chat(case_id: int, payload: dict = Body(...), user: models.User = Depends(ge
             pass
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")
+
+
+@router.get("/{case_id}/chat/status")
+def get_chat_status(case_id: int, user: models.User = Depends(get_current_user), db: Session = Depends(get_forensic_db)):
+    _check_access(case_id, user, db)
+    raw = r.get(f"chat_status_{case_id}")
+    if raw:
+        try:
+            return json.loads(raw)
+        except Exception:
+            return {"is_running": True, "step": "Investigație activă pe server..."}
+    return {"is_running": False}
 
 
 # --------------------------------------------------------------------------- #

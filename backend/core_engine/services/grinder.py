@@ -155,7 +155,7 @@ CONTINUT DOCUMENT:
         print(f"[!] Eroare LLM extract_document_overview ({filename}): {e}")
     return {}
 
-async def extract_forensic_data(layout_data: Dict, filename: str = "", doc_id: int = 0, current_metadata: dict = None, start_segment: int = 0):
+async def extract_forensic_data(layout_data: Dict, filename: str = "", doc_id: int = 0, current_metadata: dict = None, start_segment: int = 0, tracker=None):
     """Procesare HIBRIDĂ AGNOSTICĂ cu Schemă Dinamică (Open-World Key-Value), VRAM Marshalling și Scriere Live."""
     import redis
     from .entity_resolver import save_entities_to_db
@@ -179,15 +179,28 @@ async def extract_forensic_data(layout_data: Dict, filename: str = "", doc_id: i
         
     global_context = full_text[:600]
 
+    items = layout_data.get("items", []) if isinstance(layout_data, dict) else []
+    table_items = [it for it in items if it.get("type") in ["TABLE", "TABLE_PART"]]
+    total_tables = len(table_items)
+
     # Pasul 1: Extracție Macro a Tipului de Document, Sintezei și Atributelor Dinamice
-    r.set(f"doc_progress_{doc_id}", json.dumps({
-        "status": "PROCESSING",
-        "percent": 55,
-        "message": f"Extracție atribute dinamice & clasificare ({filename})..."
-    }))
+    if tracker:
+        tracker.start_grinder_overview(total_tables=total_tables)
+    else:
+        r.set(f"doc_progress_{doc_id}", json.dumps({
+            "status": "AI_EXTRACTING",
+            "percent": 60.0,
+            "eta_seconds": int(15 + total_tables * 10),
+            "current_segment": 1,
+            "total_segments": 1 + total_tables,
+            "message": f"Extracție atribute dinamice & clasificare ({filename})..."
+        }))
     
     overview = await extract_document_overview(full_text, filename, llm, model)
     
+    if tracker:
+        tracker.finish_grinder_overview()
+
     all_entities = []
     
     # Salvare imediată atribute macro & entități principale
@@ -208,19 +221,23 @@ async def extract_forensic_data(layout_data: Dict, filename: str = "", doc_id: i
         all_entities.extend(main_ents)
 
     # Pasul 2: Extracție granulară din tabele (dacă există)
-    items = layout_data.get("items", []) if isinstance(layout_data, dict) else []
-    table_items = [it for it in items if it.get("type") in ["TABLE", "TABLE_PART"]]
-    total_tables = len(table_items)
-    
     if total_tables > 0:
         print(f"[*] Extracție tabulară live ({filename}) - {total_tables} tabele găsite.")
         for idx, item in enumerate(table_items):
-            r.set(f"doc_progress_{doc_id}", json.dumps({
-                "status": "PROCESSING",
-                "percent": round(60 + (idx / total_tables) * 30, 1),
-                "message": f"Analiză tabel ({idx+1}/{total_tables})"
-            }))
+            if tracker:
+                tracker.start_grinder_table(idx, total_tables)
+            else:
+                r.set(f"doc_progress_{doc_id}", json.dumps({
+                    "status": "AI_EXTRACTING",
+                    "percent": round(72.0 + (idx / total_tables) * 22.0, 1),
+                    "eta_seconds": max(5, int((total_tables - idx) * 9)),
+                    "current_segment": 2 + idx,
+                    "total_segments": 1 + total_tables,
+                    "message": f"Analiză tabel ({idx+1}/{total_tables})"
+                }))
             table_res = await extract_entities_from_table(item["content"], llm, context=global_context, model=model)
+            if tracker:
+                tracker.finish_grinder_table(idx, total_tables)
             formatted_data = {
                 "entitati": [
                     {"nume": e["valoare"], "rol": e.get("rol", "Participant"), "tip": e.get("tip_entitate", "PERSOANA")} 
