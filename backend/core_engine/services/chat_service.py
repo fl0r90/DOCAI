@@ -92,7 +92,7 @@ def decompose_question(q: str) -> list:
     targets = []
     if ":" in q:
         parts = q.split(":", 1)
-        clauses = re.split(r"[\?,;]|\b(?:si|și|precum și)\b", parts[1])
+        clauses = re.split(r"[\?,;]|\b(?:si|și|precum și)\s+(?=(?:cum|ce|care|cine|de ce|cât|cat|când|cand|unde)\b)", parts[1], flags=re.IGNORECASE)
         for c in clauses:
             c = c.strip()
             if len(c) > 5 and any(w in c.lower() for w in ["care", "ce", "cat", "cât", "cine", "unde", "cand", "când", "amprenta", "adrese", "volum", "suma", "data", "nume", "cati", "câți"]):
@@ -106,11 +106,10 @@ def decompose_question(q: str) -> list:
             targets = clauses
 
     if not targets and any(w in q.lower() for w in [" și ", " si ", " precum și "]):
-        clauses = re.split(r"\b(?:si|și|precum și)\b", q)
+        # Coordinate split: only split when followed by an interrogative/question adverb to avoid fragmenting noun phrases
+        clauses = re.split(r"\b(?:si|și|precum și)\s+(?=(?:cum|ce|care|cine|de ce|cât|cat|când|cand|unde)\b)", q, flags=re.IGNORECASE)
         if len(clauses) > 1 and all(len(c.strip()) > 8 for c in clauses):
-            q_words = ["cine", "ce", "cat", "cât", "care", "cand", "când", "unde", "de ce", "cum"]
-            if any(any(qw in c.lower() for qw in q_words) for c in clauses[1:]):
-                targets = [c.strip() for c in clauses if c.strip()]
+            targets = [c.strip() for c in clauses if c.strip()]
 
     if not targets:
         targets = [q.strip()]
@@ -217,16 +216,26 @@ class AgenticInvestigator:
                 if found_dates:
                     self.injected_evidence += f"Detected Explicit Date Variations to Search: {', '.join(found_dates[:6])}\n"
                 
-        # Agnostic Intent Detection
+        # Agnostic Multi-Domain Intent Detection
         q_lower = self.user_question.lower()
         if any(k in q_lower for k in ["cati", "câți", "cate", "câte", "total", "suma", "listă completă", "lista completa"]):
             self.injected_evidence += "CRITICAL: The user is asking for a QUANTITATIVE answer or a TOTAL COUNT. You MUST use SEARCH_STRUCTURED_DATA to get accurate counts from the database tables. Do NOT rely on individual text fragments for totals.\n"
-        elif any(k in q_lower for k in ["plata", "incasare", "suma", "ron", "usd", "achizitie", "pret", "valoare", "cost"]):
-            self.injected_evidence += "Suggested Intent: TABULAR / FINANCIAL -> Use SEARCH_STRUCTURED_DATA for hard figures.\n"
-        elif any(k in q_lower for k in ["tot parcursul", "toata cartea", "toată cartea", "evolutia", "evoluția", "de la debut", "complet", "exhaustiv", "sinteză globală", "sinteza globala"]):
+        elif any(k in q_lower for k in ["plata", "incasare", "suma", "ron", "eur", "usd", "achizitie", "pret", "valoare", "cost", "factura", "virament", "iban", "cont"]):
+            self.injected_evidence += "Suggested Intent: FINANCIAL / TABULAR -> Use SEARCH_STRUCTURED_DATA or targeted SEARCH_TEXT for exact amounts, invoices, and transactions.\n"
+        elif any(k in q_lower for k in ["whatsapp", "chat", "conversatie", "conversație", "mesaj", "mesaje", "discutie", "discuție", "audio", "cine a zis", "ce a raspuns", "ce a răspuns"]):
+            self.injected_evidence += "Suggested Intent: CHAT / WHATSAPP FORENSICS -> Chronological communication audit. Inspect sender/recipient identities, exact timestamps, reply sequence, and informal agreements or contradictions against formal documents.\n"
+        elif any(k in q_lower for k in ["contract", "clauza", "clauză", "clauze", "penalitati", "penalități", "termen", "reziliere", "obligatii", "obligații", "semnat", "semnatar", "anexa", "anexă"]):
+            self.injected_evidence += "Suggested Intent: CONTRACTUAL / LEGAL AUDIT -> Review contractual terms, defined parties, specific liabilities, penalty clauses, and signature/annex sections.\n"
+        elif any(k in q_lower for k in ["tot parcursul", "toata cartea", "toată cartea", "evolutia", "evoluția", "de la debut", "complet", "exhaustiv", "sinteză globală", "sinteza globala", "toate capitolele", "toata conversatia", "toată conversația"]):
             self.injected_evidence += "Suggested Intent: EXHAUSTIVE DOCUMENT AUDIT -> Use ROLLING_SCRATCHPAD_AUDIT to traverse all document chapters/pages and accumulate a comprehensive forensic scratchpad without missing any section.\n"
         else:
             self.injected_evidence += "Suggested Intent: CONTEXTUAL / TEXTUAL -> Use SEARCH_TEXT for document details.\n"
+
+        # Positional Clue Detection (End / Epilogue vs Start / Preamble)
+        if any(k in q_lower for k in ["la final", "la sfârșit", "la sfarsit", "epilog", "concluzia cărții", "concluzia cartii", "ultimele pagini", "încheiere", "incheiere"]):
+            self.injected_evidence += "POSITIONAL ANCHOR: The user inquiry specifically targets the END / EPILOGUE / CONCLUDING sections of the document. Prioritize the final pages and concluding chapters.\n"
+        elif any(k in q_lower for k in ["la început", "la inceput", "debut", "preambul", "articolul 1", "introducere", "primele pagini"]):
+            self.injected_evidence += "POSITIONAL ANCHOR: The user inquiry specifically targets the START / PREAMBLE / INTRODUCTION of the document. Prioritize the initial pages and opening clauses.\n"
                 
         if anchors:
             self.injected_evidence += "Relational Check: Entities detected. EXPLORE_GRAPH may provide links.\n"
@@ -317,10 +326,26 @@ class AgenticInvestigator:
                     .filter(and_(DocumentChunk.document_id.in_(doc_ids), or_(*conditions)))\
                     .limit(30).all()
 
-            # 4. Merge & Deduplicate (date_res prioritized first)
+            # 3b. Positional Search (End/Epilogue/Signatures vs Start/Preamble)
+            positional_res = []
+            q_full_lower = (query + " " + (self.user_question or "")).lower()
+            if any(k in q_full_lower for k in ["final", "sfarsit", "sfârșit", "epilog", "concluzi", "ultim", "anexe", "semnatur"]):
+                end_chunks = db.query(DocumentChunk)\
+                    .filter(DocumentChunk.document_id.in_(doc_ids))\
+                    .order_by(DocumentChunk.page_number.desc(), DocumentChunk.id.desc())\
+                    .limit(10).all()
+                positional_res.extend(reversed(end_chunks))
+            elif any(k in q_full_lower for k in ["debut", "inceput", "început", "preambul", "introducere", "articolul 1", "primele"]):
+                start_chunks = db.query(DocumentChunk)\
+                    .filter(DocumentChunk.document_id.in_(doc_ids))\
+                    .order_by(DocumentChunk.page_number.asc(), DocumentChunk.id.asc())\
+                    .limit(10).all()
+                positional_res.extend(start_chunks)
+
+            # 4. Merge & Deduplicate (date_res and positional_res prioritized)
             seen_ids = set()
             merged_results = []
-            for r in date_res + vector_res + lexical_res:
+            for r in date_res + positional_res + vector_res + lexical_res:
                 if r.id not in seen_ids:
                     seen_ids.add(r.id)
                     merged_results.append(r)
@@ -944,25 +969,34 @@ Obiectivul investigației / Întrebare:
     def run(self):
         yield json.dumps({"type": "status", "data": "Forensic Agent is thinking..."})
         
-        system_prompt = """You are a Professional Forensic Data Auditor equipped with PROGRESSIVE WORKING MEMORY.
+        system_prompt = """You are a Master Forensic Data Auditor equipped with PROGRESSIVE WORKING MEMORY, specialized in multi-domain evidence analysis:
+- CONTRACTS & LEGAL AGREEMENTS: Inspect parties, clauses, obligations, liabilities, penalty terms, termination conditions, dates, and signature/annex sections.
+- WHATSAPP & DIGITAL CHATS: Reconstruct chronological message streams, sender/recipient identities, exact timestamps, sequence of replies, and informal agreements or contradictions against formal documents.
+- FINANCIAL & TABULAR RECORDS: Extract exact amounts, invoices, currency, IBANs, and ledger balances.
+- EXTENSIVE DOSSIERS & BOOKS: Track thesis evolution, chapter progression, ideological stances, and concluding philosophies.
+
 CORE RULES:
-1. AGNOSTICISM: You have no prior knowledge of any persons or events. Answer ONLY using evidence from tools or provided context.
+1. AGNOSTICISM: You have no prior knowledge of any persons, companies, or events. Answer ONLY using evidence from tools or provided context.
 2. ATOMIC TARGET RESOLUTION: The question is decomposed into atomic targets in your WORKING MEMORY.
    - Use SEARCH_TEXT or SEARCH_STRUCTURED_DATA to find evidence.
    - For broad, multi-chapter or whole-book questions, or when analyzing the evolution of ideas across an entire document, you MUST use ROLLING_SCRATCHPAD_AUDIT to traverse all pages and accumulate complete forensic evidence without omissions.
    - If evidence for a target is partial or ambiguous, use FETCH_FULL_DOCUMENT(doc_id) or ROLLING_SCRATCHPAD_AUDIT to inspect complete document context before concluding.
-3. FINAL RECOMPOSITION: When all targets have reached Confidence: HIGH (either resolved with facts or verified NOT FOUND in all documents), immediately output the [FINAL RESPONSE] synthesizing all verified findings.
-4. LANGUAGE: Think in English, but the FINAL ANSWER must be in ROMANIAN.
-5. PRECISION: Extract specific facts (names, dates, amounts). If info is missing, state it clearly.
-6. SCOPE: Answer strictly the current question. When a new entity or subject is introduced, answer exclusively using evidence for that query without including past topics or unrelated entities.
-7. CITATIONS: Every fact MUST be cited using [x], matching the [REF x] from observations.
-8. FINALITY: If you have sufficient evidence to answer all targets, you MUST provide the [FINAL RESPONSE] immediately, even in the first or second step.
+   - Positional queries: If the inquiry asks about boundary sections (e.g., 'at the end of the book', 'in the preamble', 'signatures', 'annexes'), prioritize the corresponding initial or final sections of the document.
+3. STRICT EVIDENCE-ONLY (NO SPECULATION):
+   - Never invent or assume facts, names, or locations not present in the citations.
+   - If the user asks about specific entities (e.g., a person, a city, an amount, a clause) and your initial search does not mention them, do NOT speculate or substitute with general knowledge. Perform a dedicated SEARCH_TEXT for those exact terms, or explicitly list them under [MISSING EVIDENCE].
+4. FINAL RECOMPOSITION: When all targets have reached Confidence: HIGH (either resolved with facts or verified NOT FOUND in all documents), immediately output the [FINAL RESPONSE] synthesizing all verified findings.
+5. LANGUAGE: Think in English, but the FINAL ANSWER must be in ROMANIAN.
+6. PRECISION: Extract specific facts (names, dates, timestamps, amounts, exact clause numbers).
+7. SCOPE: Answer strictly the current question. When a new entity or subject is introduced, answer exclusively using evidence for that query without including past topics or unrelated entities.
+8. CITATIONS: Every fact MUST be cited using [x], matching the [REF x] from observations.
+9. FINALITY: If you have sufficient evidence to answer all targets, you MUST provide the [FINAL RESPONSE] immediately, even in the first or second step.
 
 FINAL RESPONSE FORMAT (ROMANIAN):
 [FACTS]
 - List of specific facts and unique entities found with citations [x], addressing each target.
 [ANALYSIS]
-- Brief reasoning connecting the facts. Highlight [CONTRADICTIONS] here.
+- Brief reasoning connecting the facts. Highlight [CONTRADICTIONS] (e.g. between chat messages and contracts, or between different testimonies).
 [CONCLUSION]
 - The direct answer to the user's question addressing all decomposed targets.
 [MISSING EVIDENCE]

@@ -241,8 +241,18 @@
     - Adăugat endpoint rapid `GET /cases/{case_id}/chat/status`.
     - În frontend (`cases/[id]/page.tsx`), la încărcare și la fiecare 5 secunde, interfața interoghează starea din Redis. Dacă investigația este activă, afișează un card pulsing de status cu pasul curent și buton de Stop. Când investigația se finalizează, istoricul de mesaje este reîncărcat automat cu răspunsul complet persistat în Postgres.
 
+### Etapa 31: Multi-Domain Forensic Prompt & Positional Boundary Retrieval - IMPLEMENTAT (Septembrie 2026)
+- **Problemă rezolvată (Specializare pe domenii mixte & ratarea secțiunilor de graniță):**
+    - În investigații reale, dosarele conțin tipuri eterogene de probe: contracte juridice, exporturi de mesagerie (WhatsApp/Telegram), extrase/facturi financiare și cărți/studii voluminoase.
+    - Când întrebările vizau secțiuni structurale specifice (ex: clauze finale, epilog, semnături/anexe sau preambul/debut), căutarea semantică clasică returna uneori pasaje din mijlocul documentului, iar modelele compacte (5B) tindeau să fabuleze în loc să ceară context suplimentar. De asemenea, descompunerea întrebărilor compuse fragmenta naiv sintagmele legate prin „și”.
+- **Arhitectura actualizată (`chat_service.py`):**
+    - *Descompunere Precisă a Întrebărilor (`decompose_question`):* Separarea pe sub-ținte se face exclusiv când conjuncția este urmată de adverbe/pronume interogative (`și cum`, `și ce`, `și de ce`), prevenind fragmentarea eronată a sintagmelor („insultele și calomniile”).
+    - *Clasificare Agnostică Multi-Domeniu (`_pre_process_query`):* Recunoaște automat intenții specifice pentru Contracte/Legal, Chat-uri WhatsApp/Cronologie, Tabele Financiare, Audit Exhaustiv și Ancore de Poziție (Final/Epilog vs Debut/Preambul).
+    - *Căutare Hibridă cu Ancore Poziționale (`tool_search_text`):* Când o întrebare țintește sfârșitul sau începutul unui document, primele/ultimele calupuri sunt injectate garantat în setul de candidați înainte de reranking, prevenind omiterea epilogului sau anexelor.
+    - *System Prompt Multi-Domeniu & Rigoare Criminalistică:* Instrucțiuni explicite pentru contracte (părți, clauze, răspundere), chat-uri (cronologie, expeditor/destinatar, timestamp-uri), finanțe și cărți, interzicând speculațiile și forțând raportarea la `[MISSING EVIDENCE]` când datele lipsesc.
+
 ---
-*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 29 (3-Speed Hybrid OCR Engine) și Etapa 30 (Chat State Persistence).*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 29 (3-Speed Hybrid OCR), Etapa 30 (Chat State Persistence) și Etapa 31 (Multi-Domain Forensic Prompt & Positional Retrieval).*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:
