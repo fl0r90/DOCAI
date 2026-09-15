@@ -316,10 +316,11 @@
     - *Orchestrare și Persistență (`service.py` - `TOCService`):* Salvează structura direct în PostgreSQL (`doc_metadata["toc"]` și `doc_metadata["outline"]`), sincronizat automat la ingestia fiecărui document în `worker/tasks.py`.
     - *Unealtă Nativă pentru Agentul Criminalistic (`chat_service.py`):* Adăugat unealta `GET_DOCUMENT_OUTLINE(doc_id)` cu suport nativ OpenAI tool call și fallback sintetic `[GET_DOCUMENT_OUTLINE]`. Agentul poate inspecta cuprinsul oricărui document înainte de a extrage fragmente.
     - *Endpoint REST API (`cases.py`):* `GET /cases/documents/{doc_id}/toc` expune structura detaliată pentru audit și frontend.
+    - *Decuplare Model Chat vs Expert Procesare Unic (`specialist_processing`):* Eliminat împărțirea artificială între „expert tabelar” și „expert narativ”, unificând întregul pipeline de ingestie (Docling overview, tabele, sinteză și TOC) sub un singur rol: `specialist_processing`. Chat-ul criminalistic folosește independent `active_model`, permițând comutarea dinamică a oricărui model de investigație fără a altera stabilitatea pipeline-ului de procesare. Eliminat complet orice nume de model hardcodat din codebase (fallback-urile se rezolvă exclusiv prin interogare dinamică din `system_settings` și variabile de mediu).
     - *Validare Experimentală:* Certificat prin suita de teste unitare `backend/test_toc.py` pe contractul sintetic de cereale de 3 pagini (Agroterra vs BioFruct).
 
 ---
-*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 36 (High-Density Forensic Document Outline & TOC Architecture).*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 36 (High-Density Forensic Document Outline & Unified Processing Expert Decoupling).*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:

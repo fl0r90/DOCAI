@@ -419,7 +419,7 @@ class UnifiedLLMClient:
             raise ChatStoppedError("Stop request received.")
         cfg = cls.get_engine_config()
         engine = cfg.get("active_llm_engine", "ollama").lower()
-        active_model = model or cfg.get("active_model", "qwen3.6:35b-a3b")
+        active_model = model or cfg.get("active_model") or os.getenv("ACTIVE_MODEL", "")
 
         if engine == "lmstudio":
             base_url = cfg.get("lmstudio_url") or os.getenv("LMSTUDIO_URL", "http://host.docker.internal:1234/v1")
@@ -656,7 +656,7 @@ class UnifiedLLMClient:
         """Generare asincronă utilizată de Grinder / Document Processor."""
         cfg = cls.get_engine_config()
         engine = cfg.get("active_llm_engine", "ollama").lower()
-        active_model = model or cfg.get("specialist_tabular") or cfg.get("active_model", "gemma4:e4b")
+        active_model = model or cfg.get("specialist_processing") or cfg.get("active_model") or os.getenv("ACTIVE_MODEL", "")
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0)) as client:
             if engine in ["lmstudio", "vllm"]:

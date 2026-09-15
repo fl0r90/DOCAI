@@ -404,8 +404,8 @@ def unified_worker_pipeline():
                         print(f"[*] Generăm sinteza documentului (fallback)...")
                         try:
                             cfg = get_llm_config()
-                            narrative_model = cfg.get("specialist_narrative") or cfg.get("active_model") or "gemma4:e4b"
-                            summary_text = asyncio.run(llm_synth.generate(synth_prompt, narrative_model, is_json=False))
+                            processing_model = cfg.get("specialist_processing") or cfg.get("active_model")
+                            summary_text = asyncio.run(llm_synth.generate(synth_prompt, processing_model, is_json=False))
                             next_doc.ai_summary = summary_text
                         except Exception as e:
                             print(f"[!] Eroare la generarea sintezei: {e}")

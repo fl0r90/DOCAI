@@ -199,29 +199,47 @@ def get_available_models(admin: User = Depends(check_admin), db: Session = Depen
 def get_llm_config_api(admin: User = Depends(check_admin), db: Session = Depends(get_db)):
     settings = db.query(SystemSetting).all()
     config = {s.key: s.value for s in settings}
+    active_model = config.get("active_model", "")
+    processing_model = config.get("specialist_processing") or config.get("specialist_narrative") or config.get("specialist_tabular") or active_model
     return {
         "active_llm_engine": config.get("active_llm_engine", "ollama"),
-        "active_model": config.get("active_model", "gemma4-it-q4:latest"),
+        "active_model": active_model,
         "chat_temp": float(config.get("chat_temp", 0.7)),
         "chat_ctx": int(config.get("chat_ctx", 16384)),
         
-        "specialist_tabular": config.get("specialist_tabular", "qwen2.5-coder:7b"),
+        # Expert procesare unificat
+        "specialist_processing": processing_model,
+        "processing_temp": float(config.get("processing_temp", config.get("tabular_temp", 0.0))),
+        "processing_ctx": int(config.get("processing_ctx", config.get("narrative_ctx", 32768))),
+
+        # Retrocompatibilitate pentru UI-ul existent
+        "specialist_tabular": processing_model,
         "tabular_temp": float(config.get("tabular_temp", 0.0)),
         "tabular_ctx": int(config.get("tabular_ctx", 16384)),
         
-        "specialist_narrative": config.get("specialist_narrative", "gemma2:27b"),
+        "specialist_narrative": processing_model,
         "narrative_temp": float(config.get("narrative_temp", 0.1)),
         "narrative_ctx": int(config.get("narrative_ctx", 32768)),
 
         "lmstudio_url": config.get("lmstudio_url", os.getenv("LMSTUDIO_URL", "http://host.docker.internal:1234/v1")),
         "lmstudio_api_key": config.get("lmstudio_api_key", ""),
-        "lmstudio_timeout": int(config.get("lmstudio_timeout", 300))
+        "lmstudio_timeout": int(config.get("lmstudio_timeout", 300)),
+        "ollama_api_mode": config.get("ollama_api_mode", os.getenv("OLLAMA_API_MODE", "native")),
     }
 
 @router.post("/llm/config")
 def update_llm_config(payload: dict, admin: User = Depends(check_admin), db: Session = Depends(get_db)):
+    # Dacă specialist_processing este furnizat, sincronizăm automat și cheile vechi
+    if "specialist_processing" in payload:
+        payload["specialist_tabular"] = payload["specialist_processing"]
+        payload["specialist_narrative"] = payload["specialist_processing"]
+    elif "specialist_tabular" in payload and "specialist_processing" not in payload:
+        payload["specialist_processing"] = payload["specialist_tabular"]
+        payload["specialist_narrative"] = payload["specialist_tabular"]
+
     # Dacă LM Studio este activat, toți experții folosesc automat modelul unic încărcat
     if payload.get("active_llm_engine") == "lmstudio" and "active_model" in payload:
+        payload["specialist_processing"] = payload["active_model"]
         payload["specialist_tabular"] = payload["active_model"]
         payload["specialist_narrative"] = payload["active_model"]
 

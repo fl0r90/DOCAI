@@ -58,11 +58,9 @@ def _unload_ollama():
             cfg = get_llm_config()
             models_to_unload = [
                 cfg.get("active_model"), 
-                cfg.get("specialist_narrative"), 
-                cfg.get("specialist_tabular"),
-                "gemma4:e4b"
+                cfg.get("specialist_processing"),
             ]
-            for m_name in filter(None, models_to_unload):
+            for m_name in set(filter(None, models_to_unload)):
                 requests.post(f"{OLLAMA_URL}/api/generate", json={"model": m_name, "keep_alive": 0}, timeout=5)
         except Exception as e:
             print(f"[!] Eroare la citirea configurării pentru descărcare LLM: {e}")
@@ -90,8 +88,12 @@ def _save_transaction_live(doc_id: int, data: str, desc: str, suma: float):
     finally:
         db.close()
 
-async def extract_entities_from_table(md_content: str, llm: LLMService, context: str = "", model: str = "gemma4:e4b") -> Dict:
+async def extract_entities_from_table(md_content: str, llm: LLMService, context: str = "", model: str = None) -> Dict:
     """Extracție AGNOSTICĂ de entități din tabele Markdown."""
+    from ..core.config import get_llm_config
+    if not model:
+        cfg = get_llm_config()
+        model = cfg.get("specialist_processing") or cfg.get("active_model")
     prompt = f"""[INST] You are a Forensic Data Expert. Analyze the following table and extract all entities.
 CONTEXT: {context}
 
@@ -165,7 +167,7 @@ async def extract_forensic_data(layout_data: Dict, filename: str = "", doc_id: i
     llm = LLMService()
     
     cfg = get_llm_config()
-    model = cfg.get("active_model") or "gemma4:e4b"
+    model = cfg.get("specialist_processing") or cfg.get("active_model")
     
     # 1. Extragere text global pentru analiză macro
     full_text = ""
