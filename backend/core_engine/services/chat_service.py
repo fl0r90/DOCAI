@@ -154,6 +154,66 @@ class AgenticInvestigator:
         return "\n".join(lines)
 
     @staticmethod
+    def _extract_citation_snippet(text: str, query: str = "", max_len: int = 550) -> str:
+        """Extrage un extras relevant (snippet) din text centrat în jurul termenilor de căutare.
+        
+        Elimină marcajele boilerplate de tip <!-- image --> sau [Doc: ...] și prioritizează:
+        1. Entități numite / cuvinte cu majusculă și coduri numerice
+        2. Cuvinte cheie specifice din query și user_question
+        """
+        if not text:
+            return ""
+        clean = re.sub(r'^(<!--\s*image\s*-->|\[Doc:[^\]]*\])\s*', '', text, flags=re.IGNORECASE).strip()
+        if len(clean) <= max_len:
+            return clean
+
+        raw_words = [w for w in re.split(r'[\s,.;:?!()\[\]"\'`]+', query or "") if len(w) >= 2]
+        stopwords = {
+            "care", "este", "sunt", "pentru", "dintre", "catre", "unde", "cand", "cum",
+            "ceea", "acest", "acesta", "aceste", "lui", "ei", "lor", "despre", "toate",
+            "mult", "mai", "fost", "avut", "face", "avea", "prin", "careva"
+        }
+        meaningful = [w for w in raw_words if w.lower() not in stopwords]
+
+        # Prioritizăm după specificitate: cifre/coduri > majuscule (entități) > lungime cuvânt
+        def word_priority(w: str):
+            is_num = 2 if any(c.isdigit() for c in w) else 0
+            is_cap = 1 if w and w[0].isupper() else 0
+            return (is_num, is_cap, len(w))
+
+        meaningful.sort(key=word_priority, reverse=True)
+
+        best_pos = -1
+        clean_lower = clean.lower()
+        for w in meaningful:
+            p = clean_lower.find(w.lower())
+            if p != -1:
+                best_pos = p
+                break
+
+        if best_pos != -1:
+            half = max_len // 2
+            start = max(0, best_pos - half)
+            end = min(len(clean), start + max_len)
+            if end - start < max_len and start > 0:
+                start = max(0, end - max_len)
+
+            if start > 0:
+                sp = clean.find(" ", start)
+                if sp != -1 and sp < start + 35:
+                    start = sp + 1
+            if end < len(clean):
+                sp = clean.rfind(" ", start, end)
+                if sp != -1 and sp > end - 35:
+                    end = sp
+
+            prefix = "..." if start > 0 else ""
+            suffix = "..." if end < len(clean) else ""
+            return prefix + clean[start:end].strip() + suffix
+
+        return clean[:max_len].strip() + ("..." if len(clean) > max_len else "")
+
+    @staticmethod
     def _get_context_budget() -> dict:
         """
         Calculează dinamic bugetul de caractere disponibil pentru injectarea documentelor
@@ -524,11 +584,19 @@ class AgenticInvestigator:
                 total_chars_accumulated += len(doc_context)
                 citation_id = len(self.citations) + 1
 
+                # Extragem un extras relevant (snippet) centrat pe termenii căutați
+                cite_source = best_chunk.content if (best_chunk and getattr(best_chunk, "content", None)) else doc_context
+                snippet_text = self._extract_citation_snippet(
+                    text=cite_source,
+                    query=f"{query} {self.user_question}",
+                    max_len=550
+                )
+
                 self.citations.append({
                     "id": citation_id,
                     "doc_id": doc_obj.id,
                     "page": page_num,
-                    "content": doc_context[:300],
+                    "content": snippet_text,
                     "filename": doc_obj.filename if doc_obj else "unknown",
                     "spatial": getattr(best_chunk, "spatial", "") or ""
                 })
@@ -661,11 +729,16 @@ Răspunde EXCLUSIV cu scratchpad-ul comprimat (format bullet-points)."""
             # Dacă documentul încape lejer într-un singur context, îl returnăm direct
             if len(raw) <= doc_limit:
                 citation_id = len(self.citations) + 1
+                snippet_text = self._extract_citation_snippet(
+                    text=raw,
+                    query=f"{focus_terms} {self.user_question}",
+                    max_len=550
+                )
                 self.citations.append({
                     "id": citation_id,
                     "doc_id": doc_obj.id,
                     "page": 1,
-                    "content": raw[:300],
+                    "content": snippet_text,
                     "filename": doc_obj.filename,
                     "spatial": "full_text"
                 })
@@ -812,11 +885,16 @@ Obiectivul investigației / Întrebare:
 
             # Altfel, returnăm documentul integral
             citation_id = len(self.citations) + 1
+            snippet_text = self._extract_citation_snippet(
+                text=raw,
+                query=f"{focus_terms} {self.user_question}",
+                max_len=550
+            )
             self.citations.append({
                 "id": citation_id,
                 "doc_id": doc_obj.id,
                 "page": 1,
-                "content": raw[:300],
+                "content": snippet_text,
                 "filename": doc_obj.filename if doc_obj else f"Doc_{doc_id}",
                 "spatial": ""
             })

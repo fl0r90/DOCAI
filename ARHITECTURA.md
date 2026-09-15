@@ -321,9 +321,10 @@
 
     - *Unificarea Interfeței Admin LLM Config (`frontend/src/app/dashboard/llm/page.tsx`):* Înlocuit cele două carduri separate („Expert Date Structurate & Tabele” și „Expert Sinteză & Narativ”) cu un card consolidat și intuitiv: **„Expert Procesare Unificat (Ingestie, Tabele, TOC, Sinteză)”**, alături de **„Motor Chat Principal”**. Panoul de **„Limită de Siguranță Context (Safety Guardrail)”** a fost reproiectat pe lățime completă. Toate modelele se populează strict dinamic prin API (`availableModels`), fără niciun model hardcodat.
     - *Optimizare și Reziliență Conexiune LM Studio (`llm_client.py`, `system.py`, `chat_service.py`):* Normalizare automată a endpoint-ului OpenAI (`/v1/chat/completions` și `/v1/models`) indiferent dacă utilizatorul introduce URL-ul cu sau fără sufixul `/v1`, eliminând eroarea de rutare Express `Unexpected endpoint (POST /chat/completions)`. Conversie sigură a parametrului de timeout din `SystemSetting` în tuplu `timeout=(10, timeout_val)`, prevenind eroarea de tip `ValueError` și blocajele de rețea. Extragerea și afișarea transparentă a blocurilor de raționament (`reasoning_content`) emise de modelele de gândire (ex: Gemma 4, Qwen 3.8 Thinking) direct în fluxul de investigație.
+    - *Extragere Inteligentă a Citatelor Relevante (`chat_service.py` - `_extract_citation_snippet`):* Înlocuit trunchierea oarbă a primelor 300 de caractere ale documentului (`doc_context[:300]`), care afișa doar antetul generic al companiilor (ex: sediul social Orange din București), cu o fereastră semantică centrată dinamic pe termenii interogați și entitățile numite din `query` (ex: domiciliul și numele beneficiarului). Citatele `[REF N]` din interfață reflectă acum cu exactitate pasajul probatoriu care justifică răspunsul.
 
 ---
-*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 36 (High-Density Forensic Document Outline, Unified Processing Expert & LM Studio Resilience).*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 36 (High-Density Forensic Document Outline, Unified Processing Expert, LM Studio Resilience & Semantic Citation Snippets).*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:
