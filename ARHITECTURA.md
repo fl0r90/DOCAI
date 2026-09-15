@@ -319,8 +319,10 @@
     - *Decuplare Model Chat vs Expert Procesare Unic (`specialist_processing`):* Eliminat împărțirea artificială între „expert tabelar” și „expert narativ”, unificând întregul pipeline de ingestie (Docling overview, tabele, sinteză și TOC) sub un singur rol: `specialist_processing`. Chat-ul criminalistic folosește independent `active_model`, permițând comutarea dinamică a oricărui model de investigație fără a altera stabilitatea pipeline-ului de procesare. Eliminat complet orice nume de model hardcodat din codebase (fallback-urile se rezolvă exclusiv prin interogare dinamică din `system_settings` și variabile de mediu).
     - *Validare Experimentală:* Certificat prin suita de teste unitare `backend/test_toc.py` pe contractul sintetic de cereale de 3 pagini (Agroterra vs BioFruct).
 
+    - *Unificarea Interfeței Admin LLM Config (`frontend/src/app/dashboard/llm/page.tsx`):* Înlocuit cele două carduri separate („Expert Date Structurate & Tabele” și „Expert Sinteză & Narativ”) cu un card consolidat și intuitiv: **„Expert Procesare Unificat (Ingestie, Tabele, TOC, Sinteză)”**, alături de **„Motor Chat Principal”**. Panoul de **„Limită de Siguranță Context (Safety Guardrail)”** a fost reproiectat pe lățime completă. Toate modelele se populează strict dinamic prin API (`availableModels`), fără niciun model hardcodat.
+
 ---
-*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 36 (High-Density Forensic Document Outline & Unified Processing Expert Decoupling).*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 36 (High-Density Forensic Document Outline & Unified Processing Expert Decoupling & UI Unification).*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:

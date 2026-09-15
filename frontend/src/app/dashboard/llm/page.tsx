@@ -6,7 +6,7 @@ import Cookies from 'js-cookie';
 import { 
   Shield, Brain, ChevronLeft, Loader2, Save, 
   Settings2, Info, AlertTriangle, Zap, Database, Code, FileText, Activity,
-  Trash2, Download, RefreshCw, Box, Sun, Moon, Server, Globe, CheckCircle2, XCircle, LogOut
+  Trash2, Download, RefreshCw, Box, Sun, Moon, Server, Globe, CheckCircle2, XCircle, LogOut, Cpu
 } from 'lucide-react';
 import { useTheme } from '../../../lib/ThemeProvider';
 
@@ -16,6 +16,7 @@ export default function LLMConfig() {
   const [config, setConfig] = useState({ 
     active_llm_engine: 'ollama',
     active_model: '', chat_temp: 0.7, chat_ctx: 16384, safety_limit: 20000,
+    specialist_processing: '', processing_temp: 0.0, processing_ctx: 32768,
     specialist_tabular: '', tabular_temp: 0.0, tabular_ctx: 16384,
     specialist_narrative: '', narrative_temp: 0.1, narrative_ctx: 32768,
     vllm_kv_cache_dtype: 'turboquant', vllm_gpu_utilization: 0.90, vllm_max_model_len: 32768,
@@ -45,8 +46,18 @@ export default function LLMConfig() {
         const firstModel = modelsList[0]?.name || modelsList[0]?.model || '';
         const chosenModel = currentConf.active_model || firstModel;
         currentConf.active_model = chosenModel;
+        currentConf.specialist_processing = chosenModel;
         currentConf.specialist_tabular = chosenModel;
         currentConf.specialist_narrative = chosenModel;
+      }
+      if (!currentConf.specialist_processing) {
+        currentConf.specialist_processing = currentConf.specialist_narrative || currentConf.specialist_tabular || currentConf.active_model || '';
+      }
+      if (currentConf.processing_temp === undefined) {
+        currentConf.processing_temp = currentConf.tabular_temp ?? 0.0;
+      }
+      if (currentConf.processing_ctx === undefined) {
+        currentConf.processing_ctx = currentConf.narrative_ctx || currentConf.tabular_ctx || 32768;
       }
       setConfig(currentConf);
 
@@ -74,6 +85,7 @@ export default function LLMConfig() {
       setConfig(prev => ({
         ...prev,
         active_model: modelName,
+        specialist_processing: modelName,
         specialist_tabular: modelName,
         specialist_narrative: modelName
       }));
@@ -91,17 +103,25 @@ export default function LLMConfig() {
     try {
       const payload = { ...config };
       if (payload.active_llm_engine === 'lmstudio') {
+        payload.specialist_processing = payload.active_model;
         payload.specialist_tabular = payload.active_model;
         payload.specialist_narrative = payload.active_model;
+      } else {
+        payload.specialist_tabular = payload.specialist_processing;
+        payload.specialist_narrative = payload.specialist_processing;
+        payload.tabular_temp = payload.processing_temp;
+        payload.narrative_temp = payload.processing_temp;
+        payload.tabular_ctx = payload.processing_ctx;
+        payload.narrative_ctx = payload.processing_ctx;
       }
       await api.post('/system/llm/config', payload);
-      alert("Configurația granulară a fost activată.");
+      alert("Configurația a fost salvată cu succes.");
       fetchData();
     } catch (err) { alert("Eroare la salvare."); }
     finally { setIsSaving(false); }
   };
 
-  const handleTestConnection = async () => {
+  const testLMStudioConnection = async () => {
     setTestStatus({ testing: true });
     try {
       const res = await api.post('/system/llm/test-connection', {
@@ -109,8 +129,7 @@ export default function LLMConfig() {
         api_key: config.lmstudio_api_key
       });
       if (res.data.success) {
-        const models = res.data.models || [];
-        const detectedModel = models.length > 0 ? models[0] : config.active_model;
+        const detectedModel = res.data.models?.[0] || '';
         setTestStatus({
           testing: false,
           success: true,
@@ -123,6 +142,7 @@ export default function LLMConfig() {
           setConfig(prev => ({
             ...prev,
             active_model: detectedModel,
+            specialist_processing: detectedModel,
             specialist_tabular: detectedModel,
             specialist_narrative: detectedModel
           }));
@@ -167,62 +187,6 @@ export default function LLMConfig() {
   };
 
   if (isLoading) return <div className="min-h-screen bg-slate-950 flex items-center justify-center"><Loader2 className="w-12 h-12 text-indigo-500 animate-spin" /></div>;
-
-  const ConfigCard = ({ title, icon: Icon, color, modelKey, tempKey, ctxKey }: any) => (
-    <div className="p-8 bg-white dark:bg-slate-900/50 border border-slate-200 dark:border-white/5 rounded-3xl space-y-6 shadow-sm dark:shadow-none transition-all hover:shadow-md">
-      <div className="flex items-center gap-3">
-        <div className={`p-2 rounded-lg ${
-          color === 'blue' ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400' :
-          color === 'indigo' ? 'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400' :
-          'bg-fuchsia-500/10 text-fuchsia-600 dark:text-fuchsia-400'
-        }`}>
-          <Icon className="w-5 h-5" />
-        </div>
-        <h2 className="text-sm font-black text-slate-900 dark:text-white uppercase tracking-tight">{title}</h2>
-      </div>
-      
-      <div className="space-y-4">
-        <div>
-          <label className="text-[9px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest mb-2 block">Model Desemnat</label>
-          <select 
-            value={(config as any)[modelKey]}
-            onChange={(e) => setConfig({...config, [modelKey]: e.target.value})}
-            className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-white/10 rounded-xl px-4 py-3 text-xs font-bold text-slate-900 dark:text-white outline-none focus:border-indigo-500 transition-all"
-          >
-            {availableModels.map((m: any) => <option key={m.name} value={m.name}>{m.name}</option>)}
-          </select>
-        </div>
-
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <label className="text-[9px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest mb-2 block">Temperatură ({(config as any)[tempKey]})</label>
-            <input 
-              type="range" min="0" max="1" step="0.1" 
-              value={(config as any)[tempKey]}
-              onChange={(e) => setConfig({...config, [tempKey]: parseFloat(e.target.value)})}
-              className="w-full accent-indigo-600 dark:accent-indigo-500 h-1.5 bg-slate-200 dark:bg-slate-800 rounded-lg appearance-none"
-            />
-          </div>
-          <div>
-            <label className="text-[9px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest mb-2 block">Context RAM</label>
-            <select 
-              value={(config as any)[ctxKey]}
-              onChange={(e) => setConfig({...config, [ctxKey]: parseInt(e.target.value)})}
-              className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-white/10 rounded-xl px-3 py-2 text-[10px] font-bold text-slate-900 dark:text-white outline-none focus:border-indigo-500 transition-all"
-            >
-              <option value="4096">4k</option>
-              <option value="8192">8k</option>
-              <option value="16384">16k</option>
-              <option value="32768">32k</option>
-              <option value="65536">64k</option>
-              <option value="131072">128k</option>
-              <option value="262144">256k</option>
-            </select>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
 
   return (
     <div className="min-h-screen bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-200 font-sans flex text-left transition-colors duration-300">
@@ -359,6 +323,7 @@ export default function LLMConfig() {
                 const next = {
                   ...config, 
                   active_llm_engine: 'lmstudio',
+                  specialist_processing: config.active_model,
                   specialist_tabular: config.active_model,
                   specialist_narrative: config.active_model
                 };
@@ -452,15 +417,20 @@ export default function LLMConfig() {
           )}
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {/* PANOU MOTOR PRINCIPAL */}
+            {/* PANOU MOTOR CHAT PRINCIPAL */}
             <div className="p-8 bg-white dark:bg-slate-900/50 border border-slate-200 dark:border-white/5 rounded-3xl space-y-6 shadow-sm">
               <div className="flex items-center gap-3">
-                <div className="p-2 rounded-lg bg-indigo-500/10 text-indigo-600 dark:text-indigo-400">
+                <div className="p-2.5 rounded-xl bg-indigo-500/10 text-indigo-600 dark:text-indigo-400">
                   <Zap className="w-5 h-5" />
                 </div>
-                <h2 className="text-sm font-black text-slate-900 dark:text-white uppercase tracking-tight">
-                  Motor Chat Principal ({config.active_llm_engine.toUpperCase()})
-                </h2>
+                <div>
+                  <h2 className="text-sm font-black text-slate-900 dark:text-white uppercase tracking-tight">
+                    Motor Chat Principal ({config.active_llm_engine.toUpperCase()})
+                  </h2>
+                  <p className="text-[10px] text-slate-500 font-medium">
+                    Agent ReAct, investigație forensic și dialog interactiv
+                  </p>
+                </div>
               </div>
               
               <div className="space-y-4">
@@ -523,6 +493,7 @@ export default function LLMConfig() {
                         <option value="8192">8k tokens</option>
                         <option value="16384">16k tokens</option>
                         <option value="32768">32k tokens</option>
+                        <option value="65536">64k tokens</option>
                       </select>
                     </div>
                   </div>
@@ -543,52 +514,113 @@ export default function LLMConfig() {
               </div>
             </div>
 
-            {/* LIMITA SIGURANTA */}
-            <div className="p-8 bg-blue-500/5 border border-blue-500/10 rounded-3xl flex flex-col justify-center space-y-6">
-              <div className="flex gap-4 items-start">
-                <Shield className="w-8 h-8 text-blue-400 flex-shrink-0 mt-1" />
-                <div>
-                  <h3 className="text-sm font-black text-slate-900 dark:text-white uppercase mb-2">Limită de Siguranță (Safety)</h3>
-                  <p className="text-[11px] text-slate-500 font-medium leading-relaxed mb-6">
-                    Controlează volumul maxim de date brute care ajung în raționament. 
-                    Limitează contextul trimis către specialiști pentru a evita blocajele.
-                  </p>
-                  <select 
-                    value={config.safety_limit}
-                    onChange={(e) => setConfig({...config, safety_limit: parseInt(e.target.value)})}
-                    className="w-full bg-white dark:bg-slate-950 border border-slate-200 dark:border-white/10 rounded-xl px-4 py-3 text-xs font-bold text-slate-900 dark:text-white outline-none focus:border-indigo-500 transition-all shadow-sm"
-                  >
-                    <option value="10000">10k (Rapid)</option>
-                    <option value="20000">20k (Standard)</option>
-                    <option value="50000">50k (Complex)</option>
-                    <option value="100000">100k (Audit Full)</option>
-                  </select>
+            {/* PANOU EXPERT PROCESARE (DOCUMENTE, TABELE, TOC, SINTEZA) */}
+            {config.active_llm_engine !== 'lmstudio' ? (
+              <div className="p-8 bg-white dark:bg-slate-900/50 border border-slate-200 dark:border-white/5 rounded-3xl space-y-6 shadow-sm">
+                <div className="flex items-center gap-3">
+                  <div className="p-2.5 rounded-xl bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+                    <Cpu className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h2 className="text-sm font-black text-slate-900 dark:text-white uppercase tracking-tight">
+                      Expert Procesare Unificat
+                    </h2>
+                    <p className="text-[10px] text-slate-500 font-medium">
+                      Ingestie documente, tabele, cuprins forensic (TOC) și sinteză
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  <div>
+                    <label className="text-[9px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest mb-2 block">Model Desemnat</label>
+                    <select 
+                      value={config.specialist_processing}
+                      onChange={(e) => setConfig({...config, specialist_processing: e.target.value})}
+                      className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-white/10 rounded-xl px-4 py-3 text-xs font-bold text-slate-900 dark:text-white outline-none focus:border-emerald-500 transition-all"
+                    >
+                      {!availableModels.some(m => ((m.name || m.model) === config.specialist_processing)) && config.specialist_processing && (
+                        <option value={config.specialist_processing}>{config.specialist_processing} (Selectat / Manual)</option>
+                      )}
+                      {availableModels.map((m: any) => (
+                        <option key={m.name || m.model} value={m.name || m.model}>{m.name || m.model}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="text-[9px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest mb-2 block">Temperatură ({config.processing_temp})</label>
+                      <input 
+                        type="range" min="0" max="1" step="0.1" 
+                        value={config.processing_temp}
+                        onChange={(e) => setConfig({...config, processing_temp: parseFloat(e.target.value)})}
+                        className="w-full accent-emerald-600 dark:accent-emerald-500 h-1.5 bg-slate-200 dark:bg-slate-800 rounded-lg appearance-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[9px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest mb-2 block">Context RAM</label>
+                      <select 
+                        value={config.processing_ctx}
+                        onChange={(e) => setConfig({...config, processing_ctx: parseInt(e.target.value)})}
+                        className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-white/10 rounded-xl px-3 py-2 text-[10px] font-bold text-slate-900 dark:text-white outline-none focus:border-emerald-500 transition-all"
+                      >
+                        <option value="8192">8k tokens</option>
+                        <option value="16384">16k tokens</option>
+                        <option value="32768">32k tokens</option>
+                        <option value="65536">64k tokens</option>
+                        <option value="131072">128k tokens</option>
+                      </select>
+                    </div>
+                  </div>
                 </div>
               </div>
-            </div>
+            ) : (
+              <div className="p-8 bg-purple-500/10 border border-purple-500/20 rounded-3xl flex flex-col justify-center space-y-4">
+                <div className="flex items-center gap-3">
+                  <div className="p-2.5 rounded-2xl bg-purple-500/20 text-purple-400 flex-shrink-0">
+                    <Brain className="w-6 h-6" />
+                  </div>
+                  <h4 className="text-xs font-black text-slate-900 dark:text-white uppercase tracking-wider">
+                    Model Unic LM Studio Activ
+                  </h4>
+                </div>
+                <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+                  În modul LM Studio, modelul încărcat ({config.active_model ? <code className="text-purple-400 font-bold">{config.active_model}</code> : 'detectat pe server'}) este alocat automat atât pentru investigația Chat (Agentic Investigator), cât și pentru procesarea documentelor (OCR, tabele, TOC, sinteză).
+                </p>
+                <p className="text-[10px] text-purple-400/80 font-medium">
+                  Fereastra de context RAM și parametrii de cuantizare sunt gestionați direct în instanța LM Studio.
+                </p>
+              </div>
+            )}
           </div>
 
-          {/* CARDURI SPECIALISTI (DOAR DACA NU SUNTEM PE LM STUDIO) */}
-          {config.active_llm_engine !== 'lmstudio' ? (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 gap-6">
-              <ConfigCard title="Specialist Tabular" icon={Code} color="indigo" modelKey="specialist_tabular" tempKey="tabular_temp" ctxKey="tabular_ctx" />
-              <ConfigCard title="Specialist Narrativ" icon={FileText} color="fuchsia" modelKey="specialist_narrative" tempKey="narrative_temp" ctxKey="narrative_ctx" />
-            </div>
-          ) : (
-            <div className="p-6 bg-purple-500/10 border border-purple-500/20 rounded-3xl flex items-center gap-4">
-              <div className="p-3 rounded-2xl bg-purple-500/20 text-purple-400 flex-shrink-0">
-                <Brain className="w-6 h-6" />
+          {/* LIMITA SIGURANTA (SAFETY GUARDRAIL) */}
+          <div className="p-6 bg-blue-500/5 border border-blue-500/10 rounded-3xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+            <div className="flex gap-4 items-center">
+              <div className="p-3 rounded-2xl bg-blue-500/10 text-blue-500 flex-shrink-0">
+                <Shield className="w-6 h-6" />
               </div>
-              <div className="space-y-1">
-                <h4 className="text-xs font-black text-slate-900 dark:text-white uppercase tracking-wider">
-                  Model Unic Activ Desemnat Automat pentru Toți Experții
-                </h4>
-                <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
-                  În modul LM Studio, modelul încărcat ({config.active_model ? <code className="text-purple-400 font-bold">{config.active_model}</code> : 'detectat pe server'}) este alocat automat atât pentru investigația Chat (Agentic Investigator), cât și pentru procesarea documentelor (OCR, tabele, entități). Opțiunile separate de experți și ferestrele de tokeni sunt ascunse, fiind determinate direct în LM Studio.
+              <div>
+                <h3 className="text-xs font-black text-slate-900 dark:text-white uppercase tracking-wider">Limită de Siguranță Context (Safety Guardrail)</h3>
+                <p className="text-[11px] text-slate-500 font-medium mt-0.5">
+                  Controlează volumul maxim de date brute transmise în raționament pentru a preveni epuizarea VRAM și blocajele de memorie.
                 </p>
               </div>
             </div>
-          )}
+            <div className="w-full sm:w-56 flex-shrink-0">
+              <select 
+                value={config.safety_limit}
+                onChange={(e) => setConfig({...config, safety_limit: parseInt(e.target.value)})}
+                className="w-full bg-white dark:bg-slate-950 border border-slate-200 dark:border-white/10 rounded-xl px-4 py-2.5 text-xs font-bold text-slate-900 dark:text-white outline-none focus:border-indigo-500 transition-all shadow-sm"
+              >
+                <option value="10000">10k (Rapid)</option>
+                <option value="20000">20k (Standard)</option>
+                <option value="50000">50k (Complex)</option>
+                <option value="100000">100k (Audit Full)</option>
+              </select>
+            </div>
+          </div>
 
           {config.active_llm_engine === 'vllm' && (
             <div className="p-6 bg-amber-500/5 border border-amber-500/10 rounded-2xl">
