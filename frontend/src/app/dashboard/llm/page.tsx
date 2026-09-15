@@ -121,7 +121,7 @@ export default function LLMConfig() {
     finally { setIsSaving(false); }
   };
 
-  const testLMStudioConnection = async () => {
+  const handleTestConnection = async () => {
     setTestStatus({ testing: true });
     try {
       const res = await api.post('/system/llm/test-connection', {
