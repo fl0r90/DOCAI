@@ -304,8 +304,22 @@
     - *Corecție Tranzacțională Worker (`tasks.py`):* Corectat interogarea la `system_settings` și adăugat `db_session.rollback()` pentru a păstra conexiunea Postgres curată.
     - *Frontend Diagnostic & AbortController:* Păstrat `AbortController` și `handleStopChat` cu verificare strictă a `response.ok`, logare diagnostică a token-ului JWT și afișarea transparentă a erorilor HTTP.
 
+### Etapa 36: High-Density Forensic Document Outline & Table of Contents (TOC) Architecture - IMPLEMENTAT (Septembrie 2026)
+- **Problemă rezolvată (Căutarea oarbă în documente lungi și lipsa structurii juridice la nivel de pagină):**
+    - Înainte, agentul criminalistic căuta orbește prin fragmente de 1.500 de caractere (`SEARCH_TEXT`) sau inspecta documente masive (`FETCH_FULL_DOCUMENT` / `ROLLING_SCRATCHPAD_AUDIT`) fără o hartă prealabilă a capitolelor, articolelor sau anexelor.
+    - La dosare comerciale complexe (ex: contracte agricole cu 60 de tichete de cântar și procese verbale), agentul consuma zeci de pași iterativi căutând clauzele de penalități sau anexele cantitative.
+- **Arhitectura modulului `backend/core_engine/services/toc/`:**
+    - *Modele Pydantic V2 (`schemas.py`):* `TOCItem` și `DocumentTOC` modelează ierarhia arborescentă (Nivel 1: Capitole/Anexe, Nivel 2: Articole/Acte, Nivel 3: Paragrafe/Subclauze), asociind fiecărui nod `page_start`, `page_end`, categorie juridică și `snippet` introductiv. Oferă metodele `to_flat_list()` și `to_readable_text()`.
+    - *Normalizare Juridică Românească (`patterns.py`):* Regex-uri tolerante la diacritice și case-insensitive pentru capitole romane/arabe (`Cap. I-IV`), articole ierarhice (`Art. 4.1`), anexe/acte adiționale, procese-verbale (`PV-882`), tichete de cântar (`TC-1094`) și facturi.
+    - *Extracție Euristică cu Urmărire de Pagină (`extractor.py` - `TOCExtractor`):* Procesează markerii de pagină (`<!-- PAGE: N -->`) introduși de OCR/Docling și construiește instantaneu un arbore ierarhic fără costuri de inferență.
+    - *Îmbogățire Semantică LLM (`enricher.py` - `TOCLLMEnricher`):* Permite rafinarea cuprinsului prin modele avansate de raționament cu fallback automat pe arborele euristic la timeout sau erori JSON.
+    - *Orchestrare și Persistență (`service.py` - `TOCService`):* Salvează structura direct în PostgreSQL (`doc_metadata["toc"]` și `doc_metadata["outline"]`), sincronizat automat la ingestia fiecărui document în `worker/tasks.py`.
+    - *Unealtă Nativă pentru Agentul Criminalistic (`chat_service.py`):* Adăugat unealta `GET_DOCUMENT_OUTLINE(doc_id)` cu suport nativ OpenAI tool call și fallback sintetic `[GET_DOCUMENT_OUTLINE]`. Agentul poate inspecta cuprinsul oricărui document înainte de a extrage fragmente.
+    - *Endpoint REST API (`cases.py`):* `GET /cases/documents/{doc_id}/toc` expune structura detaliată pentru audit și frontend.
+    - *Validare Experimentală:* Certificat prin suita de teste unitare `backend/test_toc.py` pe contractul sintetic de cereale de 3 pagini (Agroterra vs BioFruct).
+
 ---
-*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 35 (Instant Chat Interruption, Hardware Abort & Progressive Scratchpad Resilience).*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 36 (High-Density Forensic Document Outline & TOC Architecture).*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:

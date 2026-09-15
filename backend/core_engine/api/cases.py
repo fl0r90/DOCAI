@@ -239,6 +239,22 @@ def doc_delete(doc_id: int, user: models.User = Depends(get_current_user), db: S
     return {"status": "deleted"}
 
 
+@router.get("/documents/{doc_id}/toc")
+def get_document_toc(doc_id: int, user: models.User = Depends(get_current_user), db: Session = Depends(get_forensic_db)):
+    d = db.query(models.Document).filter(models.Document.id == doc_id).first()
+    if not d:
+        raise HTTPException(404, "Document inexistent.")
+    _check_access(d.case_id, user, db)
+    meta = d.doc_metadata or {}
+    toc = meta.get("toc")
+    if not toc and d.raw_text:
+        from ..services.toc import toc_service
+        doc_toc = toc_service.generate_toc(d.raw_text, document_id=doc_id, document_title=d.filename, use_llm=False)
+        toc_service.save_toc_to_db(db, doc_id, doc_toc)
+        toc = doc_toc.model_dump()
+    return {"doc_id": doc_id, "filename": d.filename, "toc": toc or {}}
+
+
 # --------------------------------------------------------------------------- #
 # Entities / Summary / Graph / Timeline
 # --------------------------------------------------------------------------- #

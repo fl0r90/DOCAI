@@ -15,6 +15,7 @@ from core_engine.services.ocr_service import process_document
 from core_engine.services.grinder import extract_forensic_data
 from core_engine.services.graph_service import graph_service
 from core_engine.services.storage_service import upsert_document_chunk
+from core_engine.services.toc import toc_service
 
 redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
 r = redis.from_url(redis_url)
@@ -410,14 +411,29 @@ def unified_worker_pipeline():
                             print(f"[!] Eroare la generarea sintezei: {e}")
                             next_doc.ai_summary = "Document procesat, dar sinteza automată a eșuat."
                     
-                    # Salvăm metadatele finale (inclusiv atributele dinamice și entitățile îmbogățite)
+                    # Generăm cuprinsul structural detaliat (TOC)
+                    doc_toc = None
+                    try:
+                        print(f"[*] Generăm cuprinsul structural detaliat (TOC) pentru documentul {doc_id}...")
+                        doc_toc = toc_service.generate_toc(
+                            raw_text=next_doc.raw_text or "",
+                            total_pages=len(chunks_data) if chunks_data else 1,
+                            document_id=doc_id,
+                            document_title=filename,
+                            use_llm=False
+                        )
+                    except Exception as toc_err:
+                        print(f"[!] Eroare generare TOC la documentul {doc_id}: {toc_err}")
+
+                    # Salvăm metadatele finale (inclusiv atributele dinamice, entitățile îmbogățite și TOC)
                     next_doc.doc_metadata = {
                         "doc_type": next_doc.doc_type,
                         "doc_date": next_doc.doc_date,
                         "doc_number": next_doc.doc_number,
                         "dynamic_attributes": ai_data.get("dynamic_attributes", {}),
                         "financial_data": ai_data.get("financial_data", []), 
-                        "outline": ocr_result.get("outline", []),
+                        "outline": doc_toc.to_flat_list() if doc_toc else ocr_result.get("outline", []),
+                        "toc": doc_toc.model_dump() if doc_toc else {},
                         "graph_data": graph_data
                     }
                     

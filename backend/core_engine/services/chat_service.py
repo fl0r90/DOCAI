@@ -831,7 +831,30 @@ Obiectivul investigației / Întrebare:
                         dyn_meta = f" | {', '.join(dyn_strs[:5])}"
             
             header = f"[REF {citation_id} - FULL DOC: {doc_obj.filename}{doc_type_tag}{dyn_meta}, Pagina 1]"
-            return f"{header}:\n{raw}"
+            return f"{header}\n{dyn_meta}\n{raw}"
+
+    def tool_get_document_outline(self, doc_id: int) -> str:
+        """Tool: Inspect the structural table of contents (TOC / Outline) of a document with exact page boundaries."""
+        with SessionLocal() as db:
+            doc = db.query(Document).filter(Document.id == doc_id, Document.case_id == self.case_id).first()
+            if not doc:
+                return f"Documentul ID {doc_id} nu a fost găsit în acest dosar."
+            meta = doc.doc_metadata or {}
+            toc_data = meta.get("toc")
+            if toc_data:
+                from .toc import DocumentTOC
+                toc = DocumentTOC(**toc_data)
+                return toc.to_readable_text()
+            elif meta.get("outline"):
+                lines = [f"=== CUPRINS STRUCTURAL '{doc.filename}' ==="]
+                for it in meta.get("outline", []):
+                    lines.append(f"• [Pag. {it.get('page_start', it.get('page', 1))}] {it.get('title', '')}")
+                return "\n".join(lines)
+            elif doc.raw_text:
+                from .toc import toc_service
+                toc = toc_service.generate_toc(doc.raw_text, document_id=doc_id, document_title=doc.filename, use_llm=False)
+                return toc.to_readable_text()
+            return f"Documentul ID {doc_id} ('{doc.filename}') nu are încă un cuprins disponibil."
 
     def tool_search_transactions(self, subject: str, date_filter: str = "", match_pattern: str = "", aggregate: bool = False, limit: int = 100):
         """Tool 2: Structured search with AGNOSTIC aggregation capability."""
@@ -1240,6 +1263,20 @@ FINAL RESPONSE FORMAT (ROMANIAN):
             {
                 "type": "function",
                 "function": {
+                    "name": "GET_DOCUMENT_OUTLINE",
+                    "description": "Inspect the structural table of contents (TOC / Outline) of a document: chapters, articles, clauses, annexes, and scale tickets with exact page numbers. Call this to locate relevant sections before fetching chunks.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "doc_id": {"type": "integer", "description": "Document ID to inspect table of contents."}
+                        },
+                        "required": ["doc_id"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "EXPLORE_GRAPH",
                     "description": "Find relationships and links between entities.",
                     "parameters": {
@@ -1404,6 +1441,16 @@ FINAL RESPONSE FORMAT (ROMANIAN):
                             }
                         }
                     })
+                elif "[GET_DOCUMENT_OUTLINE]" in content:
+                    doc_match = re.search(r"doc_id:\s*(\d+)", content)
+                    synthetic_tool_calls.append({
+                        "function": {
+                            "name": "GET_DOCUMENT_OUTLINE",
+                            "arguments": {
+                                "doc_id": int(doc_match.group(1)) if doc_match else 0
+                            }
+                        }
+                    })
 
             if content:
                 yield json.dumps({"type": "observation", "data": f"Thinking: {content}"})
@@ -1473,6 +1520,9 @@ FINAL RESPONSE FORMAT (ROMANIAN):
                                         observation = final_obs
                             else:
                                 observation = self.tool_fetch_full_document(doc_id=t_doc_id, focus_terms=t_focus)
+                        elif t_name == "GET_DOCUMENT_OUTLINE":
+                            t_doc_id = int(t_args.get("doc_id", 0)) if isinstance(t_args, dict) else 0
+                            observation = self.tool_get_document_outline(doc_id=t_doc_id)
                         elif t_name == "EXPLORE_GRAPH":
                             observation = self.tool_explore_graph(t_args.get("entity", ""))
                         elif t_name == "TIMELINE":
