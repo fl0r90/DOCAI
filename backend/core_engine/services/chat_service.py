@@ -5,7 +5,7 @@ import json
 import re
 import time
 import redis
-from typing import List, Dict
+from typing import List, Dict, Tuple, Optional, Any
 from sqlalchemy import text, or_, and_
 from ..database import engine, SessionLocal
 from ..core.config import get_llm_config, get_active_model_name
@@ -154,18 +154,15 @@ class AgenticInvestigator:
         return "\n".join(lines)
 
     @staticmethod
-    def _extract_citation_snippet(text: str, query: str = "", max_len: int = 550) -> str:
-        """Extrage un extras relevant (snippet) din text centrat în jurul termenilor de căutare.
+    def _extract_citation_snippet(text: str, query: str = "", max_len: int = 550) -> Tuple[str, str]:
+        """Extrage un extras relevant (snippet) și termenul cheie pentru highlight direct în document.
         
-        Elimină marcajele boilerplate de tip <!-- image --> sau [Doc: ...] și prioritizează:
-        1. Entități numite / cuvinte cu majusculă și coduri numerice
-        2. Cuvinte cheie specifice din query și user_question
+        Returnează:
+            (snippet_text, highlight_term)
         """
         if not text:
-            return ""
-        clean = re.sub(r'^(<!--\s*image\s*-->|\[Doc:[^\]]*\])\s*', '', text, flags=re.IGNORECASE).strip()
-        if len(clean) <= max_len:
-            return clean
+            return "", ""
+        clean = re.sub(r'<!--\s*image\s*-->|\[Doc:[^\]]*\]', '', text, flags=re.IGNORECASE).strip()
 
         raw_words = [w for w in re.split(r'[\s,.;:?!()\[\]"\'`]+', query or "") if len(w) >= 2]
         stopwords = {
@@ -175,7 +172,6 @@ class AgenticInvestigator:
         }
         meaningful = [w for w in raw_words if w.lower() not in stopwords]
 
-        # Prioritizăm după specificitate: cifre/coduri > majuscule (entități) > lungime cuvânt
         def word_priority(w: str):
             is_num = 2 if any(c.isdigit() for c in w) else 0
             is_cap = 1 if w and w[0].isupper() else 0
@@ -191,7 +187,17 @@ class AgenticInvestigator:
                 best_pos = p
                 break
 
+        highlight_term = ""
         if best_pos != -1:
+            after_text = clean[best_pos:].strip()
+            words_after = after_text.split()
+            if len(words_after) >= 2:
+                highlight_term = f"{words_after[0]} {words_after[1]}".strip(" ,.;:?!()[]\"'")
+            elif words_after:
+                highlight_term = words_after[0].strip(" ,.;:?!()[]\"'")
+            if len(highlight_term) > 40:
+                highlight_term = highlight_term[:40].strip()
+
             half = max_len // 2
             start = max(0, best_pos - half)
             end = min(len(clean), start + max_len)
@@ -209,9 +215,10 @@ class AgenticInvestigator:
 
             prefix = "..." if start > 0 else ""
             suffix = "..." if end < len(clean) else ""
-            return prefix + clean[start:end].strip() + suffix
+            return prefix + clean[start:end].strip() + suffix, highlight_term
 
-        return clean[:max_len].strip() + ("..." if len(clean) > max_len else "")
+        default_hl = meaningful[0] if meaningful else ""
+        return clean[:max_len].strip() + ("..." if len(clean) > max_len else ""), default_hl
 
     @staticmethod
     def _get_context_budget() -> dict:
@@ -585,8 +592,9 @@ class AgenticInvestigator:
                 citation_id = len(self.citations) + 1
 
                 # Extragem un extras relevant (snippet) centrat pe termenii căutați
-                cite_source = best_chunk.content if (best_chunk and getattr(best_chunk, "content", None)) else doc_context
-                snippet_text = self._extract_citation_snippet(
+                best_clean = re.sub(r'<!--\s*image\s*-->|\[Doc:[^\]]*\]', '', getattr(best_chunk, "content", "") or "", flags=re.IGNORECASE).strip()
+                cite_source = best_chunk.content if (best_chunk and len(best_clean) >= 30) else doc_context
+                snippet_text, highlight_term = self._extract_citation_snippet(
                     text=cite_source,
                     query=f"{query} {self.user_question}",
                     max_len=550
@@ -597,6 +605,7 @@ class AgenticInvestigator:
                     "doc_id": doc_obj.id,
                     "page": page_num,
                     "content": snippet_text,
+                    "highlight_term": highlight_term,
                     "filename": doc_obj.filename if doc_obj else "unknown",
                     "spatial": getattr(best_chunk, "spatial", "") or ""
                 })
@@ -729,7 +738,7 @@ Răspunde EXCLUSIV cu scratchpad-ul comprimat (format bullet-points)."""
             # Dacă documentul încape lejer într-un singur context, îl returnăm direct
             if len(raw) <= doc_limit:
                 citation_id = len(self.citations) + 1
-                snippet_text = self._extract_citation_snippet(
+                snippet_text, highlight_term = self._extract_citation_snippet(
                     text=raw,
                     query=f"{focus_terms} {self.user_question}",
                     max_len=550
@@ -739,6 +748,7 @@ Răspunde EXCLUSIV cu scratchpad-ul comprimat (format bullet-points)."""
                     "doc_id": doc_obj.id,
                     "page": 1,
                     "content": snippet_text,
+                    "highlight_term": highlight_term,
                     "filename": doc_obj.filename,
                     "spatial": "full_text"
                 })
@@ -852,6 +862,7 @@ Obiectivul investigației / Întrebare:
                 "doc_id": doc_obj.id,
                 "page": 1,
                 "content": current_scratchpad[:400],
+                "highlight_term": "",
                 "filename": doc_obj.filename,
                 "spatial": "rolling_scratchpad_digest"
             })
@@ -885,7 +896,7 @@ Obiectivul investigației / Întrebare:
 
             # Altfel, returnăm documentul integral
             citation_id = len(self.citations) + 1
-            snippet_text = self._extract_citation_snippet(
+            snippet_text, highlight_term = self._extract_citation_snippet(
                 text=raw,
                 query=f"{focus_terms} {self.user_question}",
                 max_len=550
@@ -895,6 +906,7 @@ Obiectivul investigației / Întrebare:
                 "doc_id": doc_obj.id,
                 "page": 1,
                 "content": snippet_text,
+                "highlight_term": highlight_term,
                 "filename": doc_obj.filename if doc_obj else f"Doc_{doc_id}",
                 "spatial": ""
             })
@@ -1192,6 +1204,7 @@ Obiectivul investigației / Întrebare:
                         "doc_id": "SQL_DB", # Marcăm sursa ca fiind baza de date
                         "page": 0,
                         "content": content_str,
+                        "highlight_term": "",
                         "filename": r[4] # doc_filename
                     })
                     

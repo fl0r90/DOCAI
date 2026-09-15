@@ -323,8 +323,23 @@
     - *Optimizare și Reziliență Conexiune LM Studio (`llm_client.py`, `system.py`, `chat_service.py`):* Normalizare automată a endpoint-ului OpenAI (`/v1/chat/completions` și `/v1/models`) indiferent dacă utilizatorul introduce URL-ul cu sau fără sufixul `/v1`, eliminând eroarea de rutare Express `Unexpected endpoint (POST /chat/completions)`. Conversie sigură a parametrului de timeout din `SystemSetting` în tuplu `timeout=(10, timeout_val)`, prevenind eroarea de tip `ValueError` și blocajele de rețea. Extragerea și afișarea transparentă a blocurilor de raționament (`reasoning_content`) emise de modelele de gândire (ex: Gemma 4, Qwen 3.8 Thinking) direct în fluxul de investigație.
     - *Extragere Inteligentă a Citatelor Relevante (`chat_service.py` - `_extract_citation_snippet`):* Înlocuit trunchierea oarbă a primelor 300 de caractere ale documentului (`doc_context[:300]`), care afișa doar antetul generic al companiilor (ex: sediul social Orange din București), cu o fereastră semantică centrată dinamic pe termenii interogați și entitățile numite din `query` (ex: domiciliul și numele beneficiarului). Citatele `[REF N]` din interfață reflectă acum cu exactitate pasajul probatoriu care justifică răspunsul.
 
+### Etapa 37: Suport Agnostic Multi-Format (PDF, Word, Imagini, Text) și Citate Criminalistice Vizuale (Auto-Jump, Highlighting & Reader View) - IMPLEMENTAT (Septembrie 2026)
+- **Problemă rezolvată (Limitarea vizualizării la PDF-uri, citate trunchiate și lipsa încadrării vizuale a probelor):**
+    - Înainte, clic-ul pe citatele `[REF N]` deschidea invariabil un `<iframe>` de PDF, ceea ce provoca descărcări forțate sau ecrane albe pe fișiere Word (`.docx`, `.doc`) și imagini (`.jpg`, `.png`, scan-uri).
+    - Citatele extrase conțineau antete corporative generice sau marcaje de imagine (`<!-- image -->`), iar utilizatorul trebuia să caute manual prin document unde anume se află fraza relevantă.
+- **Arhitectura actualizată (`cases.py`, `chat_service.py`, `page.tsx`):**
+    - *Extragere Semantică și Termen de Evidențiere (`chat_service.py` - `_extract_citation_snippet`):* Funcția returnează un tuplu `(snippet_text, highlight_term)`. Pe lângă decuparea unei ferestre de 550 de caractere centrată pe entități și cifre, extrage termenul cheie specific pentru căutare și evidențiere directă în corpul probei.
+    - *Curățare Rezilientă a Marcajelor de Imagine:* Elimină toate aparițiile boilerplate de tip `<!-- image -->` și `[Doc: ...]`, redirecționând automat selecția de citat către `doc_context` dacă un calup OCR conține doar markeri vizuali fără text de substanță.
+    - *Endpoint REST pentru Conținut Text (`cases.py` - `GET /cases/documents/{doc_id}/content`):* Returnează `raw_text`, `filename` și `doc_type` pentru orice document stocat în PostgreSQL, permițând vizualizarea instantanee a fișierelor non-PDF.
+    - *Sertar Criminalistic Multi-Format (`page.tsx` - Evidence Preview Panel):*
+        - **Documente PDF:** Folosește parametrii nativi ai viewer-ului Chromium `#page=${page}&zoom=page-width&search=${highlight_term}`, care navighează automat la pagina indicată și marchează vizual cu dreptunghiuri galbene textul căutat.
+        - **Documente Word (.docx, .doc) și Text (.txt, .csv):** Încarcă textul prin Reader View cu tipografie criminalistică aerisită, identifică automat paragraful probatoriu, îl încadrează într-un container accentuat (`ring-4 ring-yellow-400/20`, border galben) și execută derulare automată lină (`scrollIntoView({ behavior: 'smooth', block: 'center' })`) la deschiderea citatului. Oferă de asemenea buton de descărcare a fișierului binar original.
+        - **Imagini și Scan-uri (.jpg, .png, .webp):** Randează un vizualizator dedicat de scan-uri cu controale de zoom interactiv (Zoom In, Zoom Out, Reset 100%) și afișează eticheta coordonatelor spațiale (bounding box) atunci când sunt disponibile din OCR.
+        - **Panou Inferior de Fragment Extras:** Randează fragmentul citat cu evidențierea termenilor cheie (`renderHighlightedSnippet`), badge de focalizare semantică și buton de copiere rapidă cu feedback vizual.
+        - **Interacțiune Ubicuuă:** Atât badge-urile inline din text (`[REF N]` sau `[N]`), cât și cardurile sintetice de probe din subsolul fiecărui mesaj deschid uniform noul panou de previzualizare.
+
 ---
-*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 36 (High-Density Forensic Document Outline, Unified Processing Expert, LM Studio Resilience & Semantic Citation Snippets).*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 37 (Multi-Format Forensic Reader, Dynamic Highlighting & Precision Auto-Jump).*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:
@@ -333,4 +348,5 @@ Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), 
 3. **Hybrid Search cu Reranker:** Pentru text (contracte, extrase), se apeleaza `SEARCH_TEXT`. Vectorii sunt adusi din extensia `pgvector` (folosind `BAAI/bge-m3`), apoi rerankati cu `BAAI/bge-reranker-v2-m3` (Cross-Encoder multilingv de înaltă rezoluție) pentru a asigura densitatea si relevanta informatiei.
 4. **Early Stop Mechanism:** Agentul nu e fortat sa ajunga la pasul 15. Imediat ce are `[FACTS]` complete care raspund integral la intrebarea utilizatorului, opreste bucla si emite o concluzie.
 5. **Graph Search (Harta Documentului):** Utilizand `Neo4j`, cand agentul gaseste entitati (nume de companii), poate extrage conexiunile ierarhice (actionariat, auto-tranzactionare, management overlap).
+
 

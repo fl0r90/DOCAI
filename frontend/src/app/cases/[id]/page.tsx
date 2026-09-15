@@ -7,7 +7,8 @@ import {
   Shield, Folder, FileText, Landmark, Database, History, 
   Clock, Building2, User, Loader2, Send, MessageSquare, 
   ChevronLeft, Trash2, ArrowRightCircle, X, AlertTriangle, ExternalLink, Search, ScrollText, RotateCcw, Brain, Copy, Upload,
-  Crosshair, Route, Share2, RefreshCw, Info, Sun, Moon, ChevronDown, ChevronUp, Pause, Play, Square, LogOut
+  Crosshair, Route, Share2, RefreshCw, Info, Sun, Moon, ChevronDown, ChevronUp, Pause, Play, Square, LogOut,
+  ZoomIn, ZoomOut, Image as ImageIcon, Download, Check
 } from 'lucide-react';
 import { useTheme } from '../../../lib/ThemeProvider';
 
@@ -50,7 +51,24 @@ export default function CaseDetail() {
   const [isSummaryLoading, setIsSummaryLoading] = useState(false);
   const [showBriefing, setShowBriefing] = useState(false);
   const [snippetMode, setSnippetMode] = useState(true);
-  const [evidencePreview, setEvidencePreview] = useState<{url: string, page: number, text: string, spatial?: string} | null>(null);
+  const [evidencePreview, setEvidencePreview] = useState<{
+    url: string;
+    page: number;
+    text: string;
+    spatial?: string;
+    highlight?: string;
+    filename?: string;
+    docId?: number | string;
+    docType?: string;
+  } | null>(null);
+  const [docContentData, setDocContentData] = useState<{
+    docId: number | string | null;
+    rawText: string;
+    loading: boolean;
+    error: string | null;
+  }>({ docId: null, rawText: '', loading: false, error: null });
+  const [imageZoom, setImageZoom] = useState<number>(1);
+  const [copiedEvidence, setCopiedEvidence] = useState(false);
   const pdfCanvasRef = useRef<HTMLCanvasElement>(null);
   const [pdfLoading, setPdfLoading] = useState(false);
   const [pdfError, setPdfError] = useState(false);
@@ -168,34 +186,138 @@ export default function CaseDetail() {
     );
   };
 
+  const renderHighlightedSnippet = (content: string, term?: string) => {
+    if (!content) return '';
+    if (!term || !term.trim() || term.length < 2) return content;
+    try {
+      const escaped = term.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(`(${escaped})`, 'gi');
+      const parts = content.split(regex);
+      if (parts.length === 1) {
+        const words = term.trim().split(/\s+/).filter(w => w.length >= 3);
+        if (words.length > 0) {
+          const wordRegex = new RegExp(`\\b(${words.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`, 'gi');
+          const wordParts = content.split(wordRegex);
+          return wordParts.map((part, i) =>
+            wordRegex.test(part) ? (
+              <mark key={i} className="bg-yellow-300 dark:bg-yellow-400 text-slate-950 font-black px-1 py-0.5 rounded shadow-sm">
+                {part}
+              </mark>
+            ) : part
+          );
+        }
+        return content;
+      }
+      return parts.map((part, i) =>
+        regex.test(part) ? (
+          <mark key={i} className="bg-yellow-300 dark:bg-yellow-400 text-slate-950 font-black px-1 py-0.5 rounded shadow-sm">
+            {part}
+          </mark>
+        ) : part
+      );
+    } catch (e) {
+      return content;
+    }
+  };
+
+  const renderDocReaderContent = (rawText: string, searchTarget: string) => {
+    if (!rawText) return null;
+    const paragraphs = rawText.split(/\n\s*\n/);
+    const targetClean = searchTarget ? searchTarget.trim() : '';
+    const searchKeywords = targetClean.split(/\s+/).filter(w => w.length >= 3);
+
+    let bestIdx = -1;
+    let maxMatches = 0;
+
+    paragraphs.forEach((p, idx) => {
+      if (!targetClean) return;
+      if (p.toLowerCase().includes(targetClean.toLowerCase())) {
+        bestIdx = idx;
+        maxMatches = 999;
+        return;
+      }
+      if (maxMatches < 999) {
+        let matches = 0;
+        for (const kw of searchKeywords) {
+          if (p.toLowerCase().includes(kw.toLowerCase())) matches++;
+        }
+        if (matches > maxMatches && matches >= 2) {
+          maxMatches = matches;
+          bestIdx = idx;
+        }
+      }
+    });
+
+    return (
+      <div className="space-y-4">
+        {paragraphs.map((p, idx) => {
+          const isTarget = idx === bestIdx;
+          return (
+            <div
+              key={idx}
+              id={isTarget ? 'cited-reader-target' : undefined}
+              className={`p-4 rounded-xl leading-relaxed text-sm transition-all duration-300 ${
+                isTarget
+                  ? 'bg-yellow-50 dark:bg-yellow-500/15 border-2 border-yellow-400 dark:border-yellow-500 shadow-[0_0_20px_rgba(250,204,21,0.25)] ring-4 ring-yellow-400/20'
+                  : 'bg-transparent hover:bg-slate-50 dark:hover:bg-slate-800/30 border border-transparent'
+              }`}
+            >
+              {isTarget && (
+                <div className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-widest text-yellow-700 dark:text-yellow-400 mb-2">
+                  <ScrollText className="w-3.5 h-3.5" /> Paragraf Citat
+                </div>
+              )}
+              <p className="whitespace-pre-wrap font-serif text-[13px] leading-relaxed text-slate-800 dark:text-slate-200">
+                {renderHighlightedSnippet(p, targetClean)}
+              </p>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const openCitationPreview = (cite: any) => {
+    const doc = docs.find((d: any) => d.id === cite.doc_id || d.filename === cite.filename);
+    const filename = cite.filename || doc?.filename || docs[0]?.filename || '';
+    const docId = cite.doc_id && cite.doc_id !== 'SQL_DB' ? cite.doc_id : doc?.id;
+    const docType = doc?.doc_type || (filename.split('.').pop()?.toLowerCase()) || '';
+    setEvidencePreview({
+      url: `${process.env.NEXT_PUBLIC_API_URL}/uploads/${filename}`,
+      page: cite.page || 1,
+      text: cite.content || '',
+      spatial: cite.spatial,
+      highlight: cite.highlight_term || '',
+      filename: filename,
+      docId: docId,
+      docType: docType
+    });
+  };
+
   const renderContentWithCitations = (content: string, citations: any[]) => {
     if (!content) return null;
     if (!citations || citations.length === 0) return <>{content}</>;
     
-    const parts = content.split(/(\[\d+\])/g);
+    const parts = content.split(/(\[(?:REF\s*)?\d+\])/gi);
     return parts.map((part, idx) => {
-      const match = part.match(/\[(\d+)\]/);
+      const match = part.match(/\[(?:REF\s*)?(\d+)\]/i);
       if (match) {
         const citeId = parseInt(match[1]);
         const cite = citations.find((c: any) => c.id === citeId);
         if (cite) {
           return (
-            <span 
+            <button 
               key={idx} 
-              onClick={() => {
-                const doc = docs.find((d: any) => d.id === cite.doc_id);
-                const filename = cite.filename || doc?.filename || docs[0]?.filename;
-                setEvidencePreview({
-                  url: `${process.env.NEXT_PUBLIC_API_URL}/uploads/${filename || ''}`,
-                  page: cite.page || 1,
-                  text: cite.content || ''
-                });
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                openCitationPreview(cite);
               }}
-              className="inline-flex items-center justify-center w-4 h-4 ml-1 text-[9px] font-bold text-blue-600 dark:text-blue-400 bg-blue-100 dark:bg-blue-900/40 rounded-full cursor-pointer hover:bg-blue-200 dark:hover:bg-blue-800 transition-colors shadow-sm"
-              title="Vezi sursa documentului"
+              className="inline-flex items-center justify-center px-1.5 py-0.5 ml-1 text-[10px] font-black text-blue-600 dark:text-blue-400 bg-blue-100 dark:bg-blue-900/50 hover:bg-blue-200 dark:hover:bg-blue-800 rounded-md cursor-pointer transition-all shadow-sm border border-blue-300/40 dark:border-blue-700/40 hover:scale-105 select-none align-baseline"
+              title={`Vezi sursa: ${cite.filename || 'Document'} (Pagina ${cite.page || 1})`}
             >
-              {citeId}
-            </span>
+              REF {citeId}
+            </button>
           );
         }
       }
@@ -693,10 +815,60 @@ export default function CaseDetail() {
   };
 
   useEffect(() => {
-    if (evidencePreview) {
-      setPdfLoading(true);
+    if (!evidencePreview) {
+      setDocContentData({ docId: null, rawText: '', loading: false, error: null });
+      setImageZoom(1);
+      return;
     }
-  }, [evidencePreview]);
+
+    const ext = (evidencePreview.filename || '').split('.').pop()?.toLowerCase() || '';
+    const isPdf = ext === 'pdf' || evidencePreview.docType?.toLowerCase() === 'pdf';
+    const isImg = ['jpg', 'jpeg', 'png', 'webp', 'bmp', 'tiff', 'gif', 'svg'].includes(ext) || ['image', 'jpeg', 'png'].includes(evidencePreview.docType?.toLowerCase() || '');
+
+    if (isPdf) {
+      setPdfLoading(true);
+    } else {
+      setPdfLoading(false);
+    }
+
+    if (isImg) {
+      setImageZoom(1);
+    }
+
+    if (!isPdf && !isImg && evidencePreview.docId && evidencePreview.docId !== 'SQL_DB') {
+      setDocContentData({ docId: evidencePreview.docId, rawText: '', loading: true, error: null });
+      api.get(`/cases/documents/${evidencePreview.docId}/content`)
+        .then(res => {
+          setDocContentData({
+            docId: evidencePreview.docId,
+            rawText: res.data.raw_text || '',
+            loading: false,
+            error: null
+          });
+        })
+        .catch(err => {
+          console.error("Failed to load document content", err);
+          setDocContentData({
+            docId: evidencePreview.docId,
+            rawText: '',
+            loading: false,
+            error: 'Nu s-a putut încărca conținutul text al documentului.'
+          });
+        });
+    }
+  }, [evidencePreview?.docId, evidencePreview?.filename]);
+
+  useEffect(() => {
+    if (evidencePreview && docContentData.rawText) {
+      const timer = setTimeout(() => {
+        const el = document.getElementById('cited-reader-target');
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }, 350);
+      return () => clearTimeout(timer);
+    }
+  }, [docContentData.rawText, evidencePreview]);
 
   const filteredData = useMemo(() => {
     if (!timeline.length || !graphData.nodes.length) return graphData;
@@ -994,24 +1166,24 @@ export default function CaseDetail() {
                   {msg.citations && msg.citations.length > 0 && (
                     <div className="mt-4 pt-4 border-t border-slate-100 dark:border-white/5 space-y-2">
                       {msg.citations.map((cite: any, i: number) => (
-                        <div key={i} onClick={() => { 
-                          const doc = docs.find((d: any) => d.id === cite.doc_id);
-                          const filename = cite.filename || doc?.filename || docs[0]?.filename;
-                          setEvidencePreview({ 
-                            url: `${process.env.NEXT_PUBLIC_API_URL}/uploads/${filename}`, 
-                            page: cite.page || 1, 
-                            text: cite.content || '',
-                            spatial: cite.spatial
-                          }); 
-                        }} className="p-2.5 bg-blue-500/5 border-l-2 border-blue-500 rounded-r-lg text-[11px] text-slate-500 dark:text-slate-400 italic cursor-pointer hover:bg-blue-500/10 transition-all flex justify-between group/cite">
-                          <span className="line-clamp-2">"{cite.content || ''}"</span>
-                          <div className="flex gap-1 opacity-0 group-hover/cite:opacity-100">
+                        <div 
+                          key={i} 
+                          onClick={() => openCitationPreview(cite)} 
+                          className="p-2.5 bg-blue-500/5 border-l-2 border-blue-500 rounded-r-lg text-[11px] text-slate-500 dark:text-slate-400 italic cursor-pointer hover:bg-blue-500/10 transition-all flex justify-between items-center group/cite"
+                        >
+                          <div className="flex items-center gap-2 overflow-hidden mr-2">
+                            <span className="not-italic font-black text-[9px] px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-900/50 text-blue-600 dark:text-blue-400 shrink-0">
+                              REF {cite.id}
+                            </span>
+                            <span className="line-clamp-2">"{cite.content || ''}"</span>
+                          </div>
+                          <div className="flex items-center gap-1.5 shrink-0 opacity-0 group-hover/cite:opacity-100 transition-opacity">
                             {cite.spatial && (
                               <span title="Grounding Spațial Detectat">
-                                <Crosshair className="w-3 h-3 text-blue-500" />
+                                <Crosshair className="w-3.5 h-3.5 text-blue-500" />
                               </span>
                             )}
-                            <ExternalLink className="w-3 h-3" />
+                            <ExternalLink className="w-3.5 h-3.5 text-slate-400 group-hover/cite:text-blue-500" />
                           </div>
                         </div>
                       ))}
@@ -1184,70 +1356,217 @@ export default function CaseDetail() {
         </div>
 
         {/* PREVIEW PANEL (FIXED) */}
-        {evidencePreview && (
-          <div className="fixed top-20 right-0 bottom-0 w-[750px] bg-white dark:bg-slate-900 border-l border-slate-200 dark:border-white/10 flex flex-col shadow-2xl z-[60] animate-in slide-in-from-right duration-300">
-            <div className="p-5 border-b border-slate-200 dark:border-white/5 flex items-center justify-between bg-slate-50 dark:bg-slate-950">
-              <div className="flex items-center gap-3">
-                <div className="p-2 bg-blue-600 rounded-xl">
-                  <FileText className="w-5 h-5 text-white" />
-                </div>
-                <div>
-                  <span className="text-xs font-black text-slate-900 dark:text-slate-200 uppercase tracking-widest block">Sursă Documentară</span>
-                  <span className="text-[10px] font-bold text-slate-500 uppercase tracking-tighter">Pagina {evidencePreview.page} • Dosar {caseId}</span>
-                </div>
-              </div>
-              <div className="flex items-center gap-3">
-                <button 
-                  onClick={() => window.open(`${evidencePreview.url}#page=${evidencePreview.page}`, '_blank')}
-                  className="p-2.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-white/10 rounded-xl text-slate-500 hover:text-blue-500 transition-all shadow-sm"
-                  title="Deschide în filă nouă"
-                >
-                  <ExternalLink className="w-4 h-4" />
-                </button>
-                <button onClick={() => setEvidencePreview(null)} className="p-2.5 hover:bg-red-500/10 rounded-full text-slate-500 hover:text-red-500 transition-colors"><X className="w-6 h-6" /></button>
-              </div>
-            </div>
+        {/* PREVIEW PANEL (FIXED) */}
+        {evidencePreview && (() => {
+          const ext = (evidencePreview.filename || '').split('.').pop()?.toLowerCase() || '';
+          const isPdf = ext === 'pdf' || evidencePreview.docType?.toLowerCase() === 'pdf';
+          const isImage = ['jpg', 'jpeg', 'png', 'webp', 'bmp', 'tiff', 'gif', 'svg'].includes(ext) || ['image', 'jpeg', 'png'].includes(evidencePreview.docType?.toLowerCase() || '');
+          const isWord = ['doc', 'docx', 'rtf', 'odt'].includes(ext) || ['word', 'docx', 'doc'].includes(evidencePreview.docType?.toLowerCase() || '');
 
-            <div className="flex-1 bg-slate-200 dark:bg-slate-950 relative">
-              {pdfLoading && (
-                <div className="absolute inset-0 flex items-center justify-center bg-white/80 dark:bg-slate-900/80 z-10">
-                  <Loader2 className="w-8 h-8 text-yellow-500 animate-spin" />
-                </div>
-              )}
-              <iframe
-                key={`${evidencePreview.url}#page=${evidencePreview.page}`}
-                src={`${evidencePreview.url}#page=${evidencePreview.page}&zoom=page-width`}
-                className="w-full h-full border-0"
-                title="PDF Preview"
-                onLoad={() => setPdfLoading(false)}
-              />
-            </div>
+          const pdfSearchParam = evidencePreview.highlight ? `&search=${encodeURIComponent(evidencePreview.highlight)}` : '';
+          const pdfViewerUrl = `${evidencePreview.url}#page=${evidencePreview.page}&zoom=page-width${pdfSearchParam}`;
 
-            {evidencePreview.text && (
-                <div className="p-6 bg-white dark:bg-slate-950 border-t-2 border-yellow-400/40 shadow-2xl">
-                  <div className="flex items-center justify-between mb-3">
-                    <h4 className="text-[10px] font-black text-yellow-600 dark:text-yellow-400 uppercase tracking-[0.2em] flex items-center gap-2">
-                      <ScrollText className="w-4 h-4" /> Fragment Evidențiat
-                    </h4>
-                    <button
-                      onClick={() => navigator.clipboard.writeText(evidencePreview.text)}
-                      className="text-[9px] font-bold text-slate-400 hover:text-yellow-600 dark:hover:text-yellow-400 uppercase tracking-wider transition-colors"
-                    >
-                      Copiază
-                    </button>
+          return (
+            <div className="fixed top-20 right-0 bottom-0 w-[780px] max-w-[90vw] bg-white dark:bg-slate-900 border-l border-slate-200 dark:border-white/10 flex flex-col shadow-2xl z-[60] animate-in slide-in-from-right duration-300">
+              {/* Header */}
+              <div className="p-4 px-5 border-b border-slate-200 dark:border-white/5 flex items-center justify-between bg-slate-50 dark:bg-slate-950 shrink-0">
+                <div className="flex items-center gap-3 overflow-hidden">
+                  <div className={`p-2 rounded-xl shrink-0 ${
+                    isPdf ? 'bg-red-600 text-white' : 
+                    isImage ? 'bg-emerald-600 text-white' : 
+                    isWord ? 'bg-blue-600 text-white' : 
+                    'bg-slate-700 text-white'
+                  }`}>
+                    {isPdf ? <FileText className="w-5 h-5" /> : 
+                     isImage ? <ImageIcon className="w-5 h-5" /> : 
+                     <ScrollText className="w-5 h-5" />}
                   </div>
-                  <div className="bg-yellow-50 dark:bg-yellow-500/5 p-5 rounded-xl border-2 border-yellow-400/60 dark:border-yellow-500/30 relative shadow-[0_0_20px_rgba(250,204,21,0.15)]">
+                  <div className="overflow-hidden">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-black text-slate-900 dark:text-slate-200 uppercase tracking-widest truncate">
+                        {evidencePreview.filename || 'Document Forensic'}
+                      </span>
+                      <span className={`text-[9px] font-black px-1.5 py-0.5 rounded uppercase ${
+                        isPdf ? 'bg-red-500/10 text-red-600 dark:text-red-400' :
+                        isImage ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400' :
+                        isWord ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400' :
+                        'bg-slate-500/10 text-slate-600 dark:text-slate-400'
+                      }`}>
+                        {ext.toUpperCase() || 'DOC'}
+                      </span>
+                    </div>
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-tighter block truncate">
+                      {isPdf ? `Pagina ${evidencePreview.page}` : (isImage ? 'Scan / Imagine' : 'Reader View')} • Dosar {caseId}
+                    </span>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {/* Zoom controls for Image */}
+                  {isImage && (
+                    <div className="flex items-center bg-white dark:bg-slate-800 border border-slate-200 dark:border-white/10 rounded-xl p-0.5 shadow-sm mr-1">
+                      <button 
+                        onClick={() => setImageZoom(z => Math.max(0.4, z - 0.25))}
+                        className="p-1.5 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg text-slate-500 transition-colors"
+                        title="Zoom Out"
+                      >
+                        <ZoomOut className="w-3.5 h-3.5" />
+                      </button>
+                      <span className="text-[10px] font-mono font-bold px-2 text-slate-600 dark:text-slate-300">
+                        {Math.round(imageZoom * 100)}%
+                      </span>
+                      <button 
+                        onClick={() => setImageZoom(z => Math.min(3, z + 0.25))}
+                        className="p-1.5 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg text-slate-500 transition-colors"
+                        title="Zoom In"
+                      >
+                        <ZoomIn className="w-3.5 h-3.5" />
+                      </button>
+                      <button 
+                        onClick={() => setImageZoom(1)}
+                        className="text-[9px] font-bold px-1.5 py-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded text-slate-400 uppercase"
+                        title="Reset Zoom"
+                      >
+                        100%
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Download original or open tab */}
+                  <a
+                    href={isPdf ? pdfViewerUrl : evidencePreview.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="p-2.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-white/10 rounded-xl text-slate-500 hover:text-blue-500 transition-all shadow-sm flex items-center gap-1.5 text-xs font-bold"
+                    title="Deschide fișierul original în filă nouă"
+                  >
+                    <ExternalLink className="w-4 h-4" />
+                  </a>
+                  <button 
+                    onClick={() => setEvidencePreview(null)} 
+                    className="p-2.5 hover:bg-red-500/10 rounded-full text-slate-500 hover:text-red-500 transition-colors"
+                    title="Închide previzualizarea"
+                  >
+                    <X className="w-6 h-6" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Main Body */}
+              <div className="flex-1 bg-slate-100 dark:bg-slate-950 relative overflow-hidden flex flex-col">
+                {/* PDF VIEW */}
+                {isPdf && (
+                  <div className="w-full h-full relative">
+                    {pdfLoading && (
+                      <div className="absolute inset-0 flex items-center justify-center bg-white/80 dark:bg-slate-900/80 z-10">
+                        <Loader2 className="w-8 h-8 text-yellow-500 animate-spin" />
+                      </div>
+                    )}
+                    <iframe
+                      key={pdfViewerUrl}
+                      src={pdfViewerUrl}
+                      className="w-full h-full border-0"
+                      title="PDF Preview"
+                      onLoad={() => setPdfLoading(false)}
+                    />
+                  </div>
+                )}
+
+                {/* IMAGE VIEW */}
+                {isImage && (
+                  <div className="w-full h-full overflow-auto p-6 flex items-center justify-center bg-slate-900/90 custom-scrollbar">
+                    <div className="relative inline-block transition-transform duration-150" style={{ transform: `scale(${imageZoom})`, transformOrigin: 'center center' }}>
+                      <img 
+                        src={evidencePreview.url} 
+                        alt={evidencePreview.filename || 'Document Image'} 
+                        className="max-w-full max-h-[75vh] object-contain rounded-xl shadow-2xl border border-white/10"
+                      />
+                      {evidencePreview.spatial && (
+                        <div className="absolute top-2 left-2 px-2.5 py-1 bg-blue-600/90 text-white text-[9px] font-mono font-bold rounded-lg backdrop-blur-sm shadow-lg flex items-center gap-1.5">
+                          <Crosshair className="w-3 h-3 text-cyan-300" /> Coordonate: {evidencePreview.spatial}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* WORD / TEXT / NON-PDF READER VIEW */}
+                {!isPdf && !isImage && (
+                  <div className="w-full h-full overflow-y-auto p-8 custom-scrollbar bg-slate-50 dark:bg-slate-950">
+                    {docContentData.loading ? (
+                      <div className="h-full flex flex-col items-center justify-center gap-3 text-slate-400">
+                        <Loader2 className="w-8 h-8 animate-spin text-blue-500" />
+                        <span className="text-xs font-bold uppercase tracking-wider">Se încarcă textul documentului...</span>
+                      </div>
+                    ) : docContentData.error ? (
+                      <div className="p-6 bg-red-500/10 border border-red-500/20 rounded-2xl text-red-500 text-xs">
+                        {docContentData.error}
+                      </div>
+                    ) : docContentData.rawText ? (
+                      <div className="max-w-3xl mx-auto bg-white dark:bg-slate-900 p-8 rounded-2xl border border-slate-200 dark:border-white/10 shadow-lg space-y-4 font-sans text-slate-800 dark:text-slate-200">
+                        <div className="border-b border-slate-200 dark:border-white/10 pb-4 mb-4 flex justify-between items-center">
+                          <div>
+                            <h3 className="text-sm font-black uppercase tracking-wider text-slate-900 dark:text-white">
+                              {evidencePreview.filename}
+                            </h3>
+                            <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">
+                              Reader Text Forensic • {isWord ? 'Document Word' : 'Document Text'}
+                            </span>
+                          </div>
+                          <a 
+                            href={evidencePreview.url} 
+                            download
+                            className="px-3 py-1.5 bg-blue-600/10 hover:bg-blue-600/20 text-blue-600 dark:text-blue-400 rounded-xl text-xs font-bold transition-colors flex items-center gap-1.5"
+                          >
+                            <Download className="w-3.5 h-3.5" /> Descarcă original
+                          </a>
+                        </div>
+                        {renderDocReaderContent(docContentData.rawText, evidencePreview.highlight || evidencePreview.text)}
+                      </div>
+                    ) : (
+                      <div className="max-w-3xl mx-auto bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200 dark:border-white/10 text-center text-slate-400 text-xs">
+                        Nu există text extras disponibil pentru acest document.
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* FOOTER: Fragment Evidențiat */}
+              {evidencePreview.text && (
+                <div className="p-5 bg-white dark:bg-slate-950 border-t-2 border-yellow-400/50 shadow-2xl shrink-0">
+                  <div className="flex items-center justify-between mb-2.5">
+                    <h4 className="text-[10px] font-black text-yellow-600 dark:text-yellow-400 uppercase tracking-[0.2em] flex items-center gap-2">
+                      <ScrollText className="w-4 h-4" /> Fragment Extras din Document
+                    </h4>
+                    <div className="flex items-center gap-2">
+                      {evidencePreview.highlight && (
+                        <span className="text-[9px] font-black px-2 py-0.5 rounded-full bg-yellow-400/20 text-yellow-700 dark:text-yellow-300 border border-yellow-400/30 uppercase tracking-wider">
+                          Focalizare: {evidencePreview.highlight}
+                        </span>
+                      )}
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(evidencePreview.text);
+                          setCopiedEvidence(true);
+                          setTimeout(() => setCopiedEvidence(false), 2000);
+                        }}
+                        className="text-[9px] font-bold text-slate-400 hover:text-yellow-600 dark:hover:text-yellow-400 uppercase tracking-wider transition-colors flex items-center gap-1"
+                      >
+                        {copiedEvidence ? <><Check className="w-3 h-3 text-emerald-500" /> Copiat!</> : <><Copy className="w-3 h-3" /> Copiază</>}
+                      </button>
+                    </div>
+                  </div>
+                  <div className="bg-yellow-50 dark:bg-yellow-500/5 p-4 rounded-xl border-2 border-yellow-400/60 dark:border-yellow-500/30 relative shadow-[0_0_20px_rgba(250,204,21,0.15)]">
                     <div className="absolute top-0 left-0 w-1.5 h-full bg-yellow-400 rounded-l-xl"></div>
-                    <p className="text-sm text-slate-900 dark:text-slate-100 font-semibold leading-relaxed pl-2">
-                      <mark className="bg-yellow-200/80 dark:bg-yellow-500/25 text-slate-900 dark:text-yellow-50 px-0.5 py-0.5 rounded-sm">
-                        {evidencePreview.text}
-                      </mark>
+                    <p className="text-xs text-slate-800 dark:text-slate-200 font-medium leading-relaxed pl-2 whitespace-pre-wrap">
+                      {renderHighlightedSnippet(evidencePreview.text, evidencePreview.highlight)}
                     </p>
                   </div>
                 </div>
-             )}
-          </div>
-        )}
+              )}
+            </div>
+          );
+        })()}
       </div>
 
       {/* GRAPH MODAL */}

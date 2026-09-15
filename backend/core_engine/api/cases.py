@@ -255,6 +255,20 @@ def get_document_toc(doc_id: int, user: models.User = Depends(get_current_user),
     return {"doc_id": doc_id, "filename": d.filename, "toc": toc or {}}
 
 
+@router.get("/documents/{doc_id}/content")
+def get_document_content(doc_id: int, user: models.User = Depends(get_current_user), db: Session = Depends(get_forensic_db)):
+    d = db.query(models.Document).filter(models.Document.id == doc_id).first()
+    if not d:
+        raise HTTPException(404, "Document inexistent.")
+    _check_access(d.case_id, user, db)
+    return {
+        "doc_id": doc_id,
+        "filename": d.filename,
+        "doc_type": d.doc_type,
+        "raw_text": d.raw_text or "",
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Entities / Summary / Graph / Timeline
 # --------------------------------------------------------------------------- #
