@@ -422,8 +422,13 @@ class UnifiedLLMClient:
         active_model = model or cfg.get("active_model") or os.getenv("ACTIVE_MODEL", "")
 
         if engine == "lmstudio":
+            if stop_check and stop_check():
+                raise ChatStoppedError("Investigație oprită de utilizator.")
+
             base_url = cfg.get("lmstudio_url") or os.getenv("LMSTUDIO_URL", "http://host.docker.internal:1234/v1")
             base_url = base_url.rstrip("/")
+            if not base_url.endswith("/v1"):
+                base_url = f"{base_url}/v1"
             url = f"{base_url}/chat/completions"
             headers = {"Content-Type": "application/json"}
             api_key = (cfg.get("lmstudio_api_key") or "").strip()
@@ -438,7 +443,7 @@ class UnifiedLLMClient:
             payload: Dict[str, Any] = {
                 "model": active_model,
                 "messages": validated_messages,
-                "temperature": temperature,
+                "temperature": float(temperature),
                 "stream": False,  # LM Studio / OpenAI-compatible endpoints expect stream=false for sync calls
             }
             # LM Studio may not support tools; omit if empty or invalid
@@ -449,12 +454,17 @@ class UnifiedLLMClient:
                 except Exception:
                     pass  # fallback to no tools
 
-            timeout = cfg.get("lmstudio_timeout", 300)
+            try:
+                timeout_val = int(cfg.get("lmstudio_timeout", 300))
+            except (ValueError, TypeError):
+                timeout_val = 300
+
             payload_str = json.dumps(payload, ensure_ascii=False)[:2500]
-            print(f"[LMSTUDIO] POST {url} | model={active_model}, messages={len(messages)}, tools={bool(tools)}")
+            print(f"[LMSTUDIO] POST {url} | model={active_model}, messages={len(messages)}, tools={bool(tools)}, timeout={timeout_val}")
             print(f"[LMSTUDIO_PAYLOAD] {payload_str}")
             try:
-                resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+                # Folosim timeout=(connect, read): 10s conectare, timeout_val generare
+                resp = requests.post(url, json=payload, headers=headers, timeout=(10, timeout_val))
                 print(f"[LMSTUDIO_STATUS] {resp.status_code}")
                 if resp.status_code != 200:
                     err_body = resp.text[:1500]
@@ -465,19 +475,26 @@ class UnifiedLLMClient:
                 print(f"[LMSTUDIO_ERROR] {type(e).__name__}: {e} | Payload: {payload_str}")
                 print(f"[LMSTUDIO_ERROR_RESPONSE] {err_body[:1500]}")
                 raise
+
             data = resp.json()
+            if "error" in data:
+                err_detail = data["error"]
+                err_msg = err_detail.get("message") if isinstance(err_detail, dict) else str(err_detail)
+                raise RuntimeError(f"LM Studio API Error: {err_msg}")
+
             choice = (data.get("choices") or [{}])[0]
             msg = choice.get("message") or {}
             
-            # LM Studio/Qwen3.8 may return reasoning_content instead of content
+            # LM Studio/Qwen3.8/Gemma may return reasoning_content instead of content
             content = msg.get("content") or ""
-            reasoning = msg.get("reasoning_content", "")
-            if not content and reasoning:
-                content = reasoning  # Use reasoning as content if no text content
-            
+            reasoning = msg.get("reasoning_content") or msg.get("reasoning") or ""
             tool_calls = cls._normalize_tool_calls(msg.get("tool_calls") or [])
+
+            if not content and reasoning and not tool_calls:
+                content = reasoning  # Folosim reasoning ca content doar dacă nu avem tool calls
+            
             print(f"[LMSTUDIO_RESULT] content_len={len(content)}, reasoning_len={len(reasoning)}, tool_calls_count={len(tool_calls)}")
-            return {"content": content, "tool_calls": tool_calls, "raw": msg}
+            return {"content": content, "tool_calls": tool_calls, "reasoning": reasoning, "raw": msg}
 
         elif engine == "vllm":
             vllm_url = os.getenv("VLLM_URL", "http://vllm:8000/v1").rstrip("/")
@@ -668,6 +685,8 @@ class UnifiedLLMClient:
                     api_key = ""
 
                 base_url = base_url.rstrip("/")
+                if not base_url.endswith("/v1"):
+                    base_url = f"{base_url}/v1"
                 url = f"{base_url}/chat/completions"
                 headers = {"Content-Type": "application/json"}
                 if api_key:

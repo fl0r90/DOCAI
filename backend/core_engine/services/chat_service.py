@@ -1392,6 +1392,10 @@ FINAL RESPONSE FORMAT (ROMANIAN):
             messages.append(assistant_msg)
             
             # Yield thinking/reasoning if present
+            reasoning_text = chat_res.get("reasoning")
+            if reasoning_text:
+                yield json.dumps({"type": "thought", "data": str(reasoning_text).strip()})
+
             content = assistant_msg.get("content", "").strip()
             
             # FAIL-SAFE: If model writes tool calls in text instead of using tool_calls field

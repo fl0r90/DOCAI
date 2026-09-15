@@ -139,6 +139,8 @@ def get_available_models(admin: User = Depends(check_admin), db: Session = Depen
     if engine == "lmstudio":
         lm_url = config.get("lmstudio_url") or os.getenv("LMSTUDIO_URL", "http://host.docker.internal:1234/v1")
         lm_url = lm_url.rstrip("/")
+        if not lm_url.endswith("/v1"):
+            lm_url = f"{lm_url}/v1"
         models_url = f"{lm_url}/models"
         headers = {}
         api_key = (config.get("lmstudio_api_key") or "").strip()
@@ -285,7 +287,12 @@ def test_llm_connection(payload: dict, admin: User = Depends(check_admin)):
     if not url:
         raise HTTPException(status_code=400, detail="URL-ul serverului este obligatoriu.")
 
-    models_url = url if url.endswith("/models") else f"{url}/models"
+    if url.endswith("/models"):
+        models_url = url
+    elif url.endswith("/v1"):
+        models_url = f"{url}/models"
+    else:
+        models_url = f"{url}/v1/models"
     headers = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
