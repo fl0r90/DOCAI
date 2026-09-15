@@ -414,10 +414,11 @@ def unified_worker_pipeline():
                     # Generăm cuprinsul structural detaliat (TOC)
                     doc_toc = None
                     try:
-                        print(f"[*] Generăm cuprinsul structural detaliat (TOC) pentru documentul {doc_id}...")
+                        total_pages = ocr_result.get("num_pages") or (len(chunks_info) if 'chunks_info' in locals() and chunks_info else 1)
+                        print(f"[*] Generăm cuprinsul structural detaliat (TOC) pentru documentul {doc_id} (total pagini: {total_pages})...")
                         doc_toc = toc_service.generate_toc(
                             raw_text=next_doc.raw_text or "",
-                            total_pages=len(chunks_data) if chunks_data else 1,
+                            total_pages=total_pages,
                             document_id=doc_id,
                             document_title=filename,
                             use_llm=False

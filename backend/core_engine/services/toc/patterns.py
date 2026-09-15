@@ -65,6 +65,10 @@ def classify_and_normalize_heading(raw_line: str) -> Optional[Tuple[str, int, st
     md_level = len(md_match.group(1)) if md_match else 0
     clean_line = md_match.group(2).strip() if md_match else line
 
+    # Ignorăm bife de formular / checkbox-uri (ex: - [ ] Da ☑ Nu ☐)
+    if any(box in clean_line for box in ["☑", "☐"]) or (clean_line.startswith(("- [", "[ ]")) and any(w in clean_line for w in ["Da", "Nu"])):
+        return None
+
     # 1. Capitol
     ch_m = RE_CHAPTER.match(clean_line)
     if ch_m:
@@ -114,6 +118,8 @@ def classify_and_normalize_heading(raw_line: str) -> Optional[Tuple[str, int, st
 
     # 7. Titluri cu majuscule (ALL CAPS) scurte, tipice pentru contracte românești
     if clean_line.isupper() and 5 <= len(clean_line) <= 60 and not clean_line.endswith((".", ",")):
+        if clean_line in ["CLIENT", "VANZATOR", "VÂNZĂTOR", "CUMPĂRĂTOR", "CUMPARATOR", "SEMNĂTURA", "SEMNATURA"]:
+            return None
         return ("section", 2, clean_line.title(), f"sec_{abs(hash(clean_line)) % 100000}")
 
     return None
