@@ -51,6 +51,9 @@ export default function CaseDetail() {
   const [showBriefing, setShowBriefing] = useState(false);
   const [snippetMode, setSnippetMode] = useState(true);
   const [evidencePreview, setEvidencePreview] = useState<{url: string, page: number, text: string, spatial?: string} | null>(null);
+  const pdfCanvasRef = useRef<HTMLCanvasElement>(null);
+  const [pdfLoading, setPdfLoading] = useState(false);
+  const [pdfError, setPdfError] = useState(false);
 
   const [showGraph, setShowGraph] = useState(false);
   const [graphData, setGraphData] = useState({ nodes: [], links: [] });
@@ -391,6 +394,7 @@ export default function CaseDetail() {
 
     try {
       const baseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+      console.log("[CHAT] Token present:", !!token, "Token preview:", token ? token.slice(0, 20) + "..." : "MISSING");
       const response = await fetch(`${baseUrl}/cases/${caseId}/chat`, {
         method: 'POST',
         headers: {
@@ -399,6 +403,13 @@ export default function CaseDetail() {
         },
         body: JSON.stringify({ question: userMsg.content })
       });
+
+      console.log("[CHAT] Response status:", response.status, response.statusText);
+      if (!response.ok) {
+        const errText = await response.text();
+        console.error("[CHAT] Error response:", errText);
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
 
       if (!response.body) throw new Error("No body");
       const reader = response.body.getReader();
@@ -505,7 +516,9 @@ export default function CaseDetail() {
       setStreamingMessage(null);
       // fetchData() va fi chemat prin intervalul de 5 secunde existent pentru a actualiza restul datelor
     } catch (err) { 
-      setMessages(prev => [...prev, { role: 'assistant', id: Date.now() + 2, content: 'Eroare la comunicarea cu serverul.' }]); 
+      console.error("[CHAT] Exception:", err);
+      const errorMsg = err instanceof Error ? err.message : 'Eroare necunoscută';
+      setMessages(prev => [...prev, { role: 'assistant', id: Date.now() + 2, content: `Eroare: ${errorMsg}` }]); 
     } finally { 
       setIsChatLoading(false); 
       setStreamingMessage(null);
@@ -599,6 +612,91 @@ export default function CaseDetail() {
       return parts;
     } catch { return null; }
   };
+
+  const renderPdfWithHighlight = async (url: string, page: number, highlightText: string) => {
+    const canvas = pdfCanvasRef.current;
+    if (!canvas) { setPdfError(true); return; }
+    setPdfError(false);
+    try {
+      setPdfLoading(true);
+      if (!(window as any).pdfjsLib) {
+        await new Promise<void>((resolve, reject) => {
+          const s = document.createElement('script');
+          s.src = '/pdfjs/pdf.min.js';
+          s.onload = () => resolve();
+          s.onerror = () => reject(new Error('PDF.js load failed'));
+          document.head.appendChild(s);
+        });
+      }
+      const pdfjsLib = (window as any).pdfjsLib;
+      pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdfjs/pdf.worker.min.js';
+      const pdf = await pdfjsLib.getDocument(url).promise;
+      const pdfPage = await pdf.getPage(page);
+      const scale = 2.0;
+      const viewport = pdfPage.getViewport({ scale });
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      await pdfPage.render({ canvasContext: ctx, viewport }).promise;
+      const textContent = await pdfPage.getTextContent();
+      const items = (textContent.items as any[]).filter((it: any) => it.str && it.str.trim());
+      const cleanSearch = highlightText.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+      if (!cleanSearch) return;
+      let fullText = '';
+      const itemMap: { start: number; end: number; item: any }[] = [];
+      for (const item of items) {
+        itemMap.push({ start: fullText.length, end: fullText.length + item.str.length, item });
+        fullText += item.str;
+      }
+      const normFull = fullText.toLowerCase();
+      let searchStr = cleanSearch.substring(0, 80);
+      let matchIdx = normFull.indexOf(searchStr);
+      if (matchIdx === -1) {
+        const escaped = searchStr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const regex = new RegExp(escaped.replace(/ /g, '\\s+'), 'i');
+        const m = regex.exec(fullText);
+        if (m) { matchIdx = m.index; searchStr = m[0].toLowerCase(); }
+      }
+      if (matchIdx === -1) return;
+      const matchEnd = matchIdx + searchStr.length;
+      const overlapping = itemMap.filter(p => p.start < matchEnd && p.end > matchIdx);
+      if (overlapping.length === 0) return;
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const p of overlapping) {
+        const t = p.item.transform;
+        const x = t[4], y = t[5], w = p.item.width || 0, h = p.item.height || 0;
+        minX = Math.min(minX, x);
+        minY = Math.min(minY, y);
+        maxX = Math.max(maxX, x + w);
+        maxY = Math.max(maxY, y + h);
+      }
+      const pageH = pdfPage.view[3];
+      const pad = 4;
+      const hx = (minX - pad) * scale;
+      const hy = (pageH - maxY - pad) * scale;
+      const hw = (maxX - minX + pad * 2) * scale;
+      const hh = (maxY - minY + pad * 2) * scale;
+      ctx.save();
+      ctx.fillStyle = 'rgba(250, 204, 21, 0.35)';
+      ctx.fillRect(hx, hy, hw, hh);
+      ctx.strokeStyle = 'rgba(202, 138, 4, 0.9)';
+      ctx.lineWidth = 3;
+      ctx.strokeRect(hx, hy, hw, hh);
+      ctx.restore();
+    } catch (e) {
+      console.error('PDF highlight error:', e);
+      setPdfError(true);
+    } finally {
+      setPdfLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (evidencePreview) {
+      setPdfLoading(true);
+    }
+  }, [evidencePreview]);
 
   const filteredData = useMemo(() => {
     if (!timeline.length || !graphData.nodes.length) return graphData;
@@ -1110,46 +1208,44 @@ export default function CaseDetail() {
               </div>
             </div>
 
-            <div className="flex-1 bg-slate-200 dark:bg-slate-950 overflow-auto custom-scrollbar relative">
-              {/* WRAPPER CARE SCROLEAZA TOTUL (PDF + BARA) */}
-              <div className="relative w-full" style={{ height: '1500px', minWidth: '100%' }}>
-                <iframe 
-                    key={`${evidencePreview.url}-${evidencePreview.page}`} 
-                    src={`${evidencePreview.url}#page=${evidencePreview.page}&view=FitH&toolbar=0&navpanes=0`} 
-                    className="absolute inset-0 w-full h-full border-none pointer-events-none" 
-                />
-                
-                {/* CHENAR ROSU (Acum se va misca odata cu scroll-ul de deasupra) */}
-                {evidencePreview.spatial && parseSpatial(evidencePreview.spatial) && (
-                  <div 
-                    className="absolute border-[6px] border-rose-500 bg-rose-500/5 pointer-events-none z-10 shadow-[0_0_0_2000px_rgba(0,0,0,0.4)]"
-                    style={{
-                      left: `${(parseSpatial(evidencePreview.spatial).x / 595) * 100}%`,
-                      top: `${(parseSpatial(evidencePreview.spatial).y / 842) * 100}%`,
-                      width: `${(parseSpatial(evidencePreview.spatial).w / 595) * 100}%`,
-                      height: `${(parseSpatial(evidencePreview.spatial).h / 842) * 100}%`,
-                      transform: 'translate(-3px, -3px)'
-                    }}
-                  >
-                    <div className="absolute -top-7 left-0 bg-rose-500 text-white text-[9px] font-black px-2 py-1 rounded shadow-lg uppercase tracking-widest whitespace-nowrap">
-                       <Crosshair className="w-3 h-3 inline mr-1" /> Pasaj Identificat
-                    </div>
-                  </div>
-                )}
-              </div>
+            <div className="flex-1 bg-slate-200 dark:bg-slate-950 relative">
+              {pdfLoading && (
+                <div className="absolute inset-0 flex items-center justify-center bg-white/80 dark:bg-slate-900/80 z-10">
+                  <Loader2 className="w-8 h-8 text-yellow-500 animate-spin" />
+                </div>
+              )}
+              <iframe
+                key={`${evidencePreview.url}#page=${evidencePreview.page}`}
+                src={`${evidencePreview.url}#page=${evidencePreview.page}&zoom=page-width`}
+                className="w-full h-full border-0"
+                title="PDF Preview"
+                onLoad={() => setPdfLoading(false)}
+              />
             </div>
 
             {evidencePreview.text && (
-               <div className="p-8 bg-white dark:bg-slate-950 border-t-2 border-indigo-500/20 shadow-2xl">
-                 <h4 className="text-[10px] font-black text-indigo-500 uppercase tracking-[0.2em] mb-4 flex items-center gap-2">
-                   <ScrollText className="w-4 h-4" /> Fragment Probat
-                 </h4>
-                 <div className="bg-indigo-500/5 dark:bg-slate-900 p-6 rounded-2xl border border-indigo-500/10 relative">
-                   <div className="absolute top-0 left-0 w-1 h-full bg-indigo-500 rounded-l-2xl"></div>
-                   <p className="text-sm text-slate-700 dark:text-slate-300 font-bold leading-relaxed italic">"{evidencePreview.text}"</p>
-                 </div>
-               </div>
-            )}
+                <div className="p-6 bg-white dark:bg-slate-950 border-t-2 border-yellow-400/40 shadow-2xl">
+                  <div className="flex items-center justify-between mb-3">
+                    <h4 className="text-[10px] font-black text-yellow-600 dark:text-yellow-400 uppercase tracking-[0.2em] flex items-center gap-2">
+                      <ScrollText className="w-4 h-4" /> Fragment Evidențiat
+                    </h4>
+                    <button
+                      onClick={() => navigator.clipboard.writeText(evidencePreview.text)}
+                      className="text-[9px] font-bold text-slate-400 hover:text-yellow-600 dark:hover:text-yellow-400 uppercase tracking-wider transition-colors"
+                    >
+                      Copiază
+                    </button>
+                  </div>
+                  <div className="bg-yellow-50 dark:bg-yellow-500/5 p-5 rounded-xl border-2 border-yellow-400/60 dark:border-yellow-500/30 relative shadow-[0_0_20px_rgba(250,204,21,0.15)]">
+                    <div className="absolute top-0 left-0 w-1.5 h-full bg-yellow-400 rounded-l-xl"></div>
+                    <p className="text-sm text-slate-900 dark:text-slate-100 font-semibold leading-relaxed pl-2">
+                      <mark className="bg-yellow-200/80 dark:bg-yellow-500/25 text-slate-900 dark:text-yellow-50 px-0.5 py-0.5 rounded-sm">
+                        {evidencePreview.text}
+                      </mark>
+                    </p>
+                  </div>
+                </div>
+             )}
           </div>
         )}
       </div>

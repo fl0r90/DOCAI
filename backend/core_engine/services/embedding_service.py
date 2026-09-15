@@ -4,20 +4,24 @@ from typing import Optional, List
 
 class EmbeddingService:
     """
-    Serviciu unificat de embeddings (Forensic DocAI v0.7.0):
-    - Mod 'ollama': folosește containerul Ollama (/api/embeddings, model bge-m3)
+    Serviciu unificat de embeddings (Forensic DocAI v0.8.0):
+    - Mod 'ollama': folosește containerul Ollama (/api/embed, model qwen3-embedding:8b)
     - Mod 'lmstudio' / 'openai': folosește endpoint-ul OpenAI-compatible /v1/embeddings
     - Mod 'cpu': folosește sentence_transformers pe CPU pentru a elibera 100% din memoria GPU (0 VRAM)
     """
     _cpu_model = None
+    EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
 
     @classmethod
-    def get_embedding(cls, text_input: str, model: str = "bge-m3") -> Optional[List[float]]:
+    def get_embedding(cls, text_input: str, model: str = None) -> Optional[List[float]]:
         if not text_input or not text_input.strip():
             return None
 
+        if model is None:
+            model = os.getenv("EMBEDDING_MODEL", "qwen3-embedding:8b")
+
         engine = os.getenv("EMBEDDING_ENGINE", "ollama").lower()
-        
+
         # 1. CPU Mode (Zero VRAM)
         if engine in ["cpu", "sentence_transformers", "local"]:
             try:
@@ -39,7 +43,7 @@ class EmbeddingService:
                 api_key = os.getenv("LMSTUDIO_API_KEY", "")
                 if api_key:
                     headers["Authorization"] = f"Bearer {api_key}"
-                res = requests.post(emb_url, headers=headers, json={"model": model, "input": text_input[:4000]}, timeout=30)
+                res = requests.post(emb_url, headers=headers, json={"model": model, "input": text_input[:4000]}, timeout=60)
                 if res.status_code == 200:
                     data = res.json()
                     items = data.get("data", [])
@@ -48,18 +52,19 @@ class EmbeddingService:
             except Exception as e:
                 print(f"[!] LM Studio Embedding error, falling back to Ollama: {e}")
 
-        # 3. Default: Ollama (/api/embeddings)
+        # 3. Default: Ollama (/api/embed)
         try:
             ollama_url = os.getenv("OLLAMA_URL", "http://llm:11434").rstrip("/")
             res = requests.post(
-                f"{ollama_url}/api/embeddings",
-                json={"model": "bge-m3", "prompt": text_input[:4000], "keep_alive": 300},
-                timeout=30
+                f"{ollama_url}/api/embed",
+                json={"model": model, "input": text_input[:4000], "dimensions": cls.EMBEDDING_DIM, "keep_alive": 300},
+                timeout=60
             )
             if res.status_code == 200:
-                emb = res.json().get("embedding")
-                if emb:
-                    return emb
+                data = res.json()
+                embeddings = data.get("embeddings", [])
+                if embeddings:
+                    return embeddings[0]
         except Exception as e:
             print(f"[!] Ollama Embedding error: {e}")
 

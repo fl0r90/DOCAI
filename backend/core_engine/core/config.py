@@ -32,7 +32,10 @@ def get_llm_config():
             # LM Studio Settings (Local / Remote)
             "lmstudio_url": config.get("lmstudio_url", os.getenv("LMSTUDIO_URL", "http://host.docker.internal:1234/v1")),
             "lmstudio_api_key": config.get("lmstudio_api_key", ""),
-            "lmstudio_timeout": int(config.get("lmstudio_timeout", 300))
+            "lmstudio_timeout": int(config.get("lmstudio_timeout", 300)),
+
+            # Ollama API mode: "native" (/api/chat) | "openai" (/v1/chat/completions)
+            "ollama_api_mode": config.get("ollama_api_mode", os.getenv("OLLAMA_API_MODE", "native")),
         }
     except:
         return {
@@ -43,7 +46,8 @@ def get_llm_config():
             "vllm_kv_cache_dtype": "turboquant", "vllm_gpu_utilization": 0.90, "vllm_max_model_len": 32768,
             "lmstudio_url": os.getenv("LMSTUDIO_URL", "http://host.docker.internal:1234/v1"),
             "lmstudio_api_key": "",
-            "lmstudio_timeout": 300
+            "lmstudio_timeout": 300,
+            "ollama_api_mode": os.getenv("OLLAMA_API_MODE", "native"),
         }
     finally:
         db.close()

@@ -175,22 +175,36 @@ class SemanticChunker:
         sections = []
         current_header_hierarchy = []
         current_section_lines = []
+        current_page = page_no
 
         def get_header_path():
             return " > ".join(current_header_hierarchy) if current_header_hierarchy else ""
 
+        def flush_section():
+            nonlocal current_section_lines
+            if current_section_lines:
+                text = "\n".join(current_section_lines).strip()
+                if text:
+                    sections.append({
+                        "header_path": get_header_path(),
+                        "text": text,
+                        "page_number": current_page
+                    })
+                current_section_lines = []
+
         for line in lines:
-            header_match = re.match(r'^(#{1,4})\s+(.+)$', line.strip())
+            stripped = line.strip()
+            page_marker = re.match(r'^<!--\s*PAGE:\s*(\d+)\s*-->$', stripped)
+            if page_marker:
+                flush_section()
+                current_page = int(page_marker.group(1))
+                continue
+            header_match = re.match(r'^(#{1,4})\s+(.+)$', stripped)
             if header_match:
                 level = len(header_match.group(1))
                 title = header_match.group(2).strip()
 
-                if current_section_lines:
-                    sections.append({
-                        "header_path": get_header_path(),
-                        "text": "\n".join(current_section_lines).strip()
-                    })
-                    current_section_lines = []
+                flush_section()
 
                 if level <= len(current_header_hierarchy):
                     current_header_hierarchy = current_header_hierarchy[:level-1]
@@ -198,11 +212,7 @@ class SemanticChunker:
             else:
                 current_section_lines.append(line)
 
-        if current_section_lines:
-            sections.append({
-                "header_path": get_header_path(),
-                "text": "\n".join(current_section_lines).strip()
-            })
+        flush_section()
 
         final_chunks = []
         chunk_idx = 0
@@ -212,6 +222,7 @@ class SemanticChunker:
             if not sec_text:
                 continue
 
+            sec_page = sec.get("page_number", page_no)
             header_path = sec["header_path"]
             context_header = f"[Doc: {filename} | {header_path}]" if (filename and header_path) else (
                 f"[Doc: {filename}]" if filename else (f"[{header_path}]" if header_path else "")
@@ -238,7 +249,7 @@ class SemanticChunker:
                         "parent_content": parent_content,
                         "is_table": False,
                         "header_path": header_path,
-                        "page_number": page_no
+                        "page_number": sec_page
                     })
                     chunk_idx += 1
                 accumulated_narrative = []
@@ -260,7 +271,7 @@ class SemanticChunker:
                             "parent_content": parent_table_content,
                             "is_table": True,
                             "header_path": header_path,
-                            "page_number": page_no
+                            "page_number": sec_page
                         })
                         chunk_idx += 1
                 else:

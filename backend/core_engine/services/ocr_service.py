@@ -74,6 +74,28 @@ def _is_digital_pdf(file_path: str, min_chars_per_page: int = 80, sample_pages: 
         print(f"[!] Verificare digitală PDF eșuată ({e}), fallback la OCR.")
         return False
 
+def _insert_page_markers(md_text: str, page_first_snippets: list) -> str:
+    """Insert <!-- PAGE: N --> markers at page boundaries in markdown.
+    page_first_snippets: list of (page_no, first_text_snippet) in document order.
+    """
+    if not page_first_snippets or len(page_first_snippets) <= 1:
+        return md_text
+    result = md_text
+    for page_no, snippet in reversed(page_first_snippets[1:]):
+        if not snippet:
+            continue
+        search = snippet[:60].strip()
+        if len(search) < 10:
+            search = snippet[:30].strip()
+        if not search:
+            continue
+        idx = result.find(search)
+        if idx != -1:
+            marker = f"\n<!-- PAGE: {page_no} -->\n"
+            result = result[:idx] + marker + result[idx:]
+    return result
+
+
 def _process_with_docling(converter: DocumentConverter, file_path: str) -> dict:
     """Execută conversia via Docling și extrage Markdown, chunks și items structurate."""
     result = converter.convert(file_path)
@@ -81,6 +103,8 @@ def _process_with_docling(converter: DocumentConverter, file_path: str) -> dict:
 
     chunks = []
     items = []
+    page_first_snippets = []
+    seen_pages = set()
     for item in result.document.texts:
         page_no = 1
         spatial = ""
@@ -98,6 +122,9 @@ def _process_with_docling(converter: DocumentConverter, file_path: str) -> dict:
         })
         if item.text and item.text.strip():
             items.append({"type": "TEXT", "content": item.text, "page": page_no})
+            if page_no not in seen_pages:
+                seen_pages.add(page_no)
+                page_first_snippets.append((page_no, item.text.strip()))
 
     for table in getattr(result.document, "tables", []) or []:
         try:
@@ -120,6 +147,8 @@ def _process_with_docling(converter: DocumentConverter, file_path: str) -> dict:
                 "spatial": table_spatial,
                 "is_table": True
             })
+
+    md_text = _insert_page_markers(md_text, page_first_snippets)
 
     return {
         "markdown": md_text,

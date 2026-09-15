@@ -41,9 +41,10 @@ class EntityResolver:
         self.noise_keywords = ['uber', 'bolt', 'glovo', 'lidl', 'kaufland', 'carrefour', 'mega image', 'omv', 'petrom', 'mol', 'profi', 'auchan', 'ikea', 'penny', 'magazin', 'farmacia', 'retea', 'tpark', 'google', 'youtube', 'emag', 'allianz', 'asigurare', 'eon', 'orange', 'vodafone', 'digi', 'enel']
         if db_session:
             try:
-                config = db_session.execute(text("SELECT value FROM system_config WHERE key = 'noise_keywords'")).first()
+                config = db_session.execute(text("SELECT value FROM system_settings WHERE key = 'noise_keywords'")).first()
                 if config: self.noise_keywords = config[0]
-            except: pass
+            except Exception:
+                db_session.rollback()
 
     def is_noise(self, description):
         desc_lower = str(description).lower()
@@ -102,6 +103,40 @@ def _create_chunks_and_embeddings(doc_id, chunks_data, filename="unknown", raw_m
     # Generate semantic chunks
     if raw_markdown and len(raw_markdown.strip()) > 10:
         semantic_chunks = semantic_chunker.chunk_markdown(raw_markdown, filename=filename)
+        # Assign correct page numbers using position-based matching
+        if chunks_list:
+            pos_pages = []
+            for item in chunks_list:
+                if isinstance(item, dict):
+                    c = (item.get("content") or "").strip()
+                    p = item.get("page", 1)
+                    if c and len(c) > 10:
+                        idx = raw_markdown.find(c[:50])
+                        if idx != -1:
+                            pos_pages.append((idx, p))
+            pos_pages.sort(key=lambda x: x[0])
+            if pos_pages:
+                for sc in semantic_chunks:
+                    chunk_content = sc.get("content", "")
+                    clean = re.sub(r'^\[Doc:[^\]]*\]\s*', '', chunk_content).strip()
+                    if not clean:
+                        continue
+                    search = clean[:80].strip()
+                    if not search:
+                        continue
+                    idx = raw_markdown.find(search)
+                    if idx == -1:
+                        search = clean[:40].strip()
+                        idx = raw_markdown.find(search)
+                    if idx == -1:
+                        continue
+                    page = 1
+                    for pos, p in pos_pages:
+                        if pos <= idx:
+                            page = p
+                        else:
+                            break
+                    sc["page_number"] = page
     else:
         # Fallback if no raw markdown is present
         semantic_chunks = []

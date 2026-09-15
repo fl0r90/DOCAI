@@ -4,13 +4,17 @@ import requests
 import json
 import re
 import time
+import redis
+from typing import List, Dict
 from sqlalchemy import text, or_, and_
 from ..database import engine, SessionLocal
 from ..core.config import get_llm_config, get_active_model_name
 from ..models import DocumentChunk, Document, ChatMessage, Case
 from .. import models
 from .graph_service import GraphService
-from .llm_client import UnifiedLLMClient
+from .llm_client import UnifiedLLMClient, ChatStoppedError
+
+_r = redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://llm:11434")
 VLLM_URL = os.getenv("VLLM_URL", "http://v2-vllm:8000/v1")
@@ -133,6 +137,13 @@ class AgenticInvestigator:
         self._load_history()
         self._pre_process_query()
 
+    def _stop_check(self) -> bool:
+        """Verifică flag-ul de stop din Redis (setat de POST /cases/{id}/chat/stop)."""
+        try:
+            return bool(_r.exists(f"chat_stop_{self.case_id}"))
+        except Exception:
+            return False
+
     def _render_scratchpad(self) -> str:
         lines = ["=== PROGRESSIVE WORKING MEMORY (TEMPORARY SCRATCHPAD) ==="]
         for i, data in self.scratchpad.items():
@@ -197,6 +208,11 @@ class AgenticInvestigator:
                         clean_content = clean_content[:600] + "\n[... Conținut anterior sintetizat ...]"
                 if clean_content:
                     self.history.append({"role": m.role, "content": clean_content})
+            
+            # Truncate history to prevent unbounded growth
+            max_history = int(UnifiedLLMClient.get_engine_config().get("max_messages", 12))
+            if len(self.history) > max_history:
+                self.history = self.history[-max_history:]
 
     def _pre_process_query(self):
         """Initial check for obvious entities and dates to seed the prompt."""
@@ -538,12 +554,86 @@ class AgenticInvestigator:
 
             return "\n\n".join(final_res) + graph_context
 
+    def _compress_scratchpad(self, scratchpad: str, chat_ctx: int) -> str:
+        """Comprimă scratchpad-ul dacă depășește 50% din bugetul de context."""
+        max_scratch_chars = int(chat_ctx * 3.5 * 0.5)  # 50% din context
+        if len(scratchpad) <= max_scratch_chars:
+            return scratchpad
+        
+        print(f"[SCRATCHPAD] Comprimare necesară: {len(scratchpad):,} > {max_scratch_chars:,} caractere")
+        prompt_compress = f"""Comprimă următorul scratchpad forensic în maximum {max_scratch_chars // 2} caractere, păstrând TOATE faptele esențiale, citatele, și concluziile. Elimină redundanțele și detaliile minore.
+
+SCRATCHPAD CURENT:
+{scratchpad}
+
+Răspunde EXCLUSIV cu scratchpad-ul comprimat (format bullet-points)."""
+        
+        try:
+            res = UnifiedLLMClient.chat_step(
+                messages=[{"role": "user", "content": prompt_compress}],
+                tools=None,
+                model=self.active_model,
+                temperature=0.0,
+                num_ctx=chat_ctx,
+                stop_check=self._stop_check
+            )
+            compressed = res.get("content", "").strip()
+            if compressed and len(compressed) < len(scratchpad):
+                print(f"[SCRATCHPAD] Comprimat de la {len(scratchpad):,} la {len(compressed):,} caractere")
+                return compressed
+        except Exception as e:
+            print(f"[SCRATCHPAD] Eroare la comprimare: {e}")
+        
+        # Fallback: trunchiază simplu
+        return scratchpad[:max_scratch_chars] + "\n[... comprimat automat ...]"
+
+    def _load_scratchpad_state(self, doc_id: int) -> tuple:
+        """Încarcă starea salvată a scratchpad-ului din Redis (pentru resume)."""
+        key = f"scratchpad_{self.case_id}_{doc_id}"
+        try:
+            state = _r.get(key)
+            if state:
+                data = json.loads(state)
+                print(f"[SCRATCHPAD] Resume de la calupul {data.get('chunk_idx', 0)}")
+                return data.get("scratchpad", ""), data.get("chunk_idx", 0)
+        except Exception as e:
+            print(f"[SCRATCHPAD] Eroare la încărcare stare: {e}")
+        return "", 0
+
+    def _save_scratchpad_state(self, doc_id: int, scratchpad: str, chunk_idx: int):
+        """Salvează starea scratchpad-ului în Redis (pentru resume)."""
+        key = f"scratchpad_{self.case_id}_{doc_id}"
+        try:
+            _r.set(key, json.dumps({
+                "scratchpad": scratchpad,
+                "chunk_idx": chunk_idx,
+                "timestamp": time.time()
+            }), ex=3600)  # Expiră în 1 oră
+        except Exception as e:
+            print(f"[SCRATCHPAD] Eroare la salvare stare: {e}")
+
+    def _clear_scratchpad_state(self, doc_id: int):
+        """Șterge starea scratchpad-ului din Redis (după finalizare)."""
+        key = f"scratchpad_{self.case_id}_{doc_id}"
+        try:
+            _r.delete(key)
+        except Exception:
+            pass
+
     def run_rolling_scratchpad_digest(self, doc_id: int, focus_query: str):
         """
         Generator de investigație iterativă (Rolling Scratchpad) pentru documente voluminoase/cărți.
         Parcurge 100% din text în calupuri consecutive, menținând și actualizând memoria de lucru.
         Produce tupluri: (status_message, is_final, final_observation)
+        
+        Îmbunătățiri:
+        - Resume capability: salvează starea în Redis, poate relua de la ultimul calup
+        - Per-chunk retry: reîncearcă calupurile eșuate de 2 ori
+        - Scratchpad compression: comprimă automat când depășește 50% din context
+        - Progress tracking: afișează procent și timp scurs
         """
+        start_time = time.time()
+        
         with SessionLocal() as db:
             doc_obj = None
             if doc_id and doc_id > 0:
@@ -596,15 +686,35 @@ class AgenticInvestigator:
                 curr_pos = end_pos - overlap
 
             total_batches = len(slices)
-            current_scratchpad = ""
             effective_query = focus_query or self.user_question
 
-            yield (f"Pornire Rolling Scratchpad pentru '{doc_obj.filename}' ({len(raw):,} car., {total_batches} calupuri)...", False, "")
+            # Încearcă să reia de la ultima stare salvată
+            current_scratchpad, resume_idx = self._load_scratchpad_state(doc_obj.id)
+            if resume_idx > 0:
+                yield (f"🔄 Reluare Rolling Scratchpad de la calupul {resume_idx + 1}/{total_batches}...", False, "")
+            else:
+                yield (f"Pornire Rolling Scratchpad pentru '{doc_obj.filename}' ({len(raw):,} car., {total_batches} calupuri)...", False, "")
 
+            max_retries = 2
+            
             for idx, (s_start, s_end, batch_text) in enumerate(slices, 1):
-                yield (f"📖 [Rolling Scratchpad {idx}/{total_batches}] Analiză text ({s_start:,} - {s_end:,} car.)...", False, "")
+                # Sare peste calupurile deja procesate (resume)
+                if idx <= resume_idx:
+                    continue
+                
+                # Verifică stop înainte de fiecare calup
+                if self._stop_check():
+                    raise ChatStoppedError("Stop request received during Rolling Scratchpad.")
+                
+                elapsed = time.time() - start_time
+                pct = int((idx - 1) / total_batches * 100)
+                yield (f"📖 [Rolling Scratchpad {idx}/{total_batches}] {pct}% | {elapsed:.0f}s | Analiză text ({s_start:,} - {s_end:,} car.)...", False, "")
 
-                prompt_scratch = f"""Ești un Auditor Investigativ și Cercetător Textual Riguros.
+                # Încearcă procesarea calupului cu retry
+                success = False
+                for attempt in range(max_retries + 1):
+                    try:
+                        prompt_scratch = f"""Ești un Auditor Investigativ și Cercetător Textual Riguros.
 Obiectivul investigației / Întrebare:
 {effective_query}
 
@@ -624,20 +734,45 @@ Obiectivul investigației / Întrebare:
    - Păstrează textul condensat și telegrafic (fără introduceri de politețe sau meta-comentarii).
 4. Răspunde EXCLUSIV cu noul SCRATCHPAD sintetizat în limba română (format bullet-points structurat)."""
 
-                try:
-                    res = UnifiedLLMClient.chat_step(
-                        messages=[{"role": "user", "content": prompt_scratch}],
-                        tools=None,
-                        model=self.active_model,
-                        temperature=0.0,
-                        num_ctx=chat_ctx
-                    )
-                    new_scratch = res.get("content", "").strip()
-                    if new_scratch:
-                        current_scratchpad = new_scratch
-                except Exception as ex:
-                    yield (f"Avertisment la calupul {idx}: {ex}", False, "")
+                        res = UnifiedLLMClient.chat_step(
+                            messages=[{"role": "user", "content": prompt_scratch}],
+                            tools=None,
+                            model=self.active_model,
+                            temperature=0.0,
+                            num_ctx=chat_ctx,
+                            stop_check=self._stop_check
+                        )
+                        new_scratch = res.get("content", "").strip()
+                        if new_scratch:
+                            current_scratchpad = new_scratch
+                            success = True
+                            break
+                    except ChatStoppedError:
+                        raise
+                    except Exception as ex:
+                        if attempt < max_retries:
+                            wait_time = (attempt + 1) * 2  # 2s, 4s
+                            print(f"[SCRATCHPAD] Calup {idx} eșuat (attempt {attempt + 1}): {ex}. Reîncercare în {wait_time}s...")
+                            yield (f"⚠️ Calup {idx} eșuat, reîncercare în {wait_time}s... (attempt {attempt + 1}/{max_retries + 1})", False, "")
+                            time.sleep(wait_time)
+                        else:
+                            print(f"[SCRATCHPAD] Calup {idx} eșuat definitiv: {ex}")
+                            yield (f"❌ Calup {idx} eșuat după {max_retries + 1} încercări: {ex}. Continui cu scratchpad-ul anterior.", False, "")
 
+                # Salvează starea după fiecare calup reușit
+                if success:
+                    self._save_scratchpad_state(doc_obj.id, current_scratchpad, idx)
+                    
+                    # Comprimă scratchpad-ul dacă e prea mare
+                    if len(current_scratchpad) > int(chat_ctx * 3.5 * 0.5):
+                        yield (f"🗜️ Comprimare scratchpad ({len(current_scratchpad):,} caractere)...", False, "")
+                        current_scratchpad = self._compress_scratchpad(current_scratchpad, chat_ctx)
+                        self._save_scratchpad_state(doc_obj.id, current_scratchpad, idx)
+
+            # Curăță starea salvată
+            self._clear_scratchpad_state(doc_obj.id)
+
+            elapsed = time.time() - start_time
             citation_id = len(self.citations) + 1
             self.citations.append({
                 "id": citation_id,
@@ -650,7 +785,7 @@ Obiectivul investigației / Întrebare:
 
             final_header = f"[REF {citation_id} - ROLLING SCRATCHPAD DIGEST ({doc_obj.filename} - Acoperire 100% în {total_batches} calupuri)]"
             final_observation = f"{final_header}:\n{current_scratchpad}"
-            yield (f"Finalizat Rolling Scratchpad pe tot documentul ({total_batches}/{total_batches} calupuri)!", True, final_observation)
+            yield (f"✅ Finalizat Rolling Scratchpad ({total_batches}/{total_batches} calupuri, {elapsed:.0f}s)!", True, final_observation)
 
     def tool_fetch_full_document(self, doc_id: int, focus_terms: str = ""):
         """Tool: Retrieve complete full-text or progressive scratchpad digest when document exceeds context window."""
@@ -1183,6 +1318,10 @@ FINAL RESPONSE FORMAT (ROMANIAN):
             if step > 1 and not has_used_tools and step < 4:
                 messages.append({"role": "user", "content": "You haven't used any tools yet. Use SEARCH_TEXT or SEARCH_STRUCTURED_DATA to find evidence before concluding."})
             
+            # Truncate messages to prevent context overflow and timeouts
+            max_messages = int(UnifiedLLMClient.get_engine_config().get("max_messages", 12))
+            messages = truncate_messages(messages, max_messages)
+            
             chat_ctx = int(UnifiedLLMClient.get_engine_config().get("chat_ctx", 16384))
             try:
                 chat_res = UnifiedLLMClient.chat_step(
@@ -1190,15 +1329,27 @@ FINAL RESPONSE FORMAT (ROMANIAN):
                     tools=current_tools,
                     model=self.active_model,
                     temperature=0.0,
-                    num_ctx=chat_ctx
+                    num_ctx=chat_ctx,
+                    stop_check=self._stop_check
                 )
                 assistant_msg = {
                     "role": "assistant",
                     "content": chat_res.get("content", ""),
                     "tool_calls": chat_res.get("tool_calls", [])
                 }
+            except ChatStoppedError:
+                yield json.dumps({"type": "final", "data": "Investigație oprită de utilizator.", "citations": self.citations})
+                return
             except Exception as e:
-                yield json.dumps({"type": "final", "data": f"Eroare LLM Engine (Timeout/500): {e}"})
+                err_msg = str(e)
+                if hasattr(e, 'response') and e.response is not None:
+                    try:
+                        resp_text = e.response.text[:2000]
+                        if resp_text != err_msg:
+                            err_msg = f"{err_msg} | Response: {resp_text}"
+                    except Exception:
+                        pass
+                yield json.dumps({"type": "final", "data": f"Eroare LLM Engine (Timeout/500): {err_msg}"})
                 return
 
             messages.append(assistant_msg)
@@ -1290,50 +1441,56 @@ FINAL RESPONSE FORMAT (ROMANIAN):
                     yield json.dumps({"type": "tool_call", "tool": t_name, "params": str(t_args)})
                     
                     observation = ""
-                    if t_name == "SEARCH_STRUCTURED_DATA":
-                        observation = self.tool_search_transactions(
-                            subject=t_args.get("subject", "") if isinstance(t_args, dict) else "", 
-                            date_filter=t_args.get("date_filter", "") if isinstance(t_args, dict) else "",
-                            match_pattern=t_args.get("match_pattern", "") if isinstance(t_args, dict) else "",
-                            aggregate=t_args.get("aggregate", False) if isinstance(t_args, dict) else False,
-                            limit=int(t_args.get("limit", 30)) if isinstance(t_args, dict) and t_args.get("limit") is not None else 30
-                        )
-                    elif t_name == "SEARCH_TEXT":
-                        observation = self.tool_search_text(t_args.get("concept", ""), t_args.get("semantic_intent", ""))
-                    elif t_name == "ROLLING_SCRATCHPAD_AUDIT":
-                        t_doc_id = int(t_args.get("doc_id", 0)) if isinstance(t_args, dict) else 0
-                        t_focus = (t_args.get("focus_query") or t_args.get("focus_terms") or self.user_question) if isinstance(t_args, dict) else self.user_question
-                        for status_msg, is_final, final_obs in self.run_rolling_scratchpad_digest(t_doc_id, t_focus):
-                            yield json.dumps({"type": "observation", "data": status_msg})
-                            if is_final:
-                                observation = final_obs
-                    elif t_name == "FETCH_FULL_DOCUMENT":
-                        t_doc_id = int(t_args.get("doc_id", 0)) if isinstance(t_args, dict) else 0
-                        t_focus = (t_args.get("focus_terms") or self.user_question) if isinstance(t_args, dict) else ""
-                        with SessionLocal() as db_chk:
-                            d_chk = db_chk.query(Document).filter(Document.id == t_doc_id).first()
-                            d_len = len(d_chk.raw_text or "") if d_chk else 0
-                        budget = self._get_context_budget()
-                        if d_len > budget["doc_context_limit"]:
+                    try:
+                        if t_name == "SEARCH_STRUCTURED_DATA":
+                            observation = self.tool_search_transactions(
+                                subject=t_args.get("subject", "") if isinstance(t_args, dict) else "", 
+                                date_filter=t_args.get("date_filter", "") if isinstance(t_args, dict) else "",
+                                match_pattern=t_args.get("match_pattern", "") if isinstance(t_args, dict) else "",
+                                aggregate=t_args.get("aggregate", False) if isinstance(t_args, dict) else False,
+                                limit=int(t_args.get("limit", 30)) if isinstance(t_args, dict) and t_args.get("limit") is not None else 30
+                            )
+                        elif t_name == "SEARCH_TEXT":
+                            observation = self.tool_search_text(t_args.get("concept", ""), t_args.get("semantic_intent", ""))
+                        elif t_name == "ROLLING_SCRATCHPAD_AUDIT":
+                            t_doc_id = int(t_args.get("doc_id", 0)) if isinstance(t_args, dict) else 0
+                            t_focus = (t_args.get("focus_query") or t_args.get("focus_terms") or self.user_question) if isinstance(t_args, dict) else self.user_question
                             for status_msg, is_final, final_obs in self.run_rolling_scratchpad_digest(t_doc_id, t_focus):
                                 yield json.dumps({"type": "observation", "data": status_msg})
                                 if is_final:
                                     observation = final_obs
+                        elif t_name == "FETCH_FULL_DOCUMENT":
+                            t_doc_id = int(t_args.get("doc_id", 0)) if isinstance(t_args, dict) else 0
+                            t_focus = (t_args.get("focus_terms") or self.user_question) if isinstance(t_args, dict) else ""
+                            with SessionLocal() as db_chk:
+                                d_chk = db_chk.query(Document).filter(Document.id == t_doc_id).first()
+                                d_len = len(d_chk.raw_text or "") if d_chk else 0
+                            budget = self._get_context_budget()
+                            if d_len > budget["doc_context_limit"]:
+                                for status_msg, is_final, final_obs in self.run_rolling_scratchpad_digest(t_doc_id, t_focus):
+                                    yield json.dumps({"type": "observation", "data": status_msg})
+                                    if is_final:
+                                        observation = final_obs
+                            else:
+                                observation = self.tool_fetch_full_document(doc_id=t_doc_id, focus_terms=t_focus)
+                        elif t_name == "EXPLORE_GRAPH":
+                            observation = self.tool_explore_graph(t_args.get("entity", ""))
+                        elif t_name == "TIMELINE":
+                            observation = self.tool_timeline(t_args.get("entity", ""))
+                        elif t_name == "CALCULATE":
+                            observation = self.tool_calculate(t_args.get("expression", ""))
+                        elif t_name == "DETECT_FINANCIAL_ANOMALIES":
+                            from .anomaly_service import anomaly_service
+                            with SessionLocal() as db:
+                                res = anomaly_service.analyze_case(self.case_id, db)
+                                observation = json.dumps(res, indent=2, ensure_ascii=False)
                         else:
-                            observation = self.tool_fetch_full_document(doc_id=t_doc_id, focus_terms=t_focus)
-                    elif t_name == "EXPLORE_GRAPH":
-                        observation = self.tool_explore_graph(t_args.get("entity", ""))
-                    elif t_name == "TIMELINE":
-                        observation = self.tool_timeline(t_args.get("entity", ""))
-                    elif t_name == "CALCULATE":
-                        observation = self.tool_calculate(t_args.get("expression", ""))
-                    elif t_name == "DETECT_FINANCIAL_ANOMALIES":
-                        from .anomaly_service import anomaly_service
-                        with SessionLocal() as db:
-                            res = anomaly_service.analyze_case(self.case_id, db)
-                            observation = json.dumps(res, indent=2, ensure_ascii=False)
-                    else:
-                        observation = "Unknown tool."
+                            observation = "Unknown tool."
+                    except ChatStoppedError:
+                        yield json.dumps({"type": "final", "data": "Investigație oprită de utilizator.", "citations": self.citations})
+                        return
+                    except Exception as e:
+                        observation = f"Eroare la executarea tool-ului {t_name}: {str(e)}"
                     
                     yield json.dumps({"type": "observation", "data": observation[:2500]})
                     
@@ -1394,6 +1551,18 @@ FINAL RESPONSE FORMAT (ROMANIAN):
                 return
 
         yield json.dumps({"type": "final", "data": "Am atins limita de 15 pași de investigație. Rezumat parțial bazat pe dovezile găsite:", "citations": self.citations})
+
+def truncate_messages(messages: List[Dict], max_messages: int = 12) -> List[Dict]:
+    """Truncate message history to keep only recent messages while preserving system prompt."""
+    if len(messages) <= max_messages:
+        return messages
+    
+    # Keep system prompt (first message) and last max_messages-1 user/assistant pairs
+    system_msg = messages[0] if messages and messages[0].get("role") == "system" else None
+    recent_msgs = messages[-(max_messages - 1):] if system_msg else messages[-max_messages:]
+    
+    return [system_msg] + recent_msgs if system_msg else recent_msgs
+
 
 def query_investigator(case_id: int, user_question: str):
     agent = AgenticInvestigator(case_id, user_question)

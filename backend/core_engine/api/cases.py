@@ -17,6 +17,7 @@ from .. import models
 from .auth import get_current_user
 from ..services.graph_service import graph_service
 from ..services.chat_service import AgenticInvestigator
+from ..services.llm_client import ChatStoppedError
 from ..core.audit import log_event
 
 router = APIRouter(prefix="/cases", tags=["cases"])
@@ -422,7 +423,9 @@ def delete_message(case_id: int, msg_id: int, user: models.User = Depends(get_cu
 @router.post("/{case_id}/chat/stop")
 def stop_chat(case_id: int, user: models.User = Depends(get_current_user), db: Session = Depends(get_forensic_db)):
     _check_access(case_id, user, db)
-    r.set(f"chat_stop_{case_id}", "1", ex=120)
+    # Fără TTL: semnalul de stop trebuie să supraviețuiască oricât durează pasul LLM curent.
+    # Se șterge explicit la pornirea unei conversații noi (vezi mai jos) și după consumare.
+    r.set(f"chat_stop_{case_id}", "1")
     return {"status": "stopping"}
 
 
@@ -483,6 +486,13 @@ def chat(case_id: int, payload: dict = Body(...), user: models.User = Depends(ge
                     }), ex=3600)
 
                 chunk_queue.put(chunk_json)
+        except ChatStoppedError:
+            # Oprit cerut de utilizator în timpul unui tool (ex: Rolling Scratchpad) —
+            # generarea a fost deja abortată server-side; salvăm mesajul final curat.
+            stop_evt = json.dumps({"type": "final", "data": "Investigație oprită de utilizator.", "citations": agent.citations})
+            chunk_queue.put(stop_evt)
+            if not final_content:
+                final_content = "Investigație oprită de utilizator."
         except Exception as e:
             err = json.dumps({"type": "error", "data": str(e)})
             chunk_queue.put(err)

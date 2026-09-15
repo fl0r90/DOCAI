@@ -287,8 +287,25 @@
     - *Restabilirea Agnosticismului Total:* Epurarea oricăror directive particulare, menținând doar ghidaje generice de căutare a codurilor alfanumerice și documentelor menționate de utilizator.
     - *Validare Experimentală Reușită:* Testat și certificat pe calcule matematice încrucișate complexe: Contract vs Factură vs Extras Bancar (penalități 49 zile) și Factură vs Extras Bancar vs Borderou Tichete de Cântar (deficit 61.50 tone / prejudiciu 67.650 RON).
 
+### Etapa 35: Instant Chat Interruption, Hardware Abort & Progressive Scratchpad Resilience - IMPLEMENTAT (Septembrie 2026)
+- **Problemă rezolvată (Blocarea fizică a procesului LLM, pierderea progresului și oprirea chat-ului):**
+    - Înainte, apelurile către Ollama erau complet sincrone (`stream: False`), blocând procesul Python în `requests.post()` pe toată durata generării. Semnalele de oprire nu puteau interveni în timpul generării server-side.
+    - Documentele mari procesate prin `ROLLING_SCRATCHPAD_AUDIT` nu aveau stare salvată intermediar: o întrerupere sau o eroare forța reluarea documentului de la calupul 1. De asemenea, scratchpad-ul putea crește nelimitat peste fereastra de context.
+    - Worker-ul avea un bug silențios în `EntityResolver` cauzat de interogarea unei tabele inexistente `system_config` în loc de `system_settings`, corupând tranzacția curentă de bază de date.
+    - În frontend, erorile de rețea afișau doar mesaje generice, mascând codurile HTTP reale și detaliile erorii din server.
+- **Arhitectura actualizată (`cases.py`, `chat_service.py`, `llm_client.py`, `worker/tasks.py`, `page.tsx`):**
+    - *Hardware Abort pe Ollama (`stream: True` + `_iter_stream_lines`):* În `llm_client.py`, cererile către Ollama rulează în regim de streaming cu un thread consumator în `queue.Queue`. Bucla principală verifică la fiecare secundă `stop_check()`. Când semnalul este detectat, ridică `ChatStoppedError` și închide socket-ul HTTP (`resp.close()`), forțând serverul Ollama să elibereze instantaneu nucleele GPU/CPU și slotul de calcul.
+    - *Sanitizare Tool Calling & OpenAI Compatibility (`_sanitize_messages_for_ollama`, `_coerce_tool_arguments`):* Rezolvat eroarea `400 Bad Request ("Value looks like object, but can't find closing '}' symbol")` ce apărea la schimbarea pe modele non-Gemma (ex: Qwen 3.8 / 2.5). Convertește forțat `arguments` din string JSON în dicționar nativ Python înainte de transmiterea către `/api/chat`, elimină mesajele `tool` orfane rezultate din trunchieri și oferă fallback automat pe endpoint-ul `/v1/chat/completions`.
+    - *Suport Extins LM Studio:* Validare automată a rolurilor de mesaje și cădere pe `reasoning_content` pentru modele de gândire profundă (ex: DeepSeek-R1 / Qwen3.8-Thinking).
+    - *Resume Capability în Rolling Scratchpad:* În `chat_service.py`, starea memoriei de lucru este salvată granular în Redis (`scratchpad_{case_id}_{doc_id}`). La o reluare ulterioară, procesarea sare direct la calupul rămas nefinalizat (`resume_idx + 1`).
+    - *Compresie Automată Scratchpad (`_compress_scratchpad`):* Când memoria acumulată depășește 50% din fereastra de context a modelului, un pas de sinteză dedicat comprimă faptele la jumătate, prevenind overflow-ul de context.
+    - *Reîncercare Granulară (Per-chunk Retry):* Fiecare calup beneficiază de până la 2 reîncercări cu backoff exponențial (2s, 4s). Dacă un calup eșuează definitiv, investigația continuă cu scratchpad-ul acumulat fără crash fatal.
+    - *Limitare Istoric Conversație (`truncate_messages`):* Plafonare la ultimele 12 mesaje păstrând intact prompt-ul de sistem.
+    - *Corecție Tranzacțională Worker (`tasks.py`):* Corectat interogarea la `system_settings` și adăugat `db_session.rollback()` pentru a păstra conexiunea Postgres curată.
+    - *Frontend Diagnostic & AbortController:* Păstrat `AbortController` și `handleStopChat` cu verificare strictă a `response.ok`, logare diagnostică a token-ului JWT și afișarea transparentă a erorilor HTTP.
+
 ---
-*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 34 (Qwen 3.8 Multi-Model Resident Architecture & Truncate Resilience).*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 35 (Instant Chat Interruption, Hardware Abort & Progressive Scratchpad Resilience).*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:
