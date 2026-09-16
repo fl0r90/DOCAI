@@ -86,6 +86,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[!] Eroare sincronizare utilizatori: {e}")
 
+    # 5. Inițializare sistem de telemetrie & debug logging
+    try:
+        from .services.debug_logger import debug_logger
+        if debug_logger.enabled:
+            debug_logger.info("system", "STARTUP", {"message": "Forensic DocAI Backend initialized with telemetry active"})
+            print(f"[+] Debug Logging activat la: {debug_logger.log_file}")
+    except Exception as e:
+        print(f"[!] Eroare inițializare debug logger: {e}")
+
     yield
 
 app = FastAPI(

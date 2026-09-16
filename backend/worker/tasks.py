@@ -16,6 +16,7 @@ from core_engine.services.grinder import extract_forensic_data
 from core_engine.services.graph_service import graph_service
 from core_engine.services.storage_service import upsert_document_chunk
 from core_engine.services.toc import toc_service
+from core_engine.services.debug_logger import debug_logger
 
 redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
 r = redis.from_url(redis_url)
@@ -323,6 +324,7 @@ def unified_worker_pipeline():
             with SafeSession() as db:
                 next_doc = db.query(models.Document).filter(models.Document.id == doc_id).first()
                 resolver = EntityResolver(db_session=db)
+                debug_logger.task_stage(doc_id=doc_id, stage="PIPELINE_START", status="STARTED", details={"filename": filename, "worker_id": worker_id})
                 
                 # 1. VRAM MARSHALLING (Eliberăm Ollama pentru Docling)
                 tracker.start_ocr_phase()
@@ -332,11 +334,13 @@ def unified_worker_pipeline():
                 ocr_result = process_document(file_path)
                 if not ocr_result or "error" in ocr_result: 
                     tracker.fail("OCR structural a eșuat.")
+                    debug_logger.task_stage(doc_id=doc_id, stage="OCR", status="FAILED", details={"error": ocr_result.get("error") if isinstance(ocr_result, dict) else "unknown"})
                     next_doc.status = "FAILED"; db.commit(); continue
                 
                 items = ocr_result.get("items", []) if isinstance(ocr_result, dict) else []
                 num_tables = len([it for it in items if it.get("type") in ["TABLE", "TABLE_PART"]])
                 tracker.finish_ocr_phase(num_tables=num_tables)
+                debug_logger.task_stage(doc_id=doc_id, stage="OCR", status="COMPLETED", details={"tables_count": num_tables})
 
                 next_doc.raw_text = ocr_result.get("markdown", ""); db.commit()
 
@@ -346,6 +350,7 @@ def unified_worker_pipeline():
 
                 # 4. EMBEDDINGS (pgvector)
                 chunks_info = _create_chunks_and_embeddings(doc_id, ocr_result, filename=filename, raw_markdown=ocr_result.get("markdown", ""), tracker=tracker)
+                debug_logger.task_stage(doc_id=doc_id, stage="EMBEDDINGS", status="COMPLETED", details={"chunks_count": len(chunks_info)})
                 
                 # 5. STRUCTURED EXTRACTION (Grinder - LLM JSON Mode)
                 # Stergem datele vechi financiare in caz de re-procesare
@@ -353,6 +358,7 @@ def unified_worker_pipeline():
                 db.commit()
 
                 res = asyncio.run(extract_forensic_data(ocr_result, filename, doc_id, tracker=tracker))
+                debug_logger.task_stage(doc_id=doc_id, stage="GRINDER_EXTRACTION", status="COMPLETED")
                 
                 # 6. GRAPH SYNC & FINAL SYNTHESIS
                 if res and res.get("is_finished"):
@@ -450,10 +456,12 @@ def unified_worker_pipeline():
                 
                 next_doc.status = "COMPLETED"; db.commit()
                 tracker.complete()
+                debug_logger.task_stage(doc_id=doc_id, stage="PIPELINE_END", status="SUCCESS", details={"filename": filename})
         except Exception as e: 
             if 'tracker' in locals() and tracker:
                 tracker.fail(str(e))
             print(f"[!] Eroare Worker Pipeline: {e}")
+            debug_logger.error("worker_tasks", "PIPELINE_FAILED", str(e), doc_id=doc_id if 'doc_id' in locals() else None, details={"filename": filename if 'filename' in locals() else None})
             time.sleep(5)
 if __name__ == "__main__":
     unified_worker_pipeline()

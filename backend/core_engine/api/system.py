@@ -592,3 +592,20 @@ def list_active_workers(admin: User = Depends(check_admin)):
         except Exception:
             continue
     return {"active_workers": workers, "count": len(workers)}
+
+
+@router.get("/debug-logs")
+def get_debug_logs(
+    limit: int = 100,
+    offset: int = 0,
+    level: Optional[str] = None,
+    service: Optional[str] = None,
+    admin: User = Depends(check_admin)
+):
+    """
+    Servește în timp real logurile structurate de telemetrie criminalistică (JSONL).
+    Folosește căutare binară inversă (tail) pentru acces sub-milisecundă cu zero overhead RAM.
+    """
+    from ..services.debug_logger import debug_logger
+    safe_limit = min(max(1, limit), 500)
+    return debug_logger.get_recent_logs(limit=safe_limit, offset=offset, level=level, service=service)

@@ -8,8 +8,47 @@ import requests
 import httpx
 from typing import Callable, Dict, Any, List, Optional, Union
 from ..core.config import get_llm_config
+from .debug_logger import debug_logger
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_ollama_model_name(model_name: str) -> str:
+    """
+    Normalize Ollama model names to ensure they use the correct format.
+    
+    Ollama uses 'model:tag' format (colon separator). This function handles
+    common variations where users might enter 'model-tag' (dash separator)
+    or other formats, converting them to the proper colon-separated format.
+    
+    Examples:
+        'qwen3.8-27b' -> 'qwen3.8:27b'
+        'gemma4-26b' -> 'gemma4:26b'
+        'deepseek-r1-distill-qwen-14b-awq' -> 'deepseek-r1-distill-qwen-14b:awq'
+    
+    Args:
+        model_name: The model name to normalize
+        
+    Returns:
+        Normalized model name using colon separator for tag
+    """
+    if not model_name or ':' in model_name:
+        return model_name
+    
+    # Pattern: match trailing parameter size (e.g. -27b, -7b, -32b-instruct, -14b-awq)
+    # or trailing tag keywords (e.g. -latest, -instruct), without greedily chopping model names
+    pattern = r'^(.+)-(\d+[bB](?:-[a-zA-Z0-9_]+)?|latest|instruct|chat|text|awq)$'
+    match = re.match(pattern, model_name, re.IGNORECASE)
+    
+    if match:
+        base = match.group(1)
+        tag = match.group(2)
+        normalized = f"{base}:{tag}"
+        logger.debug(f"Normalized model name: {model_name} -> {normalized}")
+        return normalized
+    
+    # If no pattern matches, return as-is
+    return model_name
 
 
 class ChatStoppedError(Exception):
@@ -376,6 +415,21 @@ class UnifiedLLMClient:
         print(f"[OLLAMA_OPENAI] POST {url} | model={active_model}, messages={len(openai_messages)}, tools={bool(tools)}")
         if fallback_reason:
             print(f"[OLLAMA_OPENAI] Fallback reason: {fallback_reason}")
+            debug_logger.fallback_trigger(
+                reason=fallback_reason,
+                fallback_from="ollama_native",
+                fallback_to="ollama_openai"
+            )
+
+        t_llm_start = time.time()
+        est_tokens_in = sum(len(m.get("content") or "") for m in messages) // 3.5
+        debug_logger.llm_call(
+            model=active_model,
+            endpoint=f"ollama_openai:{url}",
+            payload_tokens_est=int(est_tokens_in),
+            messages_count=len(messages)
+        )
+
         try:
             resp = requests.post(url, json=payload, timeout=(10, 600))
             print(f"[OLLAMA_OPENAI_STATUS] HTTP {resp.status_code}")
@@ -386,6 +440,7 @@ class UnifiedLLMClient:
             err_body = getattr(resp, 'text', str(rex)) if 'resp' in locals() else str(rex)
             logger.error("[OLLAMA_OPENAI] %s | body: %.500s", rex, err_body)
             print(f"[OLLAMA_OPENAI_ERROR] {rex} | Response body: {err_body}")
+            debug_logger.error("llm_client", "LLM_REQUEST_ERROR", str(rex), error_type="OllamaOpenAIError", details={"body": err_body[:500]})
             raise
         data = resp.json()
         choice = (data.get("choices") or [{}])[0]
@@ -396,6 +451,14 @@ class UnifiedLLMClient:
             content = reasoning  # unele variante Qwen3.x răspund doar cu reasoning_content
         tool_calls = cls._normalize_tool_calls(msg.get("tool_calls") or [])
         print(f"[OLLAMA_OPENAI_RESULT] content_len={len(content)}, tool_calls_count={len(tool_calls)}")
+
+        t_llm_dur = (time.time() - t_llm_start) * 1000
+        debug_logger.llm_complete(
+            model=active_model,
+            duration_ms=t_llm_dur,
+            tokens_out_est=int(len(content) // 3.5),
+            tool_calls_count=len(tool_calls)
+        )
         return {"content": content, "tool_calls": tool_calls, "raw": msg}
 
     @classmethod
@@ -420,6 +483,19 @@ class UnifiedLLMClient:
         cfg = cls.get_engine_config()
         engine = cfg.get("active_llm_engine", "ollama").lower()
         active_model = model or cfg.get("active_model") or os.getenv("ACTIVE_MODEL", "")
+        
+        # Normalize Ollama model names to handle common naming variations
+        if engine == "ollama" and active_model:
+            active_model = _normalize_ollama_model_name(active_model)
+
+        t_llm_step_start = time.time()
+        est_tokens_in = sum(len(m.get("content") or "") for m in messages) // 3.5
+        debug_logger.llm_call(
+            model=active_model,
+            endpoint=engine,
+            payload_tokens_est=int(est_tokens_in),
+            messages_count=len(messages)
+        )
 
         if engine == "lmstudio":
             if stop_check and stop_check():
@@ -494,6 +570,13 @@ class UnifiedLLMClient:
                 content = reasoning  # Folosim reasoning ca content doar dacă nu avem tool calls
             
             print(f"[LMSTUDIO_RESULT] content_len={len(content)}, reasoning_len={len(reasoning)}, tool_calls_count={len(tool_calls)}")
+            t_llm_dur = (time.time() - t_llm_step_start) * 1000
+            debug_logger.llm_complete(
+                model=active_model,
+                duration_ms=t_llm_dur,
+                tokens_out_est=int(len(content) // 3.5),
+                tool_calls_count=len(tool_calls)
+            )
             return {"content": content, "tool_calls": tool_calls, "reasoning": reasoning, "raw": msg}
 
         elif engine == "vllm":
@@ -664,6 +747,13 @@ class UnifiedLLMClient:
                 }
                 for i, t in enumerate(acc_tools)
             ])
+            t_llm_dur = (time.time() - t_llm_step_start) * 1000
+            debug_logger.llm_complete(
+                model=active_model,
+                duration_ms=t_llm_dur,
+                tokens_out_est=int(len(acc_content) // 3.5),
+                tool_calls_count=len(tool_calls)
+            )
             return {"content": acc_content, "tool_calls": tool_calls, "raw": {"role": "assistant", "content": acc_content}}
 
     @classmethod
@@ -674,6 +764,10 @@ class UnifiedLLMClient:
         cfg = cls.get_engine_config()
         engine = cfg.get("active_llm_engine", "ollama").lower()
         active_model = model or cfg.get("specialist_processing") or cfg.get("active_model") or os.getenv("ACTIVE_MODEL", "")
+        
+        # Normalize Ollama model names to handle common naming variations
+        if engine == "ollama" and active_model:
+            active_model = _normalize_ollama_model_name(active_model)
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0)) as client:
             if engine in ["lmstudio", "vllm"]:

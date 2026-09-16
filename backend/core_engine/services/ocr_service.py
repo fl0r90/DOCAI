@@ -8,7 +8,10 @@ import pytesseract
 
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.datamodel.pipeline_options import PdfPipelineOptions, RapidOcrOptions
+from docling.datamodel.accelerator_options import AcceleratorOptions
 from docling.datamodel.base_models import InputFormat
+import time
+from .debug_logger import debug_logger
 
 # ==============================================================================
 # SINGLETON CONVERTERS (Instanțiate o singură dată per proces, nu la fiecare fișier)
@@ -22,7 +25,9 @@ def _get_digital_converter() -> DocumentConverter:
     """
     global _digital_converter
     if _digital_converter is None:
-        pipeline_options = PdfPipelineOptions()
+        pipeline_options = PdfPipelineOptions(
+            accelerator_options=AcceleratorOptions(num_threads=os.cpu_count())
+        )
         pipeline_options.do_ocr = False
         _digital_converter = DocumentConverter(
             format_options={
@@ -37,7 +42,9 @@ def _get_ocr_converter() -> DocumentConverter:
     """
     global _ocr_converter
     if _ocr_converter is None:
-        pipeline_options = PdfPipelineOptions()
+        pipeline_options = PdfPipelineOptions(
+            accelerator_options=AcceleratorOptions(num_threads=os.cpu_count())
+        )
         pipeline_options.do_ocr = True
         pipeline_options.ocr_options = RapidOcrOptions()
         _ocr_converter = DocumentConverter(
@@ -235,13 +242,17 @@ def process_document(file_path: str) -> dict:
       - VITEZA 2: Scanned PDF (Docling + RapidOCR singleton). Timp: 20-50s.
       - VITEZA 3: Pure Images / Degraded (Gemma 4 Vision via Ollama).
     """
+    t_ocr_start = time.time()
     try:
         ext = os.path.splitext(file_path)[1].lower()
 
         # Cazul A: Imagini izolate (.jpg, .jpeg, .png) -> Viteza 3 (Gemma 4 Vision)
         if ext in ('.jpg', '.jpeg', '.png', '.bmp', '.webp'):
             print(f"[⚡ Speed 3 - Vision] Procesare imagine cu Vision AI: {file_path}")
-            return _process_image_with_vision(file_path)
+            res = _process_image_with_vision(file_path)
+            dur_ms = (time.time() - t_ocr_start) * 1000
+            debug_logger.info("ocr_service", "OCR_PROCESS_COMPLETE", data={"file": os.path.basename(file_path), "speed": "Speed3_Vision", "duration_ms": round(dur_ms, 2)})
+            return res
 
         # Cazul B: PDF-uri
         if ext == '.pdf':
@@ -252,6 +263,8 @@ def process_document(file_path: str) -> dict:
                 converter = _get_digital_converter()
                 res = _process_with_docling(converter, file_path)
                 if len(res.get("markdown", "").strip()) >= 50:
+                    dur_ms = (time.time() - t_ocr_start) * 1000
+                    debug_logger.info("ocr_service", "OCR_PROCESS_COMPLETE", data={"file": os.path.basename(file_path), "speed": "Speed1_Digital", "duration_ms": round(dur_ms, 2), "chars": len(res.get("markdown", ""))})
                     return res
                 print("[!] Digital Fast-Path a extras prea puțin text. Trecem la Speed 2 (RapidOCR)...")
 
@@ -275,16 +288,22 @@ def process_document(file_path: str) -> dict:
                         if os.path.exists(tmp_img):
                             os.remove(tmp_img)
                         if vision_res and "error" not in vision_res and len(vision_res.get("markdown", "")) > 50:
+                            dur_ms = (time.time() - t_ocr_start) * 1000
+                            debug_logger.info("ocr_service", "OCR_PROCESS_COMPLETE", data={"file": os.path.basename(file_path), "speed": "Speed3_Fallback", "duration_ms": round(dur_ms, 2)})
                             return vision_res
                 except Exception:
                     pass
 
+            dur_ms = (time.time() - t_ocr_start) * 1000
+            debug_logger.info("ocr_service", "OCR_PROCESS_COMPLETE", data={"file": os.path.basename(file_path), "speed": "Speed2_Scanned", "duration_ms": round(dur_ms, 2), "chars": len(res.get("markdown", ""))})
             return res
 
         return {"error": f"Format de fișier nesuportat pentru OCR: {ext}"}
 
     except Exception as e:
+        dur_ms = (time.time() - t_ocr_start) * 1000
         print(f"[!] OCR Error for {file_path}: {e}")
+        debug_logger.error("ocr_service", "OCR_PROCESS_FAILED", str(e), details={"file": os.path.basename(file_path), "duration_ms": round(dur_ms, 2)})
         return {"error": str(e)}
 
 # Instanță globală (legacy support)

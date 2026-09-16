@@ -1,6 +1,7 @@
 import os
 from docling.document_converter import DocumentConverter
 from docling.datamodel.pipeline_options import PdfPipelineOptions, RapidOcrOptions
+from docling.datamodel.accelerator_options import AcceleratorOptions
 
 # Setari environment pentru OFFLINE
 os.environ['HF_HUB_OFFLINE'] = '1'
@@ -15,7 +16,9 @@ def test_ocr():
 
     print(f"[*] Testare OCR OFFLINE pentru: {test_pdf}")
     
-    pipeline_options = PdfPipelineOptions()
+    pipeline_options = PdfPipelineOptions(
+        accelerator_options=AcceleratorOptions(num_threads=os.cpu_count())
+    )
     pipeline_options.do_ocr = True
     
     ocr_options = RapidOcrOptions()

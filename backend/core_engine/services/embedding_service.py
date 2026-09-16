@@ -20,7 +20,7 @@ class EmbeddingService:
         if model is None:
             model = os.getenv("EMBEDDING_MODEL", "qwen3-embedding:8b")
 
-        engine = os.getenv("EMBEDDING_ENGINE", "ollama").lower()
+        engine = os.getenv("EMBEDDING_ENGINE", "cpu").lower()
 
         # 1. CPU Mode (Zero VRAM)
         if engine in ["cpu", "sentence_transformers", "local"]:

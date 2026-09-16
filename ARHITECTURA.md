@@ -338,8 +338,67 @@
         - **Panou Inferior de Fragment Extras:** Randează fragmentul citat cu evidențierea termenilor cheie (`renderHighlightedSnippet`), badge de focalizare semantică și buton de copiere rapidă cu feedback vizual.
         - **Interacțiune Ubicuuă:** Atât badge-urile inline din text (`[REF N]` sau `[N]`), cât și cardurile sintetice de probe din subsolul fiecărui mesaj deschid uniform noul panou de previzualizare.
 
+### Etapa 38: Recall Hibrid de Înaltă Rezoluție, Normalizare Agnostică LLM/Unelte și Paralelizare OCR pe CPU - IMPLEMENTAT (Septembrie 2026)
+- **Problemă rezolvată (Plafonarea retrieval-ului pe dosare stufose, bâlbâieli de apelare unelte la modele open-source și gâtuire OCR pe un singur fir de execuție):**
+    - În dosare comerciale și financiare mari, plafonarea candidaților la 20 pe vector search și 30 pe lexical search excludea anexe contabile, clauze din coada contractelor sau procese verbale din recall-ul inițial.
+    - Modelele locale open-source (Ollama/Qwen/Gemma) tindeau uneori să emită nume concatenate de unelte (ex: `SEARCH_TEXTSEARCH_STRUCTURED_DATA`) sau să rateze tag-ul de model (ex: `qwen3.8-27b` în loc de `qwen3.8:27b`).
+    - Conversia PDF-urilor scanate în Docling rula pe un singur nucleu CPU, încetinind pipeline-ul de ingestie offline.
+- **Arhitectura actualizată (`chat_service.py`, `llm_client.py`, `ocr_service.py`, `preload_ocr.py`, `docker-compose.yml`):**
+    - *Lărgirea Pâlniei de Recall Hibrid (`chat_service.py`):*
+        - `vector_res`: mărit la **50** candidați semantici (de la 20).
+        - `lexical_res`: mărit la **100** candidați lexicali (de la 30).
+        - `compound_res`: mărit la **50** candidați pentru tokeni compuși/coduri facturi (de la 20).
+        - `positional_res`: mărit la **30** candidați pentru secțiuni cheie (debut/final/anexe), extins cu markeri critici: `sumă totală`, `prejudiciu`, anii `2013-2018`, `anexa nr`.
+        - `Cross-Encoder Reranker`: candidați evaluați măriți de la 20 la **50**, iar `MAX_DOCS_RETURNED` crescut la **8**.
+    - *Sizing Dinamic Calupuri Rolling Scratchpad (`chat_service.py`):* Dimensiunea calupului este calculată proporțional cu `doc_context_limit` și `chat_ctx`, asigurând spațiu adecvat pentru acumularea memoriei de lucru.
+    - *Normalizare Robustă & Robust Tool Call Handling (`chat_service.py`):*
+        - Mapare flexibilă a uneltelor cu suport pentru nume concatenate (split automat în apeluri separate).
+        - Directivă automată de follow-up după returnarea observațiilor uneltelor, stimulând modelul să continue investigația pe baza probelor concrete.
+        - Guardrail de tip fallback la `ROLLING_SCRATCHPAD_AUDIT` când modelul are încredere scăzută sau ratează probele prin căutare fragmentară.
+    - *Normalizare Sigură Ollama Model Tags (`llm_client.py` - `_normalize_ollama_model_name`):* Conversie sigură a sufixelor de parametri (ex: `-27b`, `-14b-awq`, `-latest`, `-instruct`) în format cu două puncte (`:`) fără a afecta modele OpenAI sau formate standard.
+    - *Paralelizare Nativă CPU pe Docling OCR (`ocr_service.py`, `preload_ocr.py`):* Integrarea `AcceleratorOptions(num_threads=os.cpu_count())` pe convertoarele digitale și OCR, eliminând gâtuirea pe un singur thread la ingestia documentelor scanate.
+    - *Zero VRAM Embeddings (`docker-compose.yml`, `embedding_service.py`):* Forțat `EMBEDDING_ENGINE=cpu` pentru worker și backend, păstrând întreaga memorie GPU dedicată inferenței LLM.
+
+### Etapa 39: Sistem Militar de Observabilitate & Telemetrie Criminalistică Low-Level (JSONL) - IMPLEMENTAT (Septembrie 2026)
+- **Problemă rezolvată (Lipsa vizibilității la nivel de milisecundă și token pe modulele interne, riscuri de OOM la parsarea logurilor voluminoase):**
+    - La blocaje, halucinații sau erori de rețea între worker, backend, OCR și motoarele de inferență (Ollama / LM Studio), depanarea manuală era dificilă din cauza dispersării print-urilor nestructurate.
+    - Draft-ul inițial de citire a logurilor prin parcurgere completă a discului și parsare JSON în RAM risca să provoace OOM Kill la fișiere de gigabiți interogate la intervale de 3 secunde.
+- **Arhitectura actualizată (`debug_logger.py`, `system.py`, `main.py`, `chat_service.py`, `llm_client.py`, `ocr_service.py`, `tasks.py`, `docker-compose.yml`):**
+    - *Modul Central de Telemetrie (`backend/core_engine/services/debug_logger.py`):*
+        - Format uniform JSONL cu atribute standard: `timestamp` (ISO UTC), `level` (DEBUG/INFO/WARN/ERROR), `service`, `action`, `trace_id` (corelare pe dosar/sesiune), `case_id`, `doc_id`, `duration_ms`, `metrics`, `data`, `error` (cu tip, mesaj și decupaj de traceback).
+        - Rotație automată thread-safe (segmente de 100MB, plafon global de siguranță de 5GB cu eliminare automată a celor mai vechi arhive).
+        - Căutare binară inversă de mare viteză (`tail` reverse-seek pe buffer de 64KB): extrage ultimele N intrări în sub o milisecundă, fără a încărca vreodată fișierul masiv în memorie.
+    - *Endpoint REST de Mare Performanță (`system.py` - `GET /system/debug-logs`):*
+        - Expune logurile paginate cu filtrare opțională pe `level` și `service`, securizat cu drepturi de `ADMIN`.
+    - *Instrumentare Low-Level Extinsă pe Toate Serviciile Cheie:*
+        - `chat_service.py`: Înregistrează pornirea fiecărui pas de investigație (`STEP_START`), uneltele brute primite (`TOOL_RAW`), uneltele normalizate/despărțite (`TOOL_NORMALIZED`), durata de execuție a fiecărei unelte (`TOOL_EXEC`) și metricile pâlniei de recall hibrid (`HYBRID_RECALL_METRICS`).
+        - `llm_client.py`: Monitorizează începutul fiecărui apel LLM (`LLM_CALL_START` cu estimare tokeni intrare), durata totală și tokenii generați (`LLM_CALL_COMPLETE`), respectiv declanșarea fallback-urilor automate (`FALLBACK_TRIGGER`).
+        - `ocr_service.py`: Monitorizează fiecare document procesat prin motorul hibrid (`OCR_PROCESS_COMPLETE` / `OCR_PROCESS_FAILED`) cu viteză selectată, durată milisecundă și caractere extrase.
+        - `worker/tasks.py`: Monitorizează întregul ciclu de viață al ingestiei (`PIPELINE_START`, etapele `OCR`, `EMBEDDINGS`, `GRINDER_EXTRACTION`, `TOC`, `PIPELINE_END`).
+        - `main.py`: Inițializează automat modulul în lifespan-ul FastAPI și emite semnalul `STARTUP`.
+    - *Configurare Mediu & Docker:* Adăugat `DEBUG_LOGGING_ENABLED=true` în serviciile backend și worker din `docker-compose.yml`.
+
+### Etapa 40: Consola de Telemetrie & Diagnostic Criminalistic în Dashboard-ul Admin (Real-Time Forensic UI) - IMPLEMENTAT (Septembrie 2026)
+- **Problemă rezolvată (Lipsa vizibilității în interfața de administrare și riscul de consum inutil de resurse la background polling):**
+    - Administratorii și inginerii de sistem trebuiau să se conecteze prin terminal SSH și să ruleze comenzi `tail -f` sau inspecteze containere Docker pentru a înțelege execuția uneltelor sau erorile de inferență.
+    - O interfață naivă cu polling continuu în fundal ar fi încărcat rețeaua și CPU-ul chiar și când utilizatorul nu inspectează logurile.
+- **Arhitectura actualizată (`frontend/src/app/dashboard/page.tsx`):**
+    - *Integrare Seamless în Sidebar-ul de Navigație:*
+        - Adăugat butonul dedicat **„Telemetrie & Debug”** (`<Bug className="w-4 h-4" />`), alternabil direct cu „Starea Sistemului”.
+        - Adăugat scurtătură directă „Telemetrie Detaliată ->” în antetul fluxului operativ consolidat.
+    - *Optimizare Zero-Overhead Polling:*
+        - Polling-ul activ la interval de 3 secunde (`GET /system/debug-logs?limit=250`) se activează **exclusiv** când panoul de telemetrie este deschis (`isDebugLogsOpen === true`) și starea de stream este activă (`autoRefreshDebug === true`). Când panoul este închis, consumul de rețea și CPU este zero.
+    - *KPI Counters & Filtrare Avansată:*
+        - Contoare metrice în timp real pentru volumul de evenimente, erori critice (roșu), avertismente/fallback-uri (galben), informativ (albastru) și evenimente low-level de debug (violet).
+        - Filtre rapide pe niveluri de jurnalizare (`DEBUG`, `INFO`, `WARNING`, `ERROR`) și pe subsisteme țintă (`chat_service`, `llm_client`, `ocr_service`, `worker`, `core_engine`).
+        - Căutare client-side instantanee pe mesaje, nume de evenimente, ID-uri de trasabilitate (`trace_id`) și originea în cod (`caller`).
+    - *Stream Monospace & Inspectare Detaliată Payload (Zero-RAM Seek):*
+        - Vizualizator terminal de mare contrast cu badge-uri vizuale clare de nivel, durată de execuție a uneltei (`⚡ Xms`), etichetă de trace ID cu un singur clic de copiere (`handleCopyTrace`).
+        - Modal dedicat de inspectare profundă a încărcăturii utile (`Payload Inspection Modal`): randează `data` JSON structurat cu indentare, oferind butoane de copiere rapidă pentru depanare la nivel de token, unelte apelate și date extractive.
+        - Export instantaneu al evenimentelor curente în fișier `.jsonl` descărcabil local (`downloadDebugLogs`).
+
 ---
-*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 37 (Multi-Format Forensic Reader, Dynamic Highlighting & Precision Auto-Jump).*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 40 (Consola de Telemetrie & Diagnostic Criminalistic în Dashboard-ul Admin).*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:

@@ -4,8 +4,11 @@ import requests
 import json
 import re
 import time
+import logging
 import redis
 from typing import List, Dict, Tuple, Optional, Any
+
+logger = logging.getLogger(__name__)
 from sqlalchemy import text, or_, and_
 from ..database import engine, SessionLocal
 from ..core.config import get_llm_config, get_active_model_name
@@ -13,6 +16,7 @@ from ..models import DocumentChunk, Document, ChatMessage, Case
 from .. import models
 from .graph_service import GraphService
 from .llm_client import UnifiedLLMClient, ChatStoppedError
+from .debug_logger import debug_logger
 
 _r = redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
 
@@ -375,6 +379,7 @@ class AgenticInvestigator:
                         intent_doc_ids.add(d.id)
             
             # Extract date variants from both the query AND the user question
+            t_search_start = time.time()
             date_variants = get_date_variants(query)
             if not date_variants and self.user_question:
                 date_variants = get_date_variants(self.user_question)
@@ -402,11 +407,11 @@ class AgenticInvestigator:
             vector_res = []
             if query_embedding:
                 try:
-                    # Top 20 by semantic similarity
+                    # Top 50 by semantic similarity (increased from 20)
                     vector_res = db.query(DocumentChunk)\
                         .filter(DocumentChunk.document_id.in_(doc_ids))\
                         .order_by(DocumentChunk.embedding.l2_distance(query_embedding))\
-                        .limit(20).all()
+                        .limit(50).all()
                 except Exception as e:
                     db.rollback()
                     print(f"[!] pgvector search error: {e}")
@@ -418,7 +423,7 @@ class AgenticInvestigator:
                 conditions = [DocumentChunk.content.ilike(f"%{w}%") for w in lex_words]
                 lexical_res = db.query(DocumentChunk)\
                     .filter(and_(DocumentChunk.document_id.in_(doc_ids), or_(*conditions)))\
-                    .limit(30).all()
+                    .limit(100).all()
 
             # 3a. Compound Token Exact Search (e.g. FACT-2023-0245, CTR-104, AGRO-CHIM)
             compound_res = []
@@ -427,22 +432,23 @@ class AgenticInvestigator:
                 compound_conditions = [DocumentChunk.content.ilike(f"%{ct}%") for ct in compound_tokens]
                 compound_res = db.query(DocumentChunk)\
                     .filter(and_(DocumentChunk.document_id.in_(doc_ids), or_(*compound_conditions)))\
-                    .limit(20).all()
+                    .limit(50).all()
 
             # 3b. Positional Search (End/Epilogue/Signatures vs Start/Preamble)
             positional_res = []
             q_full_lower = (query + " " + (self.user_question or "")).lower()
-            if any(k in q_full_lower for k in ["final", "sfarsit", "sfârșit", "epilog", "concluzi", "ultim", "anexe", "semnatur"]):
+            critical_keywords = ["final", "sfarsit", "sfârșit", "epilog", "concluzi", "ultim", "anexe", "semnatur", "sumă totală", "prejudiciu", "2013", "2014", "2015", "2016", "2017", "2018", "anexa nr"]
+            if any(k in q_full_lower for k in critical_keywords):
                 end_chunks = db.query(DocumentChunk)\
                     .filter(DocumentChunk.document_id.in_(doc_ids))\
                     .order_by(DocumentChunk.page_number.desc(), DocumentChunk.id.desc())\
-                    .limit(10).all()
+                    .limit(30).all()
                 positional_res.extend(reversed(end_chunks))
             elif any(k in q_full_lower for k in ["debut", "inceput", "început", "preambul", "introducere", "articolul 1", "primele"]):
                 start_chunks = db.query(DocumentChunk)\
                     .filter(DocumentChunk.document_id.in_(doc_ids))\
                     .order_by(DocumentChunk.page_number.asc(), DocumentChunk.id.asc())\
-                    .limit(10).all()
+                    .limit(30).all()
                 positional_res.extend(start_chunks)
 
             # 4. Merge & Deduplicate (compound, date and positional prioritized)
@@ -460,8 +466,8 @@ class AgenticInvestigator:
             try:
                 from .rerank_service import RerankService
                 reranker = RerankService.get_instance()
-                # Rerank query with candidates
-                scored_res = reranker.rerank(query, merged_results, top_k=20)
+                # Rerank query with candidates (increased from 20 to 50)
+                scored_res = reranker.rerank(query, merged_results, top_k=50)
                 print(f"[+] Successfully reranked {len(merged_results)} candidates using cross-encoder.")
                 if intent_doc_ids or date_variants:
                     boosted = []
@@ -505,12 +511,25 @@ class AgenticInvestigator:
                     reverse=True
                 )
 
+            t_search_dur = (time.time() - t_search_start) * 1000
+            debug_logger.recall_metrics(
+                query=query,
+                vector_count=len(vector_res),
+                lexical_count=len(lexical_res),
+                compound_count=len(compound_res),
+                positional_count=len(positional_res),
+                reranked_count=len(scored_res),
+                duration_ms=t_search_dur,
+                trace_id=str(self.case_id),
+                case_id=self.case_id
+            )
+
             # 5. Dynamic Context-Aware Document Assembly
             # Calculează dinamic volumul de text injectat pe măsura ferestrei active (chat_ctx)
             budget = self._get_context_budget()
             DOC_CONTEXT_LIMIT = budget["doc_context_limit"]
             MAX_TOTAL_CHARS = budget["max_total_chars"]
-            MAX_DOCS_RETURNED = 6
+            MAX_DOCS_RETURNED = 8
 
             doc_matches = {}  # doc_id -> list of (score, chunk)
             top_score = scored_res[0][0] if scored_res else 0.0
@@ -756,8 +775,10 @@ Răspunde EXCLUSIV cu scratchpad-ul comprimat (format bullet-points)."""
                 yield ("Documentul încape integral în context.", True, f"{header}:\n{raw}")
                 return
 
-            # Partiționare în calupuri dinamice de ~32.000 caractere cu 1.000 caractere overlap
-            batch_size = min(32000, max(14000, int(doc_limit * 0.75)))
+            # Dynamic batch sizing: scale with available context (75% of doc_context_limit)
+            # Max half of total context to leave room for scratchpad accumulation
+            batch_size = int(doc_limit * 0.75)
+            batch_size = max(14000, int(min(batch_size, chat_ctx * 3.5) // 2))
             overlap = 1000
             slices = []
             curr_pos = 0
@@ -817,6 +838,18 @@ Obiectivul investigației / Întrebare:
    - Păstrează textul condensat și telegrafic (fără introduceri de politețe sau meta-comentarii).
 4. Răspunde EXCLUSIV cu noul SCRATCHPAD sintetizat în limba română (format bullet-points structurat)."""
 
+                        # Calculate and log payload size before LLM call
+                        prompt_size = len(prompt_scratch)
+                        payload_tokens = prompt_size / 3.5
+                        utilization_pct = (payload_tokens / chat_ctx) * 100
+
+                        if utilization_pct > 90:
+                            print(f"[CRITICAL] Payload at {utilization_pct:.1f}% of context! ({prompt_size:,} chars)")
+                        elif utilization_pct > 70:
+                            print(f"[WARNING] Payload at {utilization_pct:.1f}% of context ({prompt_size:,} chars)")
+                        else:
+                            print(f"[INFO] Payload at {utilization_pct:.1f}% of context ({prompt_size:,} chars)")
+
                         res = UnifiedLLMClient.chat_step(
                             messages=[{"role": "user", "content": prompt_scratch}],
                             tools=None,
@@ -846,9 +879,9 @@ Obiectivul investigației / Întrebare:
                 if success:
                     self._save_scratchpad_state(doc_obj.id, current_scratchpad, idx)
                     
-                    # Comprimă scratchpad-ul dacă e prea mare
-                    if len(current_scratchpad) > int(chat_ctx * 3.5 * 0.5):
-                        yield (f"🗜️ Comprimare scratchpad ({len(current_scratchpad):,} caractere)...", False, "")
+                    # Proactive compression: compress if >30% of context (instead of waiting for 50%)
+                    if len(current_scratchpad) > int(chat_ctx * 3.5 * 0.3):
+                        yield (f"🗜️ Proactive compression ({len(current_scratchpad):,} caractere)...", False, "")
                         current_scratchpad = self._compress_scratchpad(current_scratchpad, chat_ctx)
                         self._save_scratchpad_state(doc_obj.id, current_scratchpad, idx)
 
@@ -1262,11 +1295,20 @@ Obiectivul investigației / Întrebare:
 
 CORE RULES:
 1. AGNOSTICISM: You have no prior knowledge of any persons, companies, or events. Answer ONLY using evidence from tools or provided context.
-2. ATOMIC TARGET RESOLUTION: The question is decomposed into atomic targets in your WORKING MEMORY.
-   - Use SEARCH_TEXT or SEARCH_STRUCTURED_DATA to find evidence.
-   - For broad, multi-chapter or whole-book questions, or when analyzing the evolution of ideas across an entire document, you MUST use ROLLING_SCRATCHPAD_AUDIT to traverse all pages and accumulate complete forensic evidence without omissions.
-   - If evidence for a target is partial or ambiguous, use FETCH_FULL_DOCUMENT(doc_id) or ROLLING_SCRATCHPAD_AUDIT to inspect complete document context before concluding.
-   - Positional queries: If the inquiry asks about boundary sections (e.g., 'at the end of the book', 'in the preamble', 'signatures', 'annexes'), prioritize the corresponding initial or final sections of the document.
+
+2. TOOL SELECTION GUIDE (CHOOSE APPROPRIATELY):
+    - SEARCH_TEXT / SEARCH_STRUCTURED_DATA: For targeted queries about specific terms, names, dates, amounts.
+    - FETCH_FULL_DOCUMENT(doc_id): For detailed review of a single identified document.
+    - ROLLING_SCRATCHPAD_AUDIT(doc_id): **USE THIS FOR COMPREHENSIVE ANALYSIS** when you need to:
+      • Analyze entire documents/books thoroughly
+      • Find evidence that might be scattered across many pages/chapters
+      • Build complete forensic understanding of complex dossiers
+      • Your previous searches didn't find enough evidence
+
+3. ATOMIC TARGET RESOLUTION: The question is decomposed into atomic targets in your WORKING MEMORY.
+    - Use SEARCH_TEXT or SEARCH_STRUCTURED_DATA for targeted queries first.
+    - If results are incomplete, ambiguous, or you need full document context, use FETCH_FULL_DOCUMENT(doc_id) OR ROLLING_SCRATCHPAD_AUDIT(doc_id).
+    - Positional queries: If the inquiry asks about boundary sections (e.g., 'at the end of the book', 'in the preamble', 'signatures', 'annexes'), prioritize the corresponding initial or final sections of the document.
 3. STRICT EVIDENCE-ONLY (NO SPECULATION):
    - Never invent or assume facts, names, or locations not present in the citations.
    - If the user asks about specific entities (e.g., a person, a city, an amount, a clause) and your initial search does not mention them, do NOT speculate or substitute with general knowledge. Perform a dedicated SEARCH_TEXT for those exact terms, or explicitly list them under [MISSING EVIDENCE].
@@ -1430,7 +1472,7 @@ FINAL RESPONSE FORMAT (ROMANIAN):
         # Add current question with injected evidence
         messages.append({
             "role": "user", 
-            "content": f"EVIDENCE ALREADY IN CONTEXT:\n{self.injected_evidence}\n\nQUESTION: {self.user_question}\n\nREMINDER: You are an Agnostic Forensic Auditor. Follow these rules strictly:\n1. If the question mentions specific invoices, contracts, codes, or entities, you MUST search for them using SEARCH_TEXT or SEARCH_STRUCTURED_DATA before concluding.\n2. When searching for payments, invoices, or deliveries, search both the full alphanumeric reference and the numeric identifier across bank statements, ledgers, and delivery documents.\n3. Compute exact math on any figures, dates, delays, quantities, or financial differences asked in the question.\n4. NEVER conclude that a document, invoice, payment, or delivery record is missing without thoroughly searching for its identifiers and partner names via SEARCH_TEXT."
+            "content": f"EVIDENCE ALREADY IN CONTEXT:\n{self.injected_evidence}\n\nQUESTION: {self.user_question}\n\nREMINDER: You are an Agnostic Forensic Auditor. Follow these rules STRICTLY:\n1. If the question asks about FINAL amounts, conclusions, annexes (e.g., 'sumă totală', 'prejudiciu final', 'anexa nr', 'concluzii'), you MUST use ROLLING_SCRATCHPAD_AUDIT immediately - DO NOT rely on partial SEARCH_TEXT results.\n2. If the question spans multiple years (e.g., 2013-2018), you MUST use ROLLING_SCRATCHPAD_AUDIT to ensure complete temporal coverage.\n3. If your initial searches return incomplete evidence or low confidence, AMPLIFY by using ROLLING_SCRATCHPAD_AUDIT before concluding.\n4. NEVER conclude that a document section is missing without first trying ROLLING_SCRATCHPAD_AUDIT for comprehensive analysis.\n5. When searching for payments, invoices, or deliveries, search both the full alphanumeric reference and the numeric identifier across bank statements, ledgers, and delivery documents.\n6. Compute exact math on any figures, dates, delays, quantities, or financial differences asked in the question."
         })
 
         has_used_tools = False
@@ -1438,6 +1480,7 @@ FINAL RESPONSE FORMAT (ROMANIAN):
 
         for step in range(1, 16):
             yield json.dumps({"type": "step", "data": f"Phase {step}: Investigating..."})
+            debug_logger.step_start(session_id=str(self.case_id), step=step, action="INVESTIGATION_STEP", case_id=self.case_id)
             
             # Tools are always available
             current_tools = tools
@@ -1553,12 +1596,73 @@ FINAL RESPONSE FORMAT (ROMANIAN):
             # Check if tools were called (real or synthetic)
             tool_calls = assistant_msg.get("tool_calls", []) or synthetic_tool_calls
             
+            # Debug: log raw tool calls for troubleshooting
+            debug_logger.tool_raw(raw_calls=tool_calls, trace_id=str(self.case_id))
+            print(f"[TOOL_DEBUG] Raw tool_calls from LLM: {assistant_msg.get('tool_calls', [])}")
+            print(f"[TOOL_DEBUG] Synthetic tool_calls: {synthetic_tool_calls}")
+            
             if tool_calls:
                 has_used_tools = True
                 for tc in tool_calls:
-                    t_name = tc["function"]["name"]
+                    # Normalize tool name: strip whitespace and convert to uppercase for comparison
+                    t_name_raw = tc["function"]["name"]
+                    t_name_stripped = t_name_raw.strip()
+                    t_name_upper = t_name_stripped.upper()
+                    
+                    # Map normalized names back to original case-sensitive names
+                    tool_name_map = {
+                        "SEARCH_TEXT": "SEARCH_TEXT",
+                        "SEARCH_STRUCTURED_DATA": "SEARCH_STRUCTURED_DATA", 
+                        "FETCH_FULL_DOCUMENT": "FETCH_FULL_DOCUMENT",
+                        "GET_DOCUMENT_OUTLINE": "GET_DOCUMENT_OUTLINE",
+                        "EXPLORE_GRAPH": "EXPLORE_GRAPH",
+                        "TIMELINE": "TIMELINE",
+                        "CALCULATE": "CALCULATE",
+                        "DETECT_FINANCIAL_ANOMALIES": "DETECT_FINANCIAL_ANOMALIES",
+                        "ROLLING_SCRATCHPAD_AUDIT": "ROLLING_SCRATCHPAD_AUDIT"
+                    }
+                    
+                    # First try exact match
+                    t_name_normalized = tool_name_map.get(t_name_upper, t_name_stripped)
+                    
+                    # If still not found, try partial matching (e.g., "search" matches "SEARCH_TEXT")
+                    if t_name_normalized == t_name_stripped:
+                        for expected_name in tool_name_map.values():
+                            if expected_name.startswith(t_name_upper) or t_name_upper in expected_name:
+                                t_name_normalized = expected_name
+                                break
+                    
+                    # Handle concatenated tool names (e.g., "SEARCH_TEXTSEARCH_STRUCTURED_DATA")
+                    if t_name_normalized == t_name_stripped and len(t_name_stripped) > 20:
+                        for expected_name in tool_name_map.values():
+                            if t_name_stripped.startswith(expected_name):
+                                t_name_normalized = expected_name
+                                break
+                    
+                    # If still not found, try to split concatenated names
+                    split_names = None
+                    if t_name_normalized == t_name_stripped:
+                        for expected_name in sorted(tool_name_map.values(), key=len, reverse=True):
+                            remaining = t_name_stripped[len(expected_name):]
+                            if remaining and remaining in tool_name_map.values():
+                                # This is a concatenated name - split into separate tool calls
+                                print(f"[TOOL_DEBUG] Found concatenated tool names: {t_name_stripped}")
+                                print(f"[TOOL_DEBUG] Splitting into: {expected_name} and {remaining}")
+                                split_names = [expected_name, remaining]
+                                
+                                # Create a new tool call for the remaining tool
+                                new_tc = tc.copy()
+                                new_tc["function"]["name"] = remaining
+                                # Keep same arguments, just split the call
+                                tool_calls.insert(tool_calls.index(tc) + 1, new_tc)
+                                
+                                t_name_normalized = expected_name
+                                break
+                    
+                    # Extract tool arguments
                     t_args = tc["function"]["arguments"]
-                    if t_name == "SEARCH_TEXT":
+                    
+                    if t_name_normalized == "SEARCH_TEXT":
                         has_used_search_text = True
                     
                     if isinstance(t_args, str):
@@ -1579,12 +1683,23 @@ FINAL RESPONSE FORMAT (ROMANIAN):
                                     t_args["match_pattern"] = line.split(":")[-1].strip().strip("'\"")
                                 if "date_filter" in line.lower():
                                     t_args["date_filter"] = line.split(":")[-1].strip().strip("'\"")
+
+                    debug_logger.tool_normalized(
+                        original_name=t_name_raw,
+                        normalized_name=t_name_normalized,
+                        args=t_args if isinstance(t_args, dict) else {"raw": str(t_args)},
+                        split_calls=split_names,
+                        trace_id=str(self.case_id)
+                    )
                                     
-                    yield json.dumps({"type": "tool_call", "tool": t_name, "params": str(t_args)})
+                    yield json.dumps({"type": "tool_call", "tool": t_name_raw.strip(), "params": str(t_args)})
                     
                     observation = ""
+                    t_exec_start = time.time()
+                    exec_success = True
+                    exec_err = None
                     try:
-                        if t_name == "SEARCH_STRUCTURED_DATA":
+                        if t_name_normalized == "SEARCH_STRUCTURED_DATA":
                             observation = self.tool_search_transactions(
                                 subject=t_args.get("subject", "") if isinstance(t_args, dict) else "", 
                                 date_filter=t_args.get("date_filter", "") if isinstance(t_args, dict) else "",
@@ -1592,16 +1707,16 @@ FINAL RESPONSE FORMAT (ROMANIAN):
                                 aggregate=t_args.get("aggregate", False) if isinstance(t_args, dict) else False,
                                 limit=int(t_args.get("limit", 30)) if isinstance(t_args, dict) and t_args.get("limit") is not None else 30
                             )
-                        elif t_name == "SEARCH_TEXT":
+                        elif t_name_normalized == "SEARCH_TEXT":
                             observation = self.tool_search_text(t_args.get("concept", ""), t_args.get("semantic_intent", ""))
-                        elif t_name == "ROLLING_SCRATCHPAD_AUDIT":
+                        elif t_name_normalized == "ROLLING_SCRATCHPAD_AUDIT":
                             t_doc_id = int(t_args.get("doc_id", 0)) if isinstance(t_args, dict) else 0
                             t_focus = (t_args.get("focus_query") or t_args.get("focus_terms") or self.user_question) if isinstance(t_args, dict) else self.user_question
                             for status_msg, is_final, final_obs in self.run_rolling_scratchpad_digest(t_doc_id, t_focus):
                                 yield json.dumps({"type": "observation", "data": status_msg})
                                 if is_final:
                                     observation = final_obs
-                        elif t_name == "FETCH_FULL_DOCUMENT":
+                        elif t_name_normalized == "FETCH_FULL_DOCUMENT":
                             t_doc_id = int(t_args.get("doc_id", 0)) if isinstance(t_args, dict) else 0
                             t_focus = (t_args.get("focus_terms") or self.user_question) if isinstance(t_args, dict) else ""
                             with SessionLocal() as db_chk:
@@ -1615,27 +1730,41 @@ FINAL RESPONSE FORMAT (ROMANIAN):
                                         observation = final_obs
                             else:
                                 observation = self.tool_fetch_full_document(doc_id=t_doc_id, focus_terms=t_focus)
-                        elif t_name == "GET_DOCUMENT_OUTLINE":
+                        elif t_name_normalized == "GET_DOCUMENT_OUTLINE":
                             t_doc_id = int(t_args.get("doc_id", 0)) if isinstance(t_args, dict) else 0
                             observation = self.tool_get_document_outline(doc_id=t_doc_id)
-                        elif t_name == "EXPLORE_GRAPH":
+                        elif t_name_normalized == "EXPLORE_GRAPH":
                             observation = self.tool_explore_graph(t_args.get("entity", ""))
-                        elif t_name == "TIMELINE":
+                        elif t_name_normalized == "TIMELINE":
                             observation = self.tool_timeline(t_args.get("entity", ""))
-                        elif t_name == "CALCULATE":
+                        elif t_name_normalized == "CALCULATE":
                             observation = self.tool_calculate(t_args.get("expression", ""))
-                        elif t_name == "DETECT_FINANCIAL_ANOMALIES":
+                        elif t_name_normalized == "DETECT_FINANCIAL_ANOMALIES":
                             from .anomaly_service import anomaly_service
                             with SessionLocal() as db:
                                 res = anomaly_service.analyze_case(self.case_id, db)
                                 observation = json.dumps(res, indent=2, ensure_ascii=False)
                         else:
-                            observation = "Unknown tool."
+                            # Log unknown tool for debugging
+                            logger.warning(f"Unknown tool called: {t_name_raw.strip()} (normalized: {t_name_normalized})")
+                            observation = f"Tool '{t_name_raw.strip()}' is not recognized. Available tools: SEARCH_TEXT, SEARCH_STRUCTURED_DATA, FETCH_FULL_DOCUMENT, GET_DOCUMENT_OUTLINE, EXPLORE_GRAPH, TIMELINE, CALCULATE, DETECT_FINANCIAL_ANOMALIES, ROLLING_SCRATCHPAD_AUDIT."
                     except ChatStoppedError:
                         yield json.dumps({"type": "final", "data": "Investigație oprită de utilizator.", "citations": self.citations})
                         return
                     except Exception as e:
-                        observation = f"Eroare la executarea tool-ului {t_name}: {str(e)}"
+                        exec_success = False
+                        exec_err = str(e)
+                        observation = f"Eroare la executarea tool-ului {t_name_raw.strip()}: {str(e)}"
+                    finally:
+                        t_exec_dur = (time.time() - t_exec_start) * 1000
+                        debug_logger.tool_exec(
+                            tool_name=t_name_normalized,
+                            duration_ms=t_exec_dur,
+                            success=exec_success,
+                            obs_len=len(observation),
+                            error=exec_err,
+                            trace_id=str(self.case_id)
+                        )
                     
                     yield json.dumps({"type": "observation", "data": observation[:2500]})
                     
@@ -1646,6 +1775,13 @@ FINAL RESPONSE FORMAT (ROMANIAN):
                     if tc.get("id"):
                         tool_msg["tool_call_id"] = tc["id"]
                     messages.append(tool_msg)
+                
+                # Add a prompt for the model to process the tool results
+                messages.append({
+                    "role": "user",
+                    "content": "Mulțumesc pentru rezultatele instrumentelor. Te rog analizează observațiile și continuă investigația sau oferă un răspuns final bazat pe dovezile găsite."
+                })
+                
                 continue # Go to next iteration to let model think about the observation
             
             # If no tools called, we check if we have the final answer
@@ -1689,6 +1825,14 @@ FINAL RESPONSE FORMAT (ROMANIAN):
 
             if not has_used_tools and step < 4:
                 messages.append({"role": "user", "content": "Continuă investigația folosind uneltele (SEARCH_TEXT, FETCH_FULL_DOCUMENT, SEARCH_STRUCTURED_DATA) pentru a găsi dovezi clare înainte de a concluziona."})
+                continue
+            
+            # Fallback: If model is struggling, suggest ROLLING_SCRATCHPAD_AUDIT for comprehensive document analysis
+            if has_used_tools and step >= 4 and not final_content:
+                messages.append({
+                    "role": "user", 
+                    "content": "⚠️ LOW CONFIDENCE DETECTED: Your previous searches did not yield sufficient evidence. You MUST use ROLLING_SCRATCHPAD_AUDIT to analyze entire documents comprehensively. This tool traverses 100% of text and builds complete forensic understanding without missing any sections."
+                })
                 continue
                 
             if final_content and has_used_tools:
