@@ -198,6 +198,21 @@ async def extract_forensic_data(layout_data: Dict, filename: str = "", doc_id: i
             "message": f"Extracție atribute dinamice & clasificare ({filename})..."
         }))
     
+    # DEEP FORENSIC AUDITOR DELEGATION (Etapa 30)
+    if doc_id:
+        try:
+            from .deep_audit_service import DeepForensicAuditor
+            auditor = DeepForensicAuditor(doc_id)
+            audit_res = await auditor.run_audit()
+            db_local = ForensicSessionLocal()
+            doc_obj = db_local.query(models.Document).filter(models.Document.id == doc_id).first()
+            meta_res = doc_obj.doc_metadata if doc_obj else {}
+            db_local.close()
+            await llm.close()
+            return {"metadata": meta_res, "is_finished": True}
+        except Exception as deep_err:
+            print(f"[!] DeepForensicAuditor notice (fallback la legacy): {deep_err}")
+
     overview = await extract_document_overview(full_text, filename, llm, model)
     
     if tracker:
@@ -262,3 +277,4 @@ async def extract_forensic_data(layout_data: Dict, filename: str = "", doc_id: i
 
     await llm.close()
     return {"metadata": res, "is_finished": True}
+

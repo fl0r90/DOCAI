@@ -7,7 +7,7 @@ from collections import defaultdict, deque
 from datetime import datetime
 
 import redis
-from fastapi import APIRouter, Depends, HTTPException, Body, Query
+from fastapi import APIRouter, Depends, HTTPException, Body, Query, BackgroundTasks
 from fastapi.responses import StreamingResponse, Response
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -226,6 +226,32 @@ def doc_retry(doc_id: int, user: models.User = Depends(get_current_user), db: Se
     _reset_document_data(db, doc_id)
     d.status = "QUEUED"; d.processed = False; db.commit()
     return {"status": "QUEUED"}
+
+
+def _run_deep_audit_bg(doc_id: int):
+    import asyncio
+    from ..services.deep_audit_service import DeepForensicAuditor
+    async def _runner():
+        auditor = DeepForensicAuditor(doc_id)
+        await auditor.run_audit()
+    try:
+        asyncio.run(_runner())
+    except Exception as e:
+        print(f"[!] Eroare in background deep audit pentru doc {doc_id}: {e}")
+
+
+@router.post("/documents/{doc_id}/audit_only")
+def doc_audit_only(doc_id: int, bg_tasks: BackgroundTasks, user: models.User = Depends(get_current_user), db: Session = Depends(get_forensic_db)):
+    d = db.query(models.Document).filter(models.Document.id == doc_id).first()
+    if not d: raise HTTPException(404, "Document inexistent.")
+    _check_access(d.case_id, user, db)
+    if not d.raw_text:
+        raise HTTPException(400, "Documentul nu are text extras pentru audit.")
+    d.status = "AI_AUDITING"
+    db.commit()
+    bg_tasks.add_task(_run_deep_audit_bg, doc_id)
+    return {"status": "AI_AUDITING", "message": "Audit AI declanșat în fundal."}
+
 
 
 @router.post("/documents/{doc_id}/delete")

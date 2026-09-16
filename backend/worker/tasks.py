@@ -352,111 +352,23 @@ def unified_worker_pipeline():
                 chunks_info = _create_chunks_and_embeddings(doc_id, ocr_result, filename=filename, raw_markdown=ocr_result.get("markdown", ""), tracker=tracker)
                 debug_logger.task_stage(doc_id=doc_id, stage="EMBEDDINGS", status="COMPLETED", details={"chunks_count": len(chunks_info)})
                 
-                # 5. STRUCTURED EXTRACTION (Grinder - LLM JSON Mode)
-                # Stergem datele vechi financiare in caz de re-procesare
-                db.query(models.FinancialItem).filter(models.FinancialItem.document_id == doc_id).delete()
+                # 5. STRUCTURED EXTRACTION (Universal Deep Forensic AI Audit Engine)
+                tracker.start_grinder_overview(total_tables=num_tables)
+                from core_engine.services.deep_audit_service import DeepForensicAuditor
+                auditor = DeepForensicAuditor(doc_id)
+                audit_res = asyncio.run(auditor.run_audit())
+                tracker.finish_grinder_overview()
+
+                ents_found = audit_res.get("entities_count", 0)
+                has_summary = bool(audit_res.get("summary_length", 0) > 50)
+                debug_logger.task_stage(doc_id=doc_id, stage="GRINDER_EXTRACTION", status="COMPLETED", details={"entities_count": ents_found, "has_summary": has_summary, "financial_items": audit_res.get("financial_items_count", 0)})
+
+                next_doc.status = "COMPLETED"
                 db.commit()
-
-                res = asyncio.run(extract_forensic_data(ocr_result, filename, doc_id, tracker=tracker))
-                debug_logger.task_stage(doc_id=doc_id, stage="GRINDER_EXTRACTION", status="COMPLETED")
-                
-                # 6. GRAPH SYNC & FINAL SYNTHESIS
-                if res and res.get("is_finished"):
-                    ai_data = res.get("metadata", {})
-                    
-                    if ai_data.get("doc_type"):
-                        next_doc.doc_type = ai_data.get("doc_type")
-                    if ai_data.get("doc_date"):
-                        next_doc.doc_date = str(ai_data.get("doc_date"))
-                    if ai_data.get("doc_number"):
-                        next_doc.doc_number = str(ai_data.get("doc_number"))
-                    if ai_data.get("ai_summary"):
-                        next_doc.ai_summary = ai_data.get("ai_summary")
-
-                    # ENRICHMENT: Mapăm entitățile AI pe MasterEntities din SQL
-                    graph_data = ai_data.get("graph_data", {"entitati": [], "relatii": []})
-                    for ent in graph_data.get("entitati", []):
-                        val = ent.get("valoare") or ent.get("nume")
-                        tip = ent.get("tip_entitate") or ent.get("tip")
-                        
-                        # Căutăm în SQL dacă avem deja entitatea asta „curată”
-                        m_ent = None
-                        if tip in ["CUI", "FIRMA"]:
-                            m_ent = db.query(models.MasterEntity).filter(
-                                (models.MasterEntity.cui_cif_cnp == val) | 
-                                (models.MasterEntity.official_name == val)
-                            ).first()
-                        
-                        if m_ent:
-                            ent["master_entity_id"] = m_ent.id
-                            ent["official_name"] = m_ent.official_name
-                        else:
-                            # Opțional: Dacă e o entitate nouă importantă, o putem crea aici în Master
-                            if tip in ["CUI", "FIRMA"] and val and len(str(val)) > 3:
-                                try:
-                                    new_m = models.MasterEntity(official_name=val, cui_cif_cnp=val if tip == "CUI" else None)
-                                    db.add(new_m); db.commit(); db.refresh(new_m)
-                                    ent["master_entity_id"] = new_m.id
-                                except: db.rollback()
-
-                    # Fallback sinteză doar dacă nu a fost generată deja de Grinder
-                    if not next_doc.ai_summary or len(str(next_doc.ai_summary).strip()) < 10:
-                        tracker.start_synthesis()
-                        from core_engine.services.llm_service import LLMService
-                        from core_engine.core.config import get_llm_config
-                        llm_synth = LLMService()
-                        synth_prompt = f"### System:\nEști un Auditor Forensic. Generează un REZUMAT EXECUTIV (Sinteză) în limba ROMÂNĂ pentru documentul '{filename}'. Concentrează-te pe scopul documentului, entitățile principale și datele cheie identified. Fii scurt și precis.\n### User:\n{next_doc.raw_text[:8000]}\n"
-                        
-                        print(f"[*] Generăm sinteza documentului (fallback)...")
-                        try:
-                            cfg = get_llm_config()
-                            processing_model = cfg.get("specialist_processing") or cfg.get("active_model")
-                            summary_text = asyncio.run(llm_synth.generate(synth_prompt, processing_model, is_json=False))
-                            next_doc.ai_summary = summary_text
-                        except Exception as e:
-                            print(f"[!] Eroare la generarea sintezei: {e}")
-                            next_doc.ai_summary = "Document procesat, dar sinteza automată a eșuat."
-                    
-                    # Generăm cuprinsul structural detaliat (TOC)
-                    doc_toc = None
-                    try:
-                        total_pages = ocr_result.get("num_pages") or (len(chunks_info) if 'chunks_info' in locals() and chunks_info else 1)
-                        print(f"[*] Generăm cuprinsul structural detaliat (TOC) pentru documentul {doc_id} (total pagini: {total_pages})...")
-                        doc_toc = toc_service.generate_toc(
-                            raw_text=next_doc.raw_text or "",
-                            total_pages=total_pages,
-                            document_id=doc_id,
-                            document_title=filename,
-                            use_llm=False
-                        )
-                    except Exception as toc_err:
-                        print(f"[!] Eroare generare TOC la documentul {doc_id}: {toc_err}")
-
-                    # Salvăm metadatele finale (inclusiv atributele dinamice, entitățile îmbogățite și TOC)
-                    next_doc.doc_metadata = {
-                        "doc_type": next_doc.doc_type,
-                        "doc_date": next_doc.doc_date,
-                        "doc_number": next_doc.doc_number,
-                        "dynamic_attributes": ai_data.get("dynamic_attributes", {}),
-                        "financial_data": ai_data.get("financial_data", []), 
-                        "outline": doc_toc.to_flat_list() if doc_toc else ocr_result.get("outline", []),
-                        "toc": doc_toc.model_dump() if doc_toc else {},
-                        "graph_data": graph_data
-                    }
-                    
-                    tracker.start_graph_sync()
-                    case_obj = db.query(models.Case).filter(models.Case.id == next_doc.case_id).first()
-                    graph_service.sync_document_to_graph(
-                        doc_id, 
-                        filename, 
-                        next_doc.case_id, 
-                        next_doc.doc_metadata, 
-                        master_id=case_obj.master_id if case_obj else None
-                    )
-                
-                next_doc.status = "COMPLETED"; db.commit()
                 tracker.complete()
-                debug_logger.task_stage(doc_id=doc_id, stage="PIPELINE_END", status="SUCCESS", details={"filename": filename})
+                pipe_status = "SUCCESS" if (ents_found > 0 or has_summary) else "COMPLETED_WITH_WARNINGS"
+                debug_logger.task_stage(doc_id=doc_id, stage="PIPELINE_END", status=pipe_status, details={"filename": filename, "entities_count": ents_found, "has_summary": has_summary})
+
         except Exception as e: 
             if 'tracker' in locals() and tracker:
                 tracker.fail(str(e))

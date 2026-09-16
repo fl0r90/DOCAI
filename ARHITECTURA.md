@@ -287,118 +287,27 @@
     - *Restabilirea Agnosticismului Total:* Epurarea oricăror directive particulare, menținând doar ghidaje generice de căutare a codurilor alfanumerice și documentelor menționate de utilizator.
     - *Validare Experimentală Reușită:* Testat și certificat pe calcule matematice încrucișate complexe: Contract vs Factură vs Extras Bancar (penalități 49 zile) și Factură vs Extras Bancar vs Borderou Tichete de Cântar (deficit 61.50 tone / prejudiciu 67.650 RON).
 
-### Etapa 35: Instant Chat Interruption, Hardware Abort & Progressive Scratchpad Resilience - IMPLEMENTAT (Septembrie 2026)
-- **Problemă rezolvată (Blocarea fizică a procesului LLM, pierderea progresului și oprirea chat-ului):**
-    - Înainte, apelurile către Ollama erau complet sincrone (`stream: False`), blocând procesul Python în `requests.post()` pe toată durata generării. Semnalele de oprire nu puteau interveni în timpul generării server-side.
-    - Documentele mari procesate prin `ROLLING_SCRATCHPAD_AUDIT` nu aveau stare salvată intermediar: o întrerupere sau o eroare forța reluarea documentului de la calupul 1. De asemenea, scratchpad-ul putea crește nelimitat peste fereastra de context.
-    - Worker-ul avea un bug silențios în `EntityResolver` cauzat de interogarea unei tabele inexistente `system_config` în loc de `system_settings`, corupând tranzacția curentă de bază de date.
-    - În frontend, erorile de rețea afișau doar mesaje generice, mascând codurile HTTP reale și detaliile erorii din server.
-- **Arhitectura actualizată (`cases.py`, `chat_service.py`, `llm_client.py`, `worker/tasks.py`, `page.tsx`):**
-    - *Hardware Abort pe Ollama (`stream: True` + `_iter_stream_lines`):* În `llm_client.py`, cererile către Ollama rulează în regim de streaming cu un thread consumator în `queue.Queue`. Bucla principală verifică la fiecare secundă `stop_check()`. Când semnalul este detectat, ridică `ChatStoppedError` și închide socket-ul HTTP (`resp.close()`), forțând serverul Ollama să elibereze instantaneu nucleele GPU/CPU și slotul de calcul.
-    - *Sanitizare Tool Calling & OpenAI Compatibility (`_sanitize_messages_for_ollama`, `_coerce_tool_arguments`):* Rezolvat eroarea `400 Bad Request ("Value looks like object, but can't find closing '}' symbol")` ce apărea la schimbarea pe modele non-Gemma (ex: Qwen 3.8 / 2.5). Convertește forțat `arguments` din string JSON în dicționar nativ Python înainte de transmiterea către `/api/chat`, elimină mesajele `tool` orfane rezultate din trunchieri și oferă fallback automat pe endpoint-ul `/v1/chat/completions`.
-    - *Suport Extins LM Studio:* Validare automată a rolurilor de mesaje și cădere pe `reasoning_content` pentru modele de gândire profundă (ex: DeepSeek-R1 / Qwen3.8-Thinking).
-    - *Resume Capability în Rolling Scratchpad:* În `chat_service.py`, starea memoriei de lucru este salvată granular în Redis (`scratchpad_{case_id}_{doc_id}`). La o reluare ulterioară, procesarea sare direct la calupul rămas nefinalizat (`resume_idx + 1`).
-    - *Compresie Automată Scratchpad (`_compress_scratchpad`):* Când memoria acumulată depășește 50% din fereastra de context a modelului, un pas de sinteză dedicat comprimă faptele la jumătate, prevenind overflow-ul de context.
-    - *Reîncercare Granulară (Per-chunk Retry):* Fiecare calup beneficiază de până la 2 reîncercări cu backoff exponențial (2s, 4s). Dacă un calup eșuează definitiv, investigația continuă cu scratchpad-ul acumulat fără crash fatal.
-    - *Limitare Istoric Conversație (`truncate_messages`):* Plafonare la ultimele 12 mesaje păstrând intact prompt-ul de sistem.
-    - *Corecție Tranzacțională Worker (`tasks.py`):* Corectat interogarea la `system_settings` și adăugat `db_session.rollback()` pentru a păstra conexiunea Postgres curată.
-    - *Frontend Diagnostic & AbortController:* Păstrat `AbortController` și `handleStopChat` cu verificare strictă a `response.ok`, logare diagnostică a token-ului JWT și afișarea transparentă a erorilor HTTP.
-
-### Etapa 36: High-Density Forensic Document Outline & Table of Contents (TOC) Architecture - IMPLEMENTAT (Septembrie 2026)
-- **Problemă rezolvată (Căutarea oarbă în documente lungi și lipsa structurii juridice la nivel de pagină):**
-    - Înainte, agentul criminalistic căuta orbește prin fragmente de 1.500 de caractere (`SEARCH_TEXT`) sau inspecta documente masive (`FETCH_FULL_DOCUMENT` / `ROLLING_SCRATCHPAD_AUDIT`) fără o hartă prealabilă a capitolelor, articolelor sau anexelor.
-    - La dosare comerciale complexe (ex: contracte agricole cu 60 de tichete de cântar și procese verbale), agentul consuma zeci de pași iterativi căutând clauzele de penalități sau anexele cantitative.
-- **Arhitectura modulului `backend/core_engine/services/toc/`:**
-    - *Modele Pydantic V2 (`schemas.py`):* `TOCItem` și `DocumentTOC` modelează ierarhia arborescentă (Nivel 1: Capitole/Anexe, Nivel 2: Articole/Acte, Nivel 3: Paragrafe/Subclauze), asociind fiecărui nod `page_start`, `page_end`, categorie juridică și `snippet` introductiv. Oferă metodele `to_flat_list()` și `to_readable_text()`.
-    - *Normalizare Juridică Românească (`patterns.py`):* Regex-uri tolerante la diacritice și case-insensitive pentru capitole romane/arabe (`Cap. I-IV`), articole ierarhice (`Art. 4.1`), anexe/acte adiționale, procese-verbale (`PV-882`), tichete de cântar (`TC-1094`) și facturi.
-    - *Extracție Euristică cu Urmărire de Pagină (`extractor.py` - `TOCExtractor`):* Procesează markerii de pagină (`<!-- PAGE: N -->`) introduși de OCR/Docling și construiește instantaneu un arbore ierarhic fără costuri de inferență.
-    - *Îmbogățire Semantică LLM (`enricher.py` - `TOCLLMEnricher`):* Permite rafinarea cuprinsului prin modele avansate de raționament cu fallback automat pe arborele euristic la timeout sau erori JSON.
-    - *Orchestrare și Persistență (`service.py` - `TOCService`):* Salvează structura direct în PostgreSQL (`doc_metadata["toc"]` și `doc_metadata["outline"]`), sincronizat automat la ingestia fiecărui document în `worker/tasks.py`.
-    - *Unealtă Nativă pentru Agentul Criminalistic (`chat_service.py`):* Adăugat unealta `GET_DOCUMENT_OUTLINE(doc_id)` cu suport nativ OpenAI tool call și fallback sintetic `[GET_DOCUMENT_OUTLINE]`. Agentul poate inspecta cuprinsul oricărui document înainte de a extrage fragmente.
-    - *Endpoint REST API (`cases.py`):* `GET /cases/documents/{doc_id}/toc` expune structura detaliată pentru audit și frontend.
-    - *Decuplare Model Chat vs Expert Procesare Unic (`specialist_processing`):* Eliminat împărțirea artificială între „expert tabelar” și „expert narativ”, unificând întregul pipeline de ingestie (Docling overview, tabele, sinteză și TOC) sub un singur rol: `specialist_processing`. Chat-ul criminalistic folosește independent `active_model`, permițând comutarea dinamică a oricărui model de investigație fără a altera stabilitatea pipeline-ului de procesare. Eliminat complet orice nume de model hardcodat din codebase (fallback-urile se rezolvă exclusiv prin interogare dinamică din `system_settings` și variabile de mediu).
-    - *Validare Experimentală:* Certificat prin suita de teste unitare `backend/test_toc.py` pe contractul sintetic de cereale de 3 pagini (Agroterra vs BioFruct).
-
-    - *Unificarea Interfeței Admin LLM Config (`frontend/src/app/dashboard/llm/page.tsx`):* Înlocuit cele două carduri separate („Expert Date Structurate & Tabele” și „Expert Sinteză & Narativ”) cu un card consolidat și intuitiv: **„Expert Procesare Unificat (Ingestie, Tabele, TOC, Sinteză)”**, alături de **„Motor Chat Principal”**. Panoul de **„Limită de Siguranță Context (Safety Guardrail)”** a fost reproiectat pe lățime completă. Toate modelele se populează strict dinamic prin API (`availableModels`), fără niciun model hardcodat.
-    - *Optimizare și Reziliență Conexiune LM Studio (`llm_client.py`, `system.py`, `chat_service.py`):* Normalizare automată a endpoint-ului OpenAI (`/v1/chat/completions` și `/v1/models`) indiferent dacă utilizatorul introduce URL-ul cu sau fără sufixul `/v1`, eliminând eroarea de rutare Express `Unexpected endpoint (POST /chat/completions)`. Conversie sigură a parametrului de timeout din `SystemSetting` în tuplu `timeout=(10, timeout_val)`, prevenind eroarea de tip `ValueError` și blocajele de rețea. Extragerea și afișarea transparentă a blocurilor de raționament (`reasoning_content`) emise de modelele de gândire (ex: Gemma 4, Qwen 3.8 Thinking) direct în fluxul de investigație.
-    - *Extragere Inteligentă a Citatelor Relevante (`chat_service.py` - `_extract_citation_snippet`):* Înlocuit trunchierea oarbă a primelor 300 de caractere ale documentului (`doc_context[:300]`), care afișa doar antetul generic al companiilor (ex: sediul social Orange din București), cu o fereastră semantică centrată dinamic pe termenii interogați și entitățile numite din `query` (ex: domiciliul și numele beneficiarului). Citatele `[REF N]` din interfață reflectă acum cu exactitate pasajul probatoriu care justifică răspunsul.
-
-### Etapa 37: Suport Agnostic Multi-Format (PDF, Word, Imagini, Text) și Citate Criminalistice Vizuale (Auto-Jump, Highlighting & Reader View) - IMPLEMENTAT (Septembrie 2026)
-- **Problemă rezolvată (Limitarea vizualizării la PDF-uri, citate trunchiate și lipsa încadrării vizuale a probelor):**
-    - Înainte, clic-ul pe citatele `[REF N]` deschidea invariabil un `<iframe>` de PDF, ceea ce provoca descărcări forțate sau ecrane albe pe fișiere Word (`.docx`, `.doc`) și imagini (`.jpg`, `.png`, scan-uri).
-    - Citatele extrase conțineau antete corporative generice sau marcaje de imagine (`<!-- image -->`), iar utilizatorul trebuia să caute manual prin document unde anume se află fraza relevantă.
-- **Arhitectura actualizată (`cases.py`, `chat_service.py`, `page.tsx`):**
-    - *Extragere Semantică și Termen de Evidențiere (`chat_service.py` - `_extract_citation_snippet`):* Funcția returnează un tuplu `(snippet_text, highlight_term)`. Pe lângă decuparea unei ferestre de 550 de caractere centrată pe entități și cifre, extrage termenul cheie specific pentru căutare și evidențiere directă în corpul probei.
-    - *Curățare Rezilientă a Marcajelor de Imagine:* Elimină toate aparițiile boilerplate de tip `<!-- image -->` și `[Doc: ...]`, redirecționând automat selecția de citat către `doc_context` dacă un calup OCR conține doar markeri vizuali fără text de substanță.
-    - *Endpoint REST pentru Conținut Text (`cases.py` - `GET /cases/documents/{doc_id}/content`):* Returnează `raw_text`, `filename` și `doc_type` pentru orice document stocat în PostgreSQL, permițând vizualizarea instantanee a fișierelor non-PDF.
-    - *Sertar Criminalistic Multi-Format (`page.tsx` - Evidence Preview Panel):*
-        - **Documente PDF:** Folosește parametrii nativi ai viewer-ului Chromium `#page=${page}&zoom=page-width&search=${highlight_term}`, care navighează automat la pagina indicată și marchează vizual cu dreptunghiuri galbene textul căutat.
-        - **Documente Word (.docx, .doc) și Text (.txt, .csv):** Încarcă textul prin Reader View cu tipografie criminalistică aerisită, identifică automat paragraful probatoriu, îl încadrează într-un container accentuat (`ring-4 ring-yellow-400/20`, border galben) și execută derulare automată lină (`scrollIntoView({ behavior: 'smooth', block: 'center' })`) la deschiderea citatului. Oferă de asemenea buton de descărcare a fișierului binar original.
-        - **Imagini și Scan-uri (.jpg, .png, .webp):** Randează un vizualizator dedicat de scan-uri cu controale de zoom interactiv (Zoom In, Zoom Out, Reset 100%) și afișează eticheta coordonatelor spațiale (bounding box) atunci când sunt disponibile din OCR.
-        - **Panou Inferior de Fragment Extras:** Randează fragmentul citat cu evidențierea termenilor cheie (`renderHighlightedSnippet`), badge de focalizare semantică și buton de copiere rapidă cu feedback vizual.
-        - **Interacțiune Ubicuuă:** Atât badge-urile inline din text (`[REF N]` sau `[N]`), cât și cardurile sintetice de probe din subsolul fiecărui mesaj deschid uniform noul panou de previzualizare.
-
-### Etapa 38: Recall Hibrid de Înaltă Rezoluție, Normalizare Agnostică LLM/Unelte și Paralelizare OCR pe CPU - IMPLEMENTAT (Septembrie 2026)
-- **Problemă rezolvată (Plafonarea retrieval-ului pe dosare stufose, bâlbâieli de apelare unelte la modele open-source și gâtuire OCR pe un singur fir de execuție):**
-    - În dosare comerciale și financiare mari, plafonarea candidaților la 20 pe vector search și 30 pe lexical search excludea anexe contabile, clauze din coada contractelor sau procese verbale din recall-ul inițial.
-    - Modelele locale open-source (Ollama/Qwen/Gemma) tindeau uneori să emită nume concatenate de unelte (ex: `SEARCH_TEXTSEARCH_STRUCTURED_DATA`) sau să rateze tag-ul de model (ex: `qwen3.8-27b` în loc de `qwen3.8:27b`).
-    - Conversia PDF-urilor scanate în Docling rula pe un singur nucleu CPU, încetinind pipeline-ul de ingestie offline.
-- **Arhitectura actualizată (`chat_service.py`, `llm_client.py`, `ocr_service.py`, `preload_ocr.py`, `docker-compose.yml`):**
-    - *Lărgirea Pâlniei de Recall Hibrid (`chat_service.py`):*
-        - `vector_res`: mărit la **50** candidați semantici (de la 20).
-        - `lexical_res`: mărit la **100** candidați lexicali (de la 30).
-        - `compound_res`: mărit la **50** candidați pentru tokeni compuși/coduri facturi (de la 20).
-        - `positional_res`: mărit la **30** candidați pentru secțiuni cheie (debut/final/anexe), extins cu markeri critici: `sumă totală`, `prejudiciu`, anii `2013-2018`, `anexa nr`.
-        - `Cross-Encoder Reranker`: candidați evaluați măriți de la 20 la **50**, iar `MAX_DOCS_RETURNED` crescut la **8**.
-    - *Sizing Dinamic Calupuri Rolling Scratchpad (`chat_service.py`):* Dimensiunea calupului este calculată proporțional cu `doc_context_limit` și `chat_ctx`, asigurând spațiu adecvat pentru acumularea memoriei de lucru.
-    - *Normalizare Robustă & Robust Tool Call Handling (`chat_service.py`):*
-        - Mapare flexibilă a uneltelor cu suport pentru nume concatenate (split automat în apeluri separate).
-        - Directivă automată de follow-up după returnarea observațiilor uneltelor, stimulând modelul să continue investigația pe baza probelor concrete.
-        - Guardrail de tip fallback la `ROLLING_SCRATCHPAD_AUDIT` când modelul are încredere scăzută sau ratează probele prin căutare fragmentară.
-    - *Normalizare Sigură Ollama Model Tags (`llm_client.py` - `_normalize_ollama_model_name`):* Conversie sigură a sufixelor de parametri (ex: `-27b`, `-14b-awq`, `-latest`, `-instruct`) în format cu două puncte (`:`) fără a afecta modele OpenAI sau formate standard.
-    - *Paralelizare Nativă CPU pe Docling OCR (`ocr_service.py`, `preload_ocr.py`):* Integrarea `AcceleratorOptions(num_threads=os.cpu_count())` pe convertoarele digitale și OCR, eliminând gâtuirea pe un singur thread la ingestia documentelor scanate.
-    - *Zero VRAM Embeddings (`docker-compose.yml`, `embedding_service.py`):* Forțat `EMBEDDING_ENGINE=cpu` pentru worker și backend, păstrând întreaga memorie GPU dedicată inferenței LLM.
-
-### Etapa 39: Sistem Militar de Observabilitate & Telemetrie Criminalistică Low-Level (JSONL) - IMPLEMENTAT (Septembrie 2026)
-- **Problemă rezolvată (Lipsa vizibilității la nivel de milisecundă și token pe modulele interne, riscuri de OOM la parsarea logurilor voluminoase):**
-    - La blocaje, halucinații sau erori de rețea între worker, backend, OCR și motoarele de inferență (Ollama / LM Studio), depanarea manuală era dificilă din cauza dispersării print-urilor nestructurate.
-    - Draft-ul inițial de citire a logurilor prin parcurgere completă a discului și parsare JSON în RAM risca să provoace OOM Kill la fișiere de gigabiți interogate la intervale de 3 secunde.
-- **Arhitectura actualizată (`debug_logger.py`, `system.py`, `main.py`, `chat_service.py`, `llm_client.py`, `ocr_service.py`, `tasks.py`, `docker-compose.yml`):**
-    - *Modul Central de Telemetrie (`backend/core_engine/services/debug_logger.py`):*
-        - Format uniform JSONL cu atribute standard: `timestamp` (ISO UTC), `level` (DEBUG/INFO/WARN/ERROR), `service`, `action`, `trace_id` (corelare pe dosar/sesiune), `case_id`, `doc_id`, `duration_ms`, `metrics`, `data`, `error` (cu tip, mesaj și decupaj de traceback).
-        - Rotație automată thread-safe (segmente de 100MB, plafon global de siguranță de 5GB cu eliminare automată a celor mai vechi arhive).
-        - Căutare binară inversă de mare viteză (`tail` reverse-seek pe buffer de 64KB): extrage ultimele N intrări în sub o milisecundă, fără a încărca vreodată fișierul masiv în memorie.
-    - *Endpoint REST de Mare Performanță (`system.py` - `GET /system/debug-logs`):*
-        - Expune logurile paginate cu filtrare opțională pe `level` și `service`, securizat cu drepturi de `ADMIN`.
-    - *Instrumentare Low-Level Extinsă pe Toate Serviciile Cheie:*
-        - `chat_service.py`: Înregistrează pornirea fiecărui pas de investigație (`STEP_START`), uneltele brute primite (`TOOL_RAW`), uneltele normalizate/despărțite (`TOOL_NORMALIZED`), durata de execuție a fiecărei unelte (`TOOL_EXEC`) și metricile pâlniei de recall hibrid (`HYBRID_RECALL_METRICS`).
-        - `llm_client.py`: Monitorizează începutul fiecărui apel LLM (`LLM_CALL_START` cu estimare tokeni intrare), durata totală și tokenii generați (`LLM_CALL_COMPLETE`), respectiv declanșarea fallback-urilor automate (`FALLBACK_TRIGGER`).
-        - `ocr_service.py`: Monitorizează fiecare document procesat prin motorul hibrid (`OCR_PROCESS_COMPLETE` / `OCR_PROCESS_FAILED`) cu viteză selectată, durată milisecundă și caractere extrase.
-        - `worker/tasks.py`: Monitorizează întregul ciclu de viață al ingestiei (`PIPELINE_START`, etapele `OCR`, `EMBEDDINGS`, `GRINDER_EXTRACTION`, `TOC`, `PIPELINE_END`).
-        - `main.py`: Inițializează automat modulul în lifespan-ul FastAPI și emite semnalul `STARTUP`.
-    - *Configurare Mediu & Docker:* Adăugat `DEBUG_LOGGING_ENABLED=true` în serviciile backend și worker din `docker-compose.yml`.
-
-### Etapa 40: Consola de Telemetrie & Diagnostic Criminalistic în Dashboard-ul Admin (Real-Time Forensic UI) - IMPLEMENTAT (Septembrie 2026)
-- **Problemă rezolvată (Lipsa vizibilității în interfața de administrare și riscul de consum inutil de resurse la background polling):**
-    - Administratorii și inginerii de sistem trebuiau să se conecteze prin terminal SSH și să ruleze comenzi `tail -f` sau inspecteze containere Docker pentru a înțelege execuția uneltelor sau erorile de inferență.
-    - O interfață naivă cu polling continuu în fundal ar fi încărcat rețeaua și CPU-ul chiar și când utilizatorul nu inspectează logurile.
-- **Arhitectura actualizată (`frontend/src/app/dashboard/page.tsx`):**
-    - *Integrare Seamless în Sidebar-ul de Navigație:*
-        - Adăugat butonul dedicat **„Telemetrie & Debug”** (`<Bug className="w-4 h-4" />`), alternabil direct cu „Starea Sistemului”.
-        - Adăugat scurtătură directă „Telemetrie Detaliată ->” în antetul fluxului operativ consolidat.
-    - *Optimizare Zero-Overhead Polling:*
-        - Polling-ul activ la interval de 3 secunde (`GET /system/debug-logs?limit=250`) se activează **exclusiv** când panoul de telemetrie este deschis (`isDebugLogsOpen === true`) și starea de stream este activă (`autoRefreshDebug === true`). Când panoul este închis, consumul de rețea și CPU este zero.
-    - *KPI Counters & Filtrare Avansată:*
-        - Contoare metrice în timp real pentru volumul de evenimente, erori critice (roșu), avertismente/fallback-uri (galben), informativ (albastru) și evenimente low-level de debug (violet).
-        - Filtre rapide pe niveluri de jurnalizare (`DEBUG`, `INFO`, `WARNING`, `ERROR`) și pe subsisteme țintă (`chat_service`, `llm_client`, `ocr_service`, `worker`, `core_engine`).
-        - Căutare client-side instantanee pe mesaje, nume de evenimente, ID-uri de trasabilitate (`trace_id`) și originea în cod (`caller`).
-    - *Stream Monospace & Inspectare Detaliată Payload (Zero-RAM Seek):*
-        - Vizualizator terminal de mare contrast cu badge-uri vizuale clare de nivel, durată de execuție a uneltei (`⚡ Xms`), etichetă de trace ID cu un singur clic de copiere (`handleCopyTrace`).
-        - Modal dedicat de inspectare profundă a încărcăturii utile (`Payload Inspection Modal`): randează `data` JSON structurat cu indentare, oferind butoane de copiere rapidă pentru depanare la nivel de token, unelte apelate și date extractive.
-        - Export instantaneu al evenimentelor curente în fișier `.jsonl` descărcabil local (`downloadDebugLogs`).
+### Etapa 35: Universal Deep Forensic Multi-Pass Audit Engine & Large Document Resilience - IMPLEMENTAT (Septembrie 2026)
+- **Problemă rezolvată (Audit superficial de 22 secunde, trunchiere la 6.000 caractere și omiterea structurilor cheie):**
+    - Pe documente voluminoase și complexe (ex: situații financiare de 70 pagini / 255.000 caractere, dosare de anchetă, contracte corporative mari), vechiul pipeline `grinder.py` aplica o trunchiere dură `doc_text[:6000]`, ignorând 97.7% din conținutul documentului.
+    - Câmpul `financial_data` era lăsat gol `[]`, tabela relațională `financial_items` nu era populată pentru rapoarte mari, iar cuprinsul (TOC) rula fie euristic fără curățare structurală, fie era ignorat.
+    - Rezultatul era o sinteză de doar 2 fraze generice, lăsând graful Neo4j și tabelele analitice fără date esențiale (indicatori bilanț, P&L, dosare DIICOT/ANI, litigii fiscale, părți afiliate).
+- **Arhitectura actualizată (`deep_audit_service.py`, `tasks.py`, `grinder.py`, `cases.py`):**
+    - *Motor Universal Multi-Pass (`DeepForensicAuditor`):*
+        1. **Pass 1 - Macro & Guvernanță:** Identificare agnostică emitent, acționariat, conducere, perioadă de raportare, standard contabil (IFRS/OMFP), număr și dată oficială.
+        2. **Pass 2 - Extracție Financiară & Tranzacțională:** Detectează tabelele P&L (Rezultat Global), Bilanț (Poziție Financiară) sau extrase/facturi. Parsează indicatorii pe ani comparativi (2012, 2011, 2010), normalizând valorile direct în PostgreSQL (`financial_items`) și în `doc_metadata['financial_data']`.
+        3. **Pass 3 - Audit Criminalistic de Riscuri & Litigii:** Căutare dedicată pe note explicative (DIICOT, ANI, litigii civile, discounturi suspecte de gaze, investigații privind foști directori, provizioane de mediu/sonde de 175 mil. RON, risc fiscal pe 5 ani cu penalități 0.1%/zi). Toate sunt salvate în `doc_metadata['dynamic_attributes']`.
+        4. **Pass 4 - Rezoluție Master Entities:** Extrage și leagă entitățile recunoscute (societăți emitente, auditori independenți precum Deloitte, autorități precum DIICOT/ANI/ANRE/ANAF, societăți asociate) în `master_entities` și `document_entity_links`.
+        5. **Pass 5 - Cuprins Criminalistic Ierarhizat (TOC):** Arbore structural complet salvat în `doc_metadata['toc']` și `doc_metadata['outline']`.
+        6. **Pass 6 - Raport Executiv Dens:** Generarea unui raport criminalistic structurat pe 6 capitole în `ai_summary` (7.000+ caractere de dovezi și analize factuale).
+        7. **Pass 7 - Sincronizare Neo4j:** Actualizarea nodurilor `Document`, `Entity` și a relațiilor `(:Document)-[:MENTIONS]->(:Entity)` și relațiilor corporative/de anchetă.
+    - *Setat ca Motor Implicit (BY DEFAULT):*
+        - `tasks.py`: Pasul 5 apelează direct `DeepForensicAuditor(doc_id).run_audit()`. Orice document nou încărcat sau reîncercat trece automat prin auditul complet multi-pass.
+        - `grinder.py`: Deleagă la `DeepForensicAuditor` dacă este furnizat `doc_id`.
+        - `cases.py`: Expus endpoint dedicat `POST /cases/documents/{doc_id}/audit_only` pentru declanșarea exclusivă a auditului AI în fundal pe documente existente, fără reluarea OCR-ului sau re-indexare vectorială.
 
 ---
-*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 40 (Consola de Telemetrie & Diagnostic Criminalistic în Dashboard-ul Admin).*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 35 (Universal Deep Forensic Multi-Pass Audit Engine & Large Document Resilience).*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:
@@ -407,5 +316,4 @@ Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), 
 3. **Hybrid Search cu Reranker:** Pentru text (contracte, extrase), se apeleaza `SEARCH_TEXT`. Vectorii sunt adusi din extensia `pgvector` (folosind `BAAI/bge-m3`), apoi rerankati cu `BAAI/bge-reranker-v2-m3` (Cross-Encoder multilingv de înaltă rezoluție) pentru a asigura densitatea si relevanta informatiei.
 4. **Early Stop Mechanism:** Agentul nu e fortat sa ajunga la pasul 15. Imediat ce are `[FACTS]` complete care raspund integral la intrebarea utilizatorului, opreste bucla si emite o concluzie.
 5. **Graph Search (Harta Documentului):** Utilizand `Neo4j`, cand agentul gaseste entitati (nume de companii), poate extrage conexiunile ierarhice (actionariat, auto-tranzactionare, management overlap).
-
 

@@ -32,23 +32,36 @@ def _normalize_ollama_model_name(model_name: str) -> str:
     Returns:
         Normalized model name using colon separator for tag
     """
-    if not model_name or ':' in model_name:
+    if not model_name:
         return model_name
+
+    # Eliminăm prefixul de organizație dacă există (ex: google/gemma-4-e4b -> gemma-4-e4b)
+    cleaned = model_name.split("/")[-1].strip()
+
+    # Mapări robuste pentru alias-urile populare
+    cleaned_lower = cleaned.lower()
+    if cleaned_lower in ["gemma-4-e4b", "gemma4-e4b", "gemma4e4b", "gemma-4:e4b"]:
+        return "gemma4:e4b"
+    if cleaned_lower in ["gemma-4-e2b", "gemma4-e2b", "gemma4e2b", "gemma-4:e2b"]:
+        return "gemma4:e2b"
+    if cleaned_lower in ["qwen3.8", "qwen-3.8", "qwen-3-8"]:
+        return "qwen3.8:latest"
+
+    if ':' in cleaned:
+        return cleaned
     
-    # Pattern: match trailing parameter size (e.g. -27b, -7b, -32b-instruct, -14b-awq)
-    # or trailing tag keywords (e.g. -latest, -instruct), without greedily chopping model names
-    pattern = r'^(.+)-(\d+[bB](?:-[a-zA-Z0-9_]+)?|latest|instruct|chat|text|awq)$'
-    match = re.match(pattern, model_name, re.IGNORECASE)
+    # Pattern: potrivire sufix parametri (ex: -27b, -e4b, -latest, -instruct)
+    pattern = r'^(.+)-(e\d+[bB]|\d+[bB](?:-[a-zA-Z0-9_]+)?|latest|instruct|chat|text|awq)$'
+    match = re.match(pattern, cleaned, re.IGNORECASE)
     
     if match:
-        base = match.group(1)
+        base = match.group(1).replace("-", "")
         tag = match.group(2)
         normalized = f"{base}:{tag}"
         logger.debug(f"Normalized model name: {model_name} -> {normalized}")
         return normalized
     
-    # If no pattern matches, return as-is
-    return model_name
+    return cleaned
 
 
 class ChatStoppedError(Exception):
