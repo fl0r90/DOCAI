@@ -331,8 +331,43 @@ class DebugLogger:
                                 entry = json.loads(line_str)
                                 if level_filter and entry.get("level") != level_filter:
                                     continue
-                                if service_filter and entry.get("service", "").lower() != service_filter:
-                                    continue
+                                if service_filter:
+                                    srv = entry.get("service", "").lower()
+                                    if service_filter not in srv and srv not in service_filter:
+                                        continue
+
+                                # Normalizare standardizată pentru interfața de telemetrie
+                                if "action" in entry and "event" not in entry:
+                                    entry["event"] = entry["action"]
+                                elif "event" in entry and "action" not in entry:
+                                    entry["action"] = entry["event"]
+
+                                if "message" not in entry:
+                                    data_val = entry.get("data")
+                                    if isinstance(data_val, str):
+                                        entry["message"] = data_val
+                                    elif isinstance(data_val, dict):
+                                        if "message" in data_val:
+                                            entry["message"] = str(data_val["message"])
+                                        elif "stage" in data_val:
+                                            stage = data_val.get("stage", "")
+                                            status = data_val.get("status", "")
+                                            details = data_val.get("details")
+                                            det_str = f" - {json.dumps(details)}" if details else ""
+                                            entry["message"] = f"Etapă pipeline: {stage} [{status}]{det_str}"
+                                        elif "file" in data_val:
+                                            f = data_val.get("file", "")
+                                            chars = data_val.get("chars", 0)
+                                            entry["message"] = f"Procesat {f} ({chars} caractere, {data_val.get('speed', '')})"
+                                        else:
+                                            entry["message"] = f"{entry.get('action', '')}: {json.dumps(data_val)}"
+                                    elif entry.get("error"):
+                                        entry["message"] = entry["error"].get("message", "Eroare necunoscută")
+                                    elif entry.get("metrics"):
+                                        entry["message"] = f"Metrici: {json.dumps(entry.get('metrics'))}"
+                                    else:
+                                        entry["message"] = entry.get("action", "")
+
                                 file_entries.append(entry)
                                 if len(file_entries) >= target_count:
                                     break
@@ -346,7 +381,19 @@ class DebugLogger:
                             try:
                                 entry = json.loads(line_str)
                                 if (not level_filter or entry.get("level") == level_filter) and \
-                                   (not service_filter or entry.get("service", "").lower() == service_filter):
+                                   (not service_filter or (service_filter in entry.get("service", "").lower() or entry.get("service", "").lower() in service_filter)):
+                                    if "action" in entry and "event" not in entry:
+                                        entry["event"] = entry["action"]
+                                    if "message" not in entry:
+                                        data_val = entry.get("data")
+                                        if isinstance(data_val, str):
+                                            entry["message"] = data_val
+                                        elif isinstance(data_val, dict):
+                                            entry["message"] = data_val.get("message") or f"{entry.get('action')}: {json.dumps(data_val)}"
+                                        elif entry.get("error"):
+                                            entry["message"] = entry["error"].get("message", "Eroare necunoscută")
+                                        else:
+                                            entry["message"] = entry.get("action", "")
                                     file_entries.append(entry)
                             except Exception:
                                 pass

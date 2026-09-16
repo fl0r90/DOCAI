@@ -347,7 +347,7 @@ export default function Dashboard() {
                     { label: 'TOATE', value: null },
                     { label: 'DEBUG', value: 'DEBUG' },
                     { label: 'INFO', value: 'INFO' },
-                    { label: 'WARNING', value: 'WARNING' },
+                    { label: 'WARN', value: 'WARN' },
                     { label: 'ERROR', value: 'ERROR' },
                   ].map((lvl) => (
                     <button
@@ -373,11 +373,11 @@ export default function Dashboard() {
                     className="bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-white/10 text-xs font-bold rounded-xl px-3 py-2 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
                     <option value="">Toate Serviciile</option>
-                    <option value="chat_service">chat_service (Hybrid Recall & Tools)</option>
-                    <option value="llm_client">llm_client (Ollama/LM Studio)</option>
-                    <option value="ocr_service">ocr_service (Docling Multithreaded)</option>
-                    <option value="worker">worker (Pipeline & Celery)</option>
-                    <option value="core_engine">core_engine (Sistem & API)</option>
+                    <option value="worker">worker (Ingestie & Pipeline Tasks)</option>
+                    <option value="ocr">ocr_service (Docling Multithreaded)</option>
+                    <option value="chat">chat_service (Hybrid Recall & Tools)</option>
+                    <option value="llm">llm_client (Ollama / LM Studio)</option>
+                    <option value="system">system (Sistem & API)</option>
                   </select>
                 </div>
 
@@ -424,17 +424,18 @@ export default function Dashboard() {
                       if (!debugSearchTerm) return true;
                       const term = debugSearchTerm.toLowerCase();
                       const msg = (log.message || '').toLowerCase();
-                      const evt = (log.event || '').toLowerCase();
+                      const evt = (log.event || log.action || '').toLowerCase();
                       const trace = (log.trace_id || '').toLowerCase();
                       const srv = (log.service || '').toLowerCase();
                       const caller = (log.caller || '').toLowerCase();
-                      return msg.includes(term) || evt.includes(term) || trace.includes(term) || srv.includes(term) || caller.includes(term);
+                      const dataStr = typeof log.data === 'object' ? JSON.stringify(log.data).toLowerCase() : String(log.data || '').toLowerCase();
+                      return msg.includes(term) || evt.includes(term) || trace.includes(term) || srv.includes(term) || caller.includes(term) || dataStr.includes(term);
                     })
                     .map((log, index) => {
                       const levelColor =
                         log.level === 'ERROR' || log.level === 'CRITICAL'
                           ? 'bg-rose-500/15 text-rose-400 border-rose-500/30'
-                          : log.level === 'WARNING'
+                          : log.level === 'WARNING' || log.level === 'WARN'
                           ? 'bg-amber-500/15 text-amber-400 border-amber-500/30'
                           : log.level === 'INFO'
                           ? 'bg-blue-500/15 text-blue-400 border-blue-500/30'
@@ -447,11 +448,13 @@ export default function Dashboard() {
                           ? 'bg-fuchsia-500/15 text-fuchsia-400'
                           : log.service === 'ocr_service'
                           ? 'bg-cyan-500/15 text-cyan-400'
-                          : log.service === 'worker'
+                          : (log.service === 'worker' || log.service === 'worker_tasks')
                           ? 'bg-indigo-500/15 text-indigo-400'
                           : 'bg-slate-500/15 text-slate-300';
 
                       const timeFormatted = log.timestamp ? log.timestamp.split('T')[1]?.slice(0, 12) || log.timestamp : 'N/A';
+                      const eventName = log.event || log.action || 'EVENT';
+                      const messageText = log.message || (typeof log.data === 'string' ? log.data : log.data?.stage ? `Etapă: ${log.data.stage} (${log.data.status || 'OK'})` : log.error?.message || eventName);
 
                       return (
                         <div
@@ -480,8 +483,8 @@ export default function Dashboard() {
 
                           {/* EVENT BADGE */}
                           <div className="flex-shrink-0 w-32">
-                            <span className="text-[10px] font-bold text-slate-400 bg-white/5 px-2 py-0.5 rounded border border-white/5 block text-center truncate" title={log.event}>
-                              {log.event}
+                            <span className="text-[10px] font-bold text-slate-400 bg-white/5 px-2 py-0.5 rounded border border-white/5 block text-center truncate" title={eventName}>
+                              {eventName}
                             </span>
                           </div>
 
@@ -489,7 +492,7 @@ export default function Dashboard() {
                           <div className="flex-1 min-w-0 flex items-center justify-between gap-4">
                             <div className="truncate">
                               <span className="text-slate-200 group-hover:text-white transition-colors font-medium">
-                                {log.message}
+                                {messageText}
                               </span>
                               {log.trace_id && (
                                 <span
