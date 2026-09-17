@@ -306,8 +306,10 @@
         - `grinder.py`: Deleagă la `DeepForensicAuditor` dacă este furnizat `doc_id`.
         - `cases.py`: Expus endpoint dedicat `POST /cases/documents/{doc_id}/audit_only` pentru declanșarea exclusivă a auditului AI în fundal pe documente existente, fără reluarea OCR-ului sau re-indexare vectorială.
 
+    - *Corecție Telemetrie LLM Client (`llm_client.py`):* Adăugat importul lipsă `import time`, a cărui absență declanșa eroarea `NameError: name 'time' is not defined` la apelurile de inferență când se calcula latența `t_llm_dur`.
+
 ---
-*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 35 (Universal Deep Forensic Multi-Pass Audit Engine & Large Document Resilience).*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 35 (Universal Deep Forensic Multi-Pass Audit Engine & Large Document Resilience) și remediere telemetrie LLM Client.*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:
