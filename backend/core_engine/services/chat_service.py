@@ -127,7 +127,12 @@ def decompose_question(q: str) -> list:
 class AgenticInvestigator:
     def __init__(self, case_id: int, user_question: str):
         self.case_id = case_id
-        self.user_question = user_question
+        # Curățăm artefacte de copiere din terminal (box drawing │, |, etc.) și whitespace redundant
+        cleaned_q = re.sub(r'[│┃┆┇┊┋|┌┐└┘├┤┬┴┼─━]', ' ', user_question)
+        cleaned_q = re.sub(r'\s+', ' ', cleaned_q).strip()
+        if re.match(r'^e\s+(investiga|raport|clauz|factur|contract|document|litigi|disput)', cleaned_q, re.IGNORECASE):
+            cleaned_q = "C" + cleaned_q
+        self.user_question = cleaned_q
         self.active_model = get_active_model_name()
         self.citations = []
         self.graph = GraphService()
@@ -261,7 +266,7 @@ class AgenticInvestigator:
         with SessionLocal() as db:
             past_msgs = db.query(ChatMessage).filter(ChatMessage.case_id == self.case_id).order_by(ChatMessage.created_at.desc()).limit(7).all()
             # If the most recent message in DB is the current user question (saved by cases.py before launching), skip it
-            if past_msgs and past_msgs[0].role == "user" and past_msgs[0].content.strip() == self.user_question.strip():
+            if past_msgs and past_msgs[0].role == "user":
                 past_msgs = past_msgs[1:5]
             else:
                 past_msgs = past_msgs[:4]
@@ -324,15 +329,15 @@ class AgenticInvestigator:
                 
         # Agnostic Multi-Domain Intent Detection
         q_lower = self.user_question.lower()
-        if any(k in q_lower for k in ["cati", "câți", "cate", "câte", "total", "suma", "listă completă", "lista completa"]):
+        if re.search(r'\b(cati|câți|cate|câte|totalul|totala|totală|suma totală|sumă totală|listă completă|lista completa)\b', q_lower) or re.search(r'\btotal\b', q_lower):
             self.injected_evidence += "CRITICAL: The user is asking for a QUANTITATIVE answer or a TOTAL COUNT. You MUST use SEARCH_STRUCTURED_DATA to get accurate counts from the database tables. Do NOT rely on individual text fragments for totals.\n"
-        elif any(k in q_lower for k in ["plata", "incasare", "suma", "ron", "eur", "usd", "achizitie", "pret", "valoare", "cost", "factura", "virament", "iban", "cont"]):
+        elif re.search(r'\b(plata|plăți|incasare|încasare|sume|ron|eur|usd|achizitie|achiziție|pret|preț|valoare|cost|costuri|factura|factură|virament|iban|cont bancar)\b', q_lower):
             self.injected_evidence += "Suggested Intent: FINANCIAL / TABULAR -> Use SEARCH_STRUCTURED_DATA or targeted SEARCH_TEXT for exact amounts, invoices, and transactions.\n"
-        elif any(k in q_lower for k in ["whatsapp", "chat", "conversatie", "conversație", "mesaj", "mesaje", "discutie", "discuție", "audio", "cine a zis", "ce a raspuns", "ce a răspuns"]):
+        elif re.search(r'\b(whatsapp|chat|conversatie|conversație|mesaj|mesaje|discutie|discuție|audio|cine a zis|ce a raspuns|ce a răspuns)\b', q_lower):
             self.injected_evidence += "Suggested Intent: CHAT / WHATSAPP FORENSICS -> Chronological communication audit. Inspect sender/recipient identities, exact timestamps, reply sequence, and informal agreements or contradictions against formal documents.\n"
-        elif any(k in q_lower for k in ["contract", "clauza", "clauză", "clauze", "penalitati", "penalități", "termen", "reziliere", "obligatii", "obligații", "semnat", "semnatar", "anexa", "anexă"]):
+        elif re.search(r'\b(contract|contractul|clauza|clauză|clauze|penalitati|penalități|termen|reziliere|obligatii|obligații|semnat|semnatar|anexa|anexă)\b', q_lower):
             self.injected_evidence += "Suggested Intent: CONTRACTUAL / LEGAL AUDIT -> Review contractual terms, defined parties, specific liabilities, penalty clauses, and signature/annex sections.\n"
-        elif any(k in q_lower for k in ["tot parcursul", "toata cartea", "toată cartea", "evolutia", "evoluția", "de la debut", "complet", "exhaustiv", "sinteză globală", "sinteza globala", "toate capitolele", "toata conversatia", "toată conversația"]):
+        elif re.search(r'\b(tot parcursul|toata cartea|toată cartea|evolutia|evoluția|de la debut|complet|exhaustiv|sinteză globală|sinteza globala|toate capitolele|toata conversatia|toată conversația)\b', q_lower):
             self.injected_evidence += "Suggested Intent: EXHAUSTIVE DOCUMENT AUDIT -> Use ROLLING_SCRATCHPAD_AUDIT to traverse all document chapters/pages and accumulate a comprehensive forensic scratchpad without missing any section.\n"
         else:
             self.injected_evidence += "Suggested Intent: CONTEXTUAL / TEXTUAL -> Use SEARCH_TEXT for document details.\n"
@@ -346,23 +351,118 @@ class AgenticInvestigator:
         if anchors:
             self.injected_evidence += "Relational Check: Entities detected. EXPLORE_GRAPH may provide links.\n"
 
+        # Pre-Scratchpad Forensic Dossier Direct Matching (Fast-Path)
+        try:
+            with SessionLocal() as db_ledger:
+                docs_with_ledger = db_ledger.query(Document).filter(Document.case_id == self.case_id).all()
+                q_words = [w.lower() for w in re.findall(r'\b\w{3,}\b', self.user_question) if w.lower() not in ["despre", "care", "este", "sunt", "cum", "cine", "unde", "cand", "acest", "pentru"]]
+                hits = []
+                for doc in docs_with_ledger:
+                    meta = doc.doc_metadata if isinstance(doc.doc_metadata, dict) else {}
+                    ledger = meta.get("forensic_ledger", [])
+                    for item in ledger:
+                        d_txt = item.get("dossier_text", "")
+                        d_txt_lower = d_txt.lower()
+                        matched_words = [w for w in q_words if w in d_txt_lower]
+                        if len(matched_words) >= max(1, min(2, len(q_words))):
+                            p_start = item.get("page_start", 1)
+                            p_end = item.get("page_end", 1)
+                            hits.append({
+                                "doc_id": doc.id,
+                                "filename": doc.filename,
+                                "page_start": p_start,
+                                "page_end": p_end,
+                                "chunk_idx": item.get("chunk_idx", 1),
+                                "total_chunks": item.get("total_chunks", 1),
+                                "matched_count": len(matched_words),
+                                "text": d_txt[:700]
+                            })
+                if hits:
+                    hits.sort(key=lambda h: h["matched_count"], reverse=True)
+                    top_hit = hits[0]
+                    self.injected_evidence += f"\n=== PRE-SCRATCHPAD FORENSIC AUDIT DIRECT HIT ===\n"
+                    self.injected_evidence += f"Identified section in '{top_hit['filename']}' (Doc ID {top_hit['doc_id']}), Secțiunea {top_hit['chunk_idx']}/{top_hit['total_chunks']} (Paginile {top_hit['page_start']}-{top_hit['page_end']}):\n"
+                    self.injected_evidence += f"{top_hit['text']}...\n"
+                    self.injected_evidence += f"ACTION RULE (ZOOM-IN): If this pre-audit summary answers the question, formulate [FINAL RESPONSE] immediately. If you need verbatim quotes or exact line numbers, call SEARCH_TEXT(concept='...', doc_id={top_hit['doc_id']}, page_start={top_hit['page_start']}, page_end={top_hit['page_end']}) to zoom in with the reranker!\n"
+        except Exception as e:
+            print(f"[!] Pre-audit ledger check error: {e}")
+
         if self.scratchpad:
             self.injected_evidence += "\n" + self._render_scratchpad() + "\n"
         
         self.injected_evidence += "Use the specialized tools below to find exact records.\n"
 
-    def tool_search_text(self, query: str, semantic_intent: str = ""):
-        """Tool 1: Hybrid Search (Lexical + Vector + Date-Aware) in document chunks."""
+    def tool_inspect_forensic_ledger(self, query: str = "", doc_id: int = 0):
+        """Tool: Search and inspect the pre-extracted granular forensic ledger (structured sections, key legal clauses, entities, financials)."""
+        with SessionLocal() as db:
+            docs_query = db.query(Document).filter(Document.case_id == self.case_id)
+            if doc_id > 0:
+                docs_query = docs_query.filter(Document.id == doc_id)
+            docs = docs_query.all()
+            if not docs:
+                return "No documents found in this case."
+
+            q_terms = [w.lower() for w in re.findall(r'\b\w{2,}\b', query)] if query else []
+            matches = []
+
+            for d in docs:
+                meta = d.doc_metadata if isinstance(d.doc_metadata, dict) else {}
+                ledger = meta.get("forensic_ledger", [])
+                if not ledger:
+                    summary = d.ai_summary or ""
+                    if summary:
+                        matches.append((1, f"Document: {d.filename} (ID {d.id})\n[Raport Executiv]:\n{summary[:1500]}"))
+                    continue
+
+                for chunk_item in ledger:
+                    c_text = chunk_item.get("dossier_text", "")
+                    p_start = chunk_item.get("page_start", 1)
+                    p_end = chunk_item.get("page_end", 1)
+                    idx = chunk_item.get("chunk_idx", 1)
+                    tot = chunk_item.get("total_chunks", 1)
+
+                    if not q_terms:
+                        matches.append((1, f"Document: {d.filename} (ID {d.id}) | Secțiunea {idx}/{tot} (Pag. {p_start}-{p_end}):\n{c_text}"))
+                    else:
+                        match_count = sum(1 for term in q_terms if term in c_text.lower())
+                        if match_count > 0:
+                            matches.append((match_count, f"Document: {d.filename} (ID {d.id}) | Secțiunea {idx}/{tot} (Pag. {p_start}-{p_end}):\n{c_text}"))
+
+            if not matches:
+                return f"Nu s-au găsit mențiuni relevante în dosarul de audit pentru '{query}'. Folosește SEARCH_TEXT pentru căutare în textul brut."
+
+            matches.sort(key=lambda x: x[0], reverse=True)
+            selected = [m[1] for m in matches[:4]]
+
+            citation_id = len(self.citations) + 1
+            self.citations.append({
+                "id": citation_id,
+                "doc_id": docs[0].id,
+                "page": 1,
+                "content": selected[0][:400],
+                "highlight_term": query[:30] if query else "",
+                "filename": docs[0].filename,
+                "spatial": "forensic_ledger"
+            })
+
+            return f"[REF {citation_id} - FORENSIC AUDIT DOSSIER]:\n\n" + "\n\n---\n\n".join(selected) + "\n\n💡 NOTĂ PENTRU INVESTIGATOR: Dacă ai nevoie de textul cuvânt cu cuvânt al unei clauze sau de cifre brute detaliate din paginile menționate mai sus, apelează SEARCH_TEXT(concept='...', doc_id=X, page_start=Y, page_end=Z) pentru zoom chirurgical cu reranker-ul!"
+
+    def tool_search_text(self, query: str, semantic_intent: str = "", doc_id: int = 0, page_start: int = 0, page_end: int = 0):
+        """Tool 1: Hybrid Search (Lexical + Vector + Date-Aware) in document chunks with optional targeted page zoom."""
         with SessionLocal() as db:
             all_docs = db.query(Document).filter(Document.case_id == self.case_id).all()
-            doc_ids = [d.id for d in all_docs]
-            if not doc_ids: return "No documents in this case."
+            if doc_id and doc_id > 0:
+                target_doc_ids = [d.id for d in all_docs if d.id == doc_id]
+            else:
+                target_doc_ids = [d.id for d in all_docs]
+            if not target_doc_ids: return "No documents found in this case."
             
             # Apply semantic intent preference (search in doc_type, filename OR dynamic_attributes)
             intent_doc_ids = set()
             if semantic_intent:
                 si_lower = semantic_intent.lower()
                 for d in all_docs:
+                    if d.id not in target_doc_ids: continue
                     matched = False
                     if d.doc_type and si_lower in d.doc_type.lower():
                         matched = True
@@ -378,6 +478,13 @@ class AgenticInvestigator:
                     if matched:
                         intent_doc_ids.add(d.id)
             
+            # Base filters for chunks (doc_id + optional page range zoom)
+            base_filters = [DocumentChunk.document_id.in_(target_doc_ids)]
+            if page_start > 0:
+                base_filters.append(DocumentChunk.page_number >= page_start)
+            if page_end > 0:
+                base_filters.append(DocumentChunk.page_number <= page_end)
+
             # Extract date variants from both the query AND the user question
             t_search_start = time.time()
             date_variants = get_date_variants(query)
@@ -388,12 +495,12 @@ class AgenticInvestigator:
             if not words and not date_variants:
                 return "No valid keywords or dates for text search."
 
-            # 1. Date Exact Search (fetch chunks matching any date variant directly)
+            # 1. Date Exact Search
             date_res = []
             if date_variants:
                 date_conditions = [DocumentChunk.content.ilike(f"%{dv}%") for dv in date_variants]
                 date_res = db.query(DocumentChunk)\
-                    .filter(and_(DocumentChunk.document_id.in_(doc_ids), or_(*date_conditions)))\
+                    .filter(and_(*base_filters, or_(*date_conditions)))\
                     .limit(30).all()
 
             # 2. Semantic Search (Vector)
@@ -407,9 +514,8 @@ class AgenticInvestigator:
             vector_res = []
             if query_embedding:
                 try:
-                    # Top 50 by semantic similarity (increased from 20)
                     vector_res = db.query(DocumentChunk)\
-                        .filter(DocumentChunk.document_id.in_(doc_ids))\
+                        .filter(and_(*base_filters))\
                         .order_by(DocumentChunk.embedding.l2_distance(query_embedding))\
                         .limit(50).all()
                 except Exception as e:
@@ -422,7 +528,7 @@ class AgenticInvestigator:
             if lex_words:
                 conditions = [DocumentChunk.content.ilike(f"%{w}%") for w in lex_words]
                 lexical_res = db.query(DocumentChunk)\
-                    .filter(and_(DocumentChunk.document_id.in_(doc_ids), or_(*conditions)))\
+                    .filter(and_(*base_filters, or_(*conditions)))\
                     .limit(100).all()
 
             # 3a. Compound Token Exact Search (e.g. FACT-2023-0245, CTR-104, AGRO-CHIM)
@@ -431,7 +537,7 @@ class AgenticInvestigator:
             if compound_tokens:
                 compound_conditions = [DocumentChunk.content.ilike(f"%{ct}%") for ct in compound_tokens]
                 compound_res = db.query(DocumentChunk)\
-                    .filter(and_(DocumentChunk.document_id.in_(doc_ids), or_(*compound_conditions)))\
+                    .filter(and_(*base_filters, or_(*compound_conditions)))\
                     .limit(50).all()
 
             # 3b. Positional Search (End/Epilogue/Signatures vs Start/Preamble)
@@ -440,13 +546,13 @@ class AgenticInvestigator:
             critical_keywords = ["final", "sfarsit", "sfârșit", "epilog", "concluzi", "ultim", "anexe", "semnatur", "sumă totală", "prejudiciu", "2013", "2014", "2015", "2016", "2017", "2018", "anexa nr"]
             if any(k in q_full_lower for k in critical_keywords):
                 end_chunks = db.query(DocumentChunk)\
-                    .filter(DocumentChunk.document_id.in_(doc_ids))\
+                    .filter(and_(*base_filters))\
                     .order_by(DocumentChunk.page_number.desc(), DocumentChunk.id.desc())\
                     .limit(30).all()
                 positional_res.extend(reversed(end_chunks))
             elif any(k in q_full_lower for k in ["debut", "inceput", "început", "preambul", "introducere", "articolul 1", "primele"]):
                 start_chunks = db.query(DocumentChunk)\
-                    .filter(DocumentChunk.document_id.in_(doc_ids))\
+                    .filter(and_(*base_filters))\
                     .order_by(DocumentChunk.page_number.asc(), DocumentChunk.id.asc())\
                     .limit(30).all()
                 positional_res.extend(start_chunks)
@@ -531,88 +637,47 @@ class AgenticInvestigator:
             MAX_TOTAL_CHARS = budget["max_total_chars"]
             MAX_DOCS_RETURNED = 8
 
-            doc_matches = {}  # doc_id -> list of (score, chunk)
-            top_score = scored_res[0][0] if scored_res else 0.0
-            min_score_threshold = 0.03 if top_score > 0.2 else -999.0
-
-            for s, r in scored_res:
-                if s < min_score_threshold and len(doc_matches) >= 3:
-                    continue
-                if r.document_id not in doc_matches:
-                    doc_matches[r.document_id] = []
-                doc_matches[r.document_id].append((s, r))
-
             final_res = []
             total_chars_accumulated = 0
+            doc_chunk_counts = {}
 
-            for doc_id, chunk_list in list(doc_matches.items())[:MAX_DOCS_RETURNED]:
+            # Iterăm direct peste rezultatele sortate de reranker
+            for s, chunk in scored_res:
                 if total_chars_accumulated >= MAX_TOTAL_CHARS:
                     break
+                if len(final_res) >= MAX_DOCS_RETURNED:
+                    break
 
-                best_score, best_chunk = chunk_list[0]
+                doc_id = chunk.document_id
+                doc_chunk_counts[doc_id] = doc_chunk_counts.get(doc_id, 0)
+                if doc_chunk_counts[doc_id] >= 3:
+                    continue
+
                 doc_obj = db.query(Document).filter(Document.id == doc_id).first()
                 if not doc_obj:
                     continue
 
-                page_num = getattr(best_chunk, 'page_number', 1) or 1
-                doc_context = ""
+                page_num = getattr(chunk, 'page_number', 1) or 1
 
-                if doc_obj.raw_text:
-                    raw = doc_obj.raw_text.strip()
-                    if len(raw) <= DOC_CONTEXT_LIMIT:
-                        # Documentul complet încape în limita de 4096 caractere (fidelitate maximă)
-                        doc_context = raw
-                    else:
-                        # Fereastră centrată de 4096 caractere în jurul celui mai relevant fragment
-                        needle = re.sub(r'^\[Doc:[^\]]*\]\s*', '', best_chunk.content).strip()
-                        search_sub = needle[:min(60, len(needle))].strip() if needle else ""
-                        pos = raw.find(search_sub) if search_sub else -1
-
-                        if pos == -1 and len(needle) > 80:
-                            pos = raw.find(needle[20:70])
-
-                        if pos != -1:
-                            half = DOC_CONTEXT_LIMIT // 2
-                            start = max(0, pos - half)
-                            end = min(len(raw), start + DOC_CONTEXT_LIMIT)
-                            if end - start < DOC_CONTEXT_LIMIT and start > 0:
-                                start = max(0, end - DOC_CONTEXT_LIMIT)
-                        else:
-                            all_doc_chunks = db.query(DocumentChunk.id).filter(DocumentChunk.document_id == doc_id).order_by(DocumentChunk.id).all()
-                            c_ids = [c[0] for c in all_doc_chunks]
-                            idx = c_ids.index(best_chunk.id) if best_chunk.id in c_ids else 0
-                            ratio = idx / max(1, len(c_ids))
-                            pos = int(ratio * len(raw))
-                            half = DOC_CONTEXT_LIMIT // 2
-                            start = max(0, pos - half)
-                            end = min(len(raw), start + DOC_CONTEXT_LIMIT)
-                            if end - start < DOC_CONTEXT_LIMIT and start > 0:
-                                start = max(0, end - DOC_CONTEXT_LIMIT)
-
-                        prefix = "[... Fragment anterior omis ...]\n" if start > 0 else ""
-                        suffix = "\n[... Fragment ulterior omis ...]" if end < len(raw) else ""
-                        doc_context = prefix + raw[start:end] + suffix
+                # Context de înaltă fidelitate:
+                # Dacă documentul brut este foarte scurt (<= 3000 chars - ex. factură/aviz), folosim raw_text
+                # Altfel, conținutul chunk-ului extras de Docling este semantic, curat și conține fix secțiunea relevantă
+                raw_len = len(doc_obj.raw_text.strip()) if (doc_obj.raw_text and doc_obj.raw_text.strip()) else 0
+                if doc_obj.raw_text and raw_len <= 3000:
+                    doc_context = doc_obj.raw_text.strip()
                 else:
-                    # Fallback dacă raw_text lipsește
-                    all_chunks = db.query(DocumentChunk).filter(DocumentChunk.document_id == doc_id).order_by(DocumentChunk.page_number, DocumentChunk.id).all()
-                    accum = []
-                    cur_len = 0
-                    for c in all_chunks:
-                        if cur_len + len(c.content) > DOC_CONTEXT_LIMIT:
-                            break
-                        accum.append(c.content)
-                        cur_len += len(c.content)
-                    doc_context = "\n\n".join(accum) if accum else best_chunk.content[:DOC_CONTEXT_LIMIT]
+                    doc_context = (chunk.content or "").strip()
 
-                if not doc_context.strip():
+                if not doc_context:
                     continue
 
+                doc_chunk_counts[doc_id] += 1
                 total_chars_accumulated += len(doc_context)
                 citation_id = len(self.citations) + 1
 
                 # Extragem un extras relevant (snippet) centrat pe termenii căutați
-                best_clean = re.sub(r'<!--\s*image\s*-->|\[Doc:[^\]]*\]', '', getattr(best_chunk, "content", "") or "", flags=re.IGNORECASE).strip()
-                cite_source = best_chunk.content if (best_chunk and len(best_clean) >= 30) else doc_context
+                best_clean = re.sub(r'<!--\s*image\s*-->|\[Doc:[^\]]*\]', '', chunk.content or "", flags=re.IGNORECASE).strip()
+                cite_source = chunk.content if len(best_clean) >= 30 else doc_context
                 snippet_text, highlight_term = self._extract_citation_snippet(
                     text=cite_source,
                     query=f"{query} {self.user_question}",
@@ -626,7 +691,7 @@ class AgenticInvestigator:
                     "content": snippet_text,
                     "highlight_term": highlight_term,
                     "filename": doc_obj.filename if doc_obj else "unknown",
-                    "spatial": getattr(best_chunk, "spatial", "") or ""
+                    "spatial": getattr(chunk, "spatial", "") or ""
                 })
 
                 doc_type_tag = f" | {doc_obj.doc_type}" if (doc_obj and doc_obj.doc_type) else ""
@@ -691,17 +756,24 @@ Răspunde EXCLUSIV cu scratchpad-ul comprimat (format bullet-points)."""
             if state:
                 data = json.loads(state)
                 print(f"[SCRATCHPAD] Resume de la calupul {data.get('chunk_idx', 0)}")
-                return data.get("scratchpad", ""), data.get("chunk_idx", 0)
+                return (
+                    data.get("findings", []),
+                    data.get("am_gasit", ""),
+                    data.get("mai_caut", ""),
+                    data.get("chunk_idx", 0)
+                )
         except Exception as e:
             print(f"[SCRATCHPAD] Eroare la încărcare stare: {e}")
-        return "", 0
+        return [], "", "", 0
 
-    def _save_scratchpad_state(self, doc_id: int, scratchpad: str, chunk_idx: int):
+    def _save_scratchpad_state(self, doc_id: int, findings: list, am_gasit: str, mai_caut: str, chunk_idx: int):
         """Salvează starea scratchpad-ului în Redis (pentru resume)."""
         key = f"scratchpad_{self.case_id}_{doc_id}"
         try:
             _r.set(key, json.dumps({
-                "scratchpad": scratchpad,
+                "findings": findings,
+                "am_gasit": am_gasit,
+                "mai_caut": mai_caut,
                 "chunk_idx": chunk_idx,
                 "timestamp": time.time()
             }), ex=3600)  # Expiră în 1 oră
@@ -719,14 +791,12 @@ Răspunde EXCLUSIV cu scratchpad-ul comprimat (format bullet-points)."""
     def run_rolling_scratchpad_digest(self, doc_id: int, focus_query: str):
         """
         Generator de investigație iterativă (Rolling Scratchpad) pentru documente voluminoase/cărți.
-        Parcurge 100% din text în calupuri consecutive, menținând și actualizând memoria de lucru.
+        Implementează arhitectura Goal-Conditioned Working State & Append-Only Ledger:
+        - Context curat la fiecare calup (nu se acumulează zgomot textual).
+        - Stare de lucru de înaltă precizie (CE AM GĂSIT PÂNĂ ACUM vs CE MAI CĂUTĂM).
+        - Append-Only Ledger: dovezile concrete sunt păstrate integral în memorie.
+        - Early Stop automat când toate obiectivele au fost atinse.
         Produce tupluri: (status_message, is_final, final_observation)
-        
-        Îmbunătățiri:
-        - Resume capability: salvează starea în Redis, poate relua de la ultimul calup
-        - Per-chunk retry: reîncearcă calupurile eșuate de 2 ori
-        - Scratchpad compression: comprimă automat când depășește 50% din context
-        - Progress tracking: afișează procent și timp scurs
         """
         start_time = time.time()
         
@@ -754,12 +824,14 @@ Răspunde EXCLUSIV cu scratchpad-ul comprimat (format bullet-points)."""
             chat_ctx = budget["chat_ctx"]
             doc_limit = budget["doc_context_limit"]
 
+            effective_query = (focus_query or self.user_question or "").strip()
+
             # Dacă documentul încape lejer într-un singur context, îl returnăm direct
             if len(raw) <= doc_limit:
                 citation_id = len(self.citations) + 1
                 snippet_text, highlight_term = self._extract_citation_snippet(
                     text=raw,
-                    query=f"{focus_terms} {self.user_question}",
+                    query=effective_query,
                     max_len=550
                 )
                 self.citations.append({
@@ -775,11 +847,12 @@ Răspunde EXCLUSIV cu scratchpad-ul comprimat (format bullet-points)."""
                 yield ("Documentul încape integral în context.", True, f"{header}:\n{raw}")
                 return
 
-            # Dynamic batch sizing: scale with available context (75% of doc_context_limit)
-            # Max half of total context to leave room for scratchpad accumulation
-            batch_size = int(doc_limit * 0.75)
-            batch_size = max(14000, int(min(batch_size, chat_ctx * 3.5) // 2))
-            overlap = 1000
+            # Calibrare dinamică a calupului (Dynamic Batch Sizing):
+            # Lăsăm ~3.000 tokeni pentru prompt de sistem + obiectiv + starea curentă + output scurt
+            available_tokens = max(4000, chat_ctx - 3000)
+            batch_size = max(18000, int(available_tokens * 3.5))
+            overlap = min(2000, max(1000, int(batch_size * 0.05)))
+
             slices = []
             curr_pos = 0
             while curr_pos < len(raw):
@@ -790,65 +863,68 @@ Răspunde EXCLUSIV cu scratchpad-ul comprimat (format bullet-points)."""
                 curr_pos = end_pos - overlap
 
             total_batches = len(slices)
-            effective_query = focus_query or self.user_question
 
-            # Încearcă să reia de la ultima stare salvată
-            current_scratchpad, resume_idx = self._load_scratchpad_state(doc_obj.id)
+            # Încărcăm starea anterioară (resume capability)
+            accumulated_findings, am_gasit_deja, mai_caut, resume_idx = self._load_scratchpad_state(doc_obj.id)
+            if not mai_caut:
+                mai_caut = effective_query
+            if not am_gasit_deja:
+                am_gasit_deja = "Nicio probă certă identificată încă. Începem investigația de la debutul documentului."
+
             if resume_idx > 0:
                 yield (f"🔄 Reluare Rolling Scratchpad de la calupul {resume_idx + 1}/{total_batches}...", False, "")
             else:
-                yield (f"Pornire Rolling Scratchpad pentru '{doc_obj.filename}' ({len(raw):,} car., {total_batches} calupuri)...", False, "")
+                yield (f"📖 Pornire Rolling Scratchpad pentru '{doc_obj.filename}' ({len(raw):,} car., {total_batches} calupuri de ~{batch_size:,} car.)...", False, "")
 
             max_retries = 2
-            
+            early_stopped = False
+
             for idx, (s_start, s_end, batch_text) in enumerate(slices, 1):
-                # Sare peste calupurile deja procesate (resume)
                 if idx <= resume_idx:
                     continue
-                
-                # Verifică stop înainte de fiecare calup
+
                 if self._stop_check():
                     raise ChatStoppedError("Stop request received during Rolling Scratchpad.")
-                
+
                 elapsed = time.time() - start_time
                 pct = int((idx - 1) / total_batches * 100)
-                yield (f"📖 [Rolling Scratchpad {idx}/{total_batches}] {pct}% | {elapsed:.0f}s | Analiză text ({s_start:,} - {s_end:,} car.)...", False, "")
+                yield (f"📖 [Rolling Scratchpad {idx}/{total_batches}] {pct}% | {elapsed:.0f}s | Analiză fragment ({s_start:,} - {s_end:,} car.)...", False, "")
 
-                # Încearcă procesarea calupului cu retry
                 success = False
                 for attempt in range(max_retries + 1):
                     try:
-                        prompt_scratch = f"""Ești un Auditor Investigativ și Cercetător Textual Riguros.
-Obiectivul investigației / Întrebare:
+                        prompt_scratch = f"""Ești un Auditor Investigativ și Criminalist Textual de Elită.
+Obiectivul investigației / Întrebarea:
 {effective_query}
 
-=== MEMORIE DE LUCRU CURENTĂ (SCRATCHPAD ACUMULAT ANTERIOR) ===
-{current_scratchpad if current_scratchpad else "[Gol - Acesta este primul calup din debutul documentului]"}
+=== STAREA CURENTĂ A ANCHETEI (Ce știm până acum) ===
+CE AM GĂSIT PÂNĂ ACUM:
+{am_gasit_deja}
 
-=== CALUPUL CURENT ({idx}/{total_batches}) din '{doc_obj.filename}' (Offset caractere {s_start:,} - {s_end:,} din {len(raw):,}) ===
+CE MAI CĂUTĂM ÎN ACEST FRAGMENT:
+{mai_caut}
+
+=== FRAGMENTUL DE TEXT CURENT (Calupul {idx}/{total_batches} din '{doc_obj.filename}', offset {s_start:,} - {s_end:,} car.) ===
 {batch_text}
 
 === INSTRUCȚIUNI FORENSICE STRICTE ===
-1. Analizează textul fragmentului curent în raport direct cu Obiectivul investigației.
-2. Extrage TOATE faptele concrete, tezele, autorii citați, termenii specifici, personajele, evoluția argumentelor și citatele relevante din acest fragment.
-3. Actualizează MEMORIA DE LUCRU (SCRATCHPAD):
-   - PĂSTREAZĂ faptele și citatele relevante deja extrase anterior (nu șterge descoperirile din capitolele trecute!).
-   - ADAUGĂ noile probe identificate în acest calup.
-   - MENȚIONEAZĂ explicit orice evoluție, contrast sau răsturnare de perspectivă apărută.
-   - Păstrează textul condensat și telegrafic (fără introduceri de politețe sau meta-comentarii).
-4. Răspunde EXCLUSIV cu noul SCRATCHPAD sintetizat în limba română (format bullet-points structurat)."""
+1. Analizează textul fragmentului curent exclusiv în raport cu CE MAI CĂUTĂM.
+2. Extrage DOAR faptele/clauzele/cifrele/datele NOI apărute în acest fragment care răspund la căutare. Nu repeta ce știm deja.
+3. Răspunde STRICT în următorul format (fără alte introduceri sau politețuri):
 
-                        # Calculate and log payload size before LLM call
+[NOI_PROBE_IDENTIFICATE]
+- (enumeră cu bullet points dovezile noi concrete, cu cifre, nume, clauze, date sau scrie "NICIUNA" dacă fragmentul nu conține elemente relevante)
+
+[ACTUALIZARE_STARE]
+AM GĂSIT PÂNĂ ACUM: (sinteză telegrafică de max 2-3 fraze cu tot ce avem confirmat cert până în prezent)
+MAI CAUT ÎN CONTINUARE: (ce a rămas de lămurit din obiectiv, sau scrie exact "COMPLET" dacă toate datele necesare au fost găsite în totalitate)"""
+
+                        # Calculate payload size
                         prompt_size = len(prompt_scratch)
                         payload_tokens = prompt_size / 3.5
                         utilization_pct = (payload_tokens / chat_ctx) * 100
-
-                        if utilization_pct > 90:
-                            print(f"[CRITICAL] Payload at {utilization_pct:.1f}% of context! ({prompt_size:,} chars)")
-                        elif utilization_pct > 70:
-                            print(f"[WARNING] Payload at {utilization_pct:.1f}% of context ({prompt_size:,} chars)")
-                        else:
-                            print(f"[INFO] Payload at {utilization_pct:.1f}% of context ({prompt_size:,} chars)")
+                        if utilization_pct > 85:
+                            print(f"[SCRATCHPAD] Payload la {utilization_pct:.1f}% din context ({prompt_size:,} caractere)")
 
                         res = UnifiedLLMClient.chat_step(
                             messages=[{"role": "user", "content": prompt_scratch}],
@@ -858,51 +934,89 @@ Obiectivul investigației / Întrebare:
                             num_ctx=chat_ctx,
                             stop_check=self._stop_check
                         )
-                        new_scratch = res.get("content", "").strip()
-                        if new_scratch:
-                            current_scratchpad = new_scratch
+                        output_text = res.get("content", "").strip()
+                        if output_text:
+                            # Parsăm secțiunile
+                            probe_noi = ""
+                            if "[NOI_PROBE_IDENTIFICATE]" in output_text:
+                                parts = output_text.split("[ACTUALIZARE_STARE]")
+                                probe_noi = parts[0].replace("[NOI_PROBE_IDENTIFICATE]", "").strip()
+                                if len(parts) > 1:
+                                    stare_text = parts[1].strip()
+                                    m_gasit = re.search(r'AM GĂSIT PÂNĂ ACUM:\s*(.*?)(?=MAI CAUT ÎN CONTINUARE:|$)', stare_text, re.DOTALL | re.IGNORECASE)
+                                    m_caut = re.search(r'MAI CAUT ÎN CONTINUARE:\s*(.*?)$', stare_text, re.DOTALL | re.IGNORECASE)
+                                    if m_gasit and m_gasit.group(1).strip():
+                                        am_gasit_deja = m_gasit.group(1).strip()
+                                    if m_caut and m_caut.group(1).strip():
+                                        mai_caut = m_caut.group(1).strip()
+                            else:
+                                probe_noi = output_text
+
+                            if probe_noi and "NICIUNA" not in probe_noi.upper()[:20] and len(probe_noi) > 10:
+                                accumulated_findings.append({
+                                    "batch_idx": idx,
+                                    "total_batches": total_batches,
+                                    "offset_range": f"{s_start}-{s_end}",
+                                    "findings": probe_noi
+                                })
+
                             success = True
+                            self._save_scratchpad_state(doc_obj.id, accumulated_findings, am_gasit_deja, mai_caut, idx)
+
+                            # Verificare Early Stop dacă obiectivul este COMPLET și nu este o cerere transversală
+                            is_exhaustive = any(k in effective_query.lower() for k in [
+                                "toate capitolele", "toata cartea", "toată cartea", "pe tot parcursul",
+                                "evolutia", "evoluția", "exhaustiv", "toate aparitiile", "toate mențiunile"
+                            ])
+                            if "COMPLET" in mai_caut.upper() and not is_exhaustive and len(accumulated_findings) > 0 and idx >= 2:
+                                yield (f"🎯 Toate elementele căutate au fost identificate la calupul {idx}/{total_batches}! Finalizare rapidă...", False, "")
+                                early_stopped = True
+                                break
+
                             break
                     except ChatStoppedError:
                         raise
                     except Exception as ex:
                         if attempt < max_retries:
-                            wait_time = (attempt + 1) * 2  # 2s, 4s
+                            wait_time = (attempt + 1) * 2
                             print(f"[SCRATCHPAD] Calup {idx} eșuat (attempt {attempt + 1}): {ex}. Reîncercare în {wait_time}s...")
-                            yield (f"⚠️ Calup {idx} eșuat, reîncercare în {wait_time}s... (attempt {attempt + 1}/{max_retries + 1})", False, "")
+                            yield (f"⚠️ Calup {idx} eșuat, reîncercare în {wait_time}s...", False, "")
                             time.sleep(wait_time)
                         else:
                             print(f"[SCRATCHPAD] Calup {idx} eșuat definitiv: {ex}")
-                            yield (f"❌ Calup {idx} eșuat după {max_retries + 1} încercări: {ex}. Continui cu scratchpad-ul anterior.", False, "")
+                            yield (f"❌ Calup {idx} eșuat după reîncercări. Continuăm cu următorul.", False, "")
 
-                # Salvează starea după fiecare calup reușit
-                if success:
-                    self._save_scratchpad_state(doc_obj.id, current_scratchpad, idx)
-                    
-                    # Proactive compression: compress if >30% of context (instead of waiting for 50%)
-                    if len(current_scratchpad) > int(chat_ctx * 3.5 * 0.3):
-                        yield (f"🗜️ Proactive compression ({len(current_scratchpad):,} caractere)...", False, "")
-                        current_scratchpad = self._compress_scratchpad(current_scratchpad, chat_ctx)
-                        self._save_scratchpad_state(doc_obj.id, current_scratchpad, idx)
+                if early_stopped:
+                    break
 
-            # Curăță starea salvată
+            # Curăță starea salvată din Redis
             self._clear_scratchpad_state(doc_obj.id)
-
             elapsed = time.time() - start_time
+
+            # Asamblarea dosarului final de dovezi
+            compiled_findings_blocks = []
+            for item in accumulated_findings:
+                compiled_findings_blocks.append(
+                    f"### Secțiunea {item['batch_idx']}/{total_batches} (Caractere {item['offset_range']}):\n{item['findings']}"
+                )
+            
+            compiled_text = "\n\n".join(compiled_findings_blocks) if compiled_findings_blocks else "Nu au fost identificate probe specifice în fragmentele analizate."
+
             citation_id = len(self.citations) + 1
             self.citations.append({
                 "id": citation_id,
                 "doc_id": doc_obj.id,
                 "page": 1,
-                "content": current_scratchpad[:400],
+                "content": compiled_text[:500],
                 "highlight_term": "",
                 "filename": doc_obj.filename,
                 "spatial": "rolling_scratchpad_digest"
             })
 
-            final_header = f"[REF {citation_id} - ROLLING SCRATCHPAD DIGEST ({doc_obj.filename} - Acoperire 100% în {total_batches} calupuri)]"
-            final_observation = f"{final_header}:\n{current_scratchpad}"
-            yield (f"✅ Finalizat Rolling Scratchpad ({total_batches}/{total_batches} calupuri, {elapsed:.0f}s)!", True, final_observation)
+            final_header = f"[REF {citation_id} - DOSAR PROBE AUDIT ROLLING ({doc_obj.filename} - {'Oprire timpurie la calupul ' + str(idx) if early_stopped else 'Acoperire 100% în ' + str(total_batches) + ' calupuri'})]"
+            final_observation = f"{final_header}:\n\nSINTEZĂ PROBE CONFIRMATE:\n{am_gasit_deja}\n\nDETALIU PROBE PE CALUPURI:\n{compiled_text}"
+
+            yield (f"✅ Finalizat Rolling Scratchpad ({len(accumulated_findings)} calupuri cu probe identificate, {elapsed:.0f}s)!", True, final_observation)
 
     def tool_fetch_full_document(self, doc_id: int, focus_terms: str = ""):
         """Tool: Retrieve complete full-text or progressive scratchpad digest when document exceeds context window."""
@@ -1296,17 +1410,15 @@ Obiectivul investigației / Întrebare:
 CORE RULES:
 1. AGNOSTICISM: You have no prior knowledge of any persons, companies, or events. Answer ONLY using evidence from tools or provided context.
 
-2. TOOL SELECTION GUIDE (CHOOSE APPROPRIATELY):
-    - SEARCH_TEXT / SEARCH_STRUCTURED_DATA: For targeted queries about specific terms, names, dates, amounts.
-    - FETCH_FULL_DOCUMENT(doc_id): For detailed review of a single identified document.
-    - ROLLING_SCRATCHPAD_AUDIT(doc_id): **USE THIS FOR COMPREHENSIVE ANALYSIS** when you need to:
-      • Analyze entire documents/books thoroughly
-      • Find evidence that might be scattered across many pages/chapters
-      • Build complete forensic understanding of complex dossiers
-      • Your previous searches didn't find enough evidence
+2. TOOL SELECTION & HIERARCHICAL RETRIEVAL GUIDE (CHOOSE APPROPRIATELY):
+    - INSPECT_FORENSIC_LEDGER: **CALL THIS FIRST** to search the pre-extracted forensic audit dossier (sections, key legal clauses, entities, financials, red flags). If it contains sufficient facts, answer immediately. If it indicates relevant page numbers, use SEARCH_TEXT to zoom in!
+    - SEARCH_TEXT: For targeted queries or for SURGICAL ZOOM-IN with the neural reranker on specific pages (page_start, page_end) or documents (doc_id).
+    - SEARCH_STRUCTURED_DATA: For counting entities, finding amounts, or specific transaction records from PostgreSQL tables.
+    - FETCH_FULL_DOCUMENT(doc_id): For reviewing a full document.
+    - ROLLING_SCRATCHPAD_AUDIT(doc_id): Use as the final comprehensive safety net for multi-chapter evolution when simpler searches are insufficient.
 
 3. ATOMIC TARGET RESOLUTION: The question is decomposed into atomic targets in your WORKING MEMORY.
-    - Use SEARCH_TEXT or SEARCH_STRUCTURED_DATA for targeted queries first.
+    - Use INSPECT_FORENSIC_LEDGER or SEARCH_TEXT for targeted queries first.
     - If results are incomplete, ambiguous, or you need full document context, use FETCH_FULL_DOCUMENT(doc_id) OR ROLLING_SCRATCHPAD_AUDIT(doc_id).
     - Positional queries: If the inquiry asks about boundary sections (e.g., 'at the end of the book', 'in the preamble', 'signatures', 'annexes'), prioritize the corresponding initial or final sections of the document.
 3. STRICT EVIDENCE-ONLY (NO SPECULATION):
@@ -1366,13 +1478,31 @@ FINAL RESPONSE FORMAT (ROMANIAN):
             {
                 "type": "function",
                 "function": {
+                    "name": "INSPECT_FORENSIC_LEDGER",
+                    "description": "Search and inspect the high-density forensic audit ledger of the documents in the case. Use this FIRST to see which sections/pages contain the answers before running expensive scans. If this tool provides sufficient evidence, answer immediately. If you need verbatim clauses or exact numbers, call SEARCH_TEXT with page_start and page_end to zoom in.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "Keywords, topics, legal clauses, entities, or questions to look up in the forensic ledger."},
+                            "doc_id": {"type": "integer", "description": "Optional document ID to inspect specifically."}
+                        },
+                        "required": ["query"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "SEARCH_TEXT",
-                    "description": "Search the full text and tables of all case documents. Use this to find textual records, technical specifications, reports, minutes, contracts, declarations, or unstructured evidence.",
+                    "description": "Search the full text and tables of all case documents using Hybrid Search (pgvector + lexical + neural reranker). Supports surgical zoom-in on specific page ranges or document IDs.",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "concept": {"type": "string", "description": "Keywords, entity names, identifiers, or dates to search."},
-                            "semantic_intent": {"type": "string", "description": "Optional type of document (e.g. RAPORT, CONTRACT, DECLARATIE, PROCES VERBAL)."}
+                            "semantic_intent": {"type": "string", "description": "Optional type of document (e.g. RAPORT, CONTRACT, DECLARATIE, PROCES VERBAL)."},
+                            "doc_id": {"type": "integer", "description": "Optional specific document ID to target."},
+                            "page_start": {"type": "integer", "description": "Optional starting page number for surgical reranker zoom-in."},
+                            "page_end": {"type": "integer", "description": "Optional ending page number for surgical reranker zoom-in."}
                         },
                         "required": ["concept"]
                     }
@@ -1472,7 +1602,7 @@ FINAL RESPONSE FORMAT (ROMANIAN):
         # Add current question with injected evidence
         messages.append({
             "role": "user", 
-            "content": f"EVIDENCE ALREADY IN CONTEXT:\n{self.injected_evidence}\n\nQUESTION: {self.user_question}\n\nREMINDER: You are an Agnostic Forensic Auditor. Follow these rules STRICTLY:\n1. If the question asks about FINAL amounts, conclusions, annexes (e.g., 'sumă totală', 'prejudiciu final', 'anexa nr', 'concluzii'), you MUST use ROLLING_SCRATCHPAD_AUDIT immediately - DO NOT rely on partial SEARCH_TEXT results.\n2. If the question spans multiple years (e.g., 2013-2018), you MUST use ROLLING_SCRATCHPAD_AUDIT to ensure complete temporal coverage.\n3. If your initial searches return incomplete evidence or low confidence, AMPLIFY by using ROLLING_SCRATCHPAD_AUDIT before concluding.\n4. NEVER conclude that a document section is missing without first trying ROLLING_SCRATCHPAD_AUDIT for comprehensive analysis.\n5. When searching for payments, invoices, or deliveries, search both the full alphanumeric reference and the numeric identifier across bank statements, ledgers, and delivery documents.\n6. Compute exact math on any figures, dates, delays, quantities, or financial differences asked in the question."
+            "content": f"EVIDENCE ALREADY IN CONTEXT:\n{self.injected_evidence}\n\nQUESTION: {self.user_question}\n\nREMINDER: You are an Agnostic Forensic Auditor. Follow these rules STRICTLY:\n1. If the question asks about FINAL amounts, conclusions, annexes (e.g., 'sumă totală', 'prejudiciu final', 'anexa nr', 'concluzii'), you MUST use ROLLING_SCRATCHPAD_AUDIT immediately - DO NOT rely on partial SEARCH_TEXT results.\n2. If the question spans multiple years (e.g., 2013-2018), you MUST use ROLLING_SCRATCHPAD_AUDIT to ensure complete temporal coverage.\n3. If your initial searches return incomplete evidence or low confidence, AMPLIFY by using ROLLING_SCRATCHPAD_AUDIT before concluding.\n4. NEVER conclude that a document section is missing without first trying ROLLING_SCRATCHPAD_AUDIT for comprehensive analysis.\n5. When searching for payments, invoices, or deliveries, search both the full alphanumeric reference and the numeric identifier across bank statements, ledgers, and delivery documents.\n6. Compute exact math on any figures, dates, delays, quantities, or financial differences asked in the question.\n7. CURRENT QUERY FOCUS: Answer ONLY the current question. Ignore past topics, codes, or entities from previous conversation turns unless explicitly asked again."
         })
 
         has_used_tools = False
@@ -1579,6 +1709,18 @@ FINAL RESPONSE FORMAT (ROMANIAN):
                             }
                         }
                     })
+                elif "[INSPECT_FORENSIC_LEDGER]" in content:
+                    query_match = re.search(r"query:\s*([^\\n]+)", content)
+                    doc_match = re.search(r"doc_id:\s*(\d+)", content)
+                    synthetic_tool_calls.append({
+                        "function": {
+                            "name": "INSPECT_FORENSIC_LEDGER",
+                            "arguments": {
+                                "query": query_match.group(1).strip() if query_match else self.user_question,
+                                "doc_id": int(doc_match.group(1)) if doc_match else 0
+                            }
+                        }
+                    })
                 elif "[GET_DOCUMENT_OUTLINE]" in content:
                     doc_match = re.search(r"doc_id:\s*(\d+)", content)
                     synthetic_tool_calls.append({
@@ -1611,6 +1753,7 @@ FINAL RESPONSE FORMAT (ROMANIAN):
                     
                     # Map normalized names back to original case-sensitive names
                     tool_name_map = {
+                        "INSPECT_FORENSIC_LEDGER": "INSPECT_FORENSIC_LEDGER",
                         "SEARCH_TEXT": "SEARCH_TEXT",
                         "SEARCH_STRUCTURED_DATA": "SEARCH_STRUCTURED_DATA", 
                         "FETCH_FULL_DOCUMENT": "FETCH_FULL_DOCUMENT",
@@ -1669,7 +1812,7 @@ FINAL RESPONSE FORMAT (ROMANIAN):
                         try:
                             t_args = json.loads(t_args)
                         except:
-                            t_args = {"subject": t_args, "concept": t_args, "entity": t_args, "expression": t_args}
+                            t_args = {"subject": t_args, "concept": t_args, "query": t_args, "entity": t_args, "expression": t_args}
                             
                     if isinstance(t_args, dict):
                         subject_val = t_args.get("subject", "")
@@ -1699,7 +1842,12 @@ FINAL RESPONSE FORMAT (ROMANIAN):
                     exec_success = True
                     exec_err = None
                     try:
-                        if t_name_normalized == "SEARCH_STRUCTURED_DATA":
+                        if t_name_normalized == "INSPECT_FORENSIC_LEDGER":
+                            observation = self.tool_inspect_forensic_ledger(
+                                query=t_args.get("query", "") if isinstance(t_args, dict) else str(t_args),
+                                doc_id=int(t_args.get("doc_id", 0)) if isinstance(t_args, dict) and t_args.get("doc_id") else 0
+                            )
+                        elif t_name_normalized == "SEARCH_STRUCTURED_DATA":
                             observation = self.tool_search_transactions(
                                 subject=t_args.get("subject", "") if isinstance(t_args, dict) else "", 
                                 date_filter=t_args.get("date_filter", "") if isinstance(t_args, dict) else "",
@@ -1708,7 +1856,13 @@ FINAL RESPONSE FORMAT (ROMANIAN):
                                 limit=int(t_args.get("limit", 30)) if isinstance(t_args, dict) and t_args.get("limit") is not None else 30
                             )
                         elif t_name_normalized == "SEARCH_TEXT":
-                            observation = self.tool_search_text(t_args.get("concept", ""), t_args.get("semantic_intent", ""))
+                            observation = self.tool_search_text(
+                                query=t_args.get("concept", "") if isinstance(t_args, dict) else str(t_args),
+                                semantic_intent=t_args.get("semantic_intent", "") if isinstance(t_args, dict) else "",
+                                doc_id=int(t_args.get("doc_id", 0)) if isinstance(t_args, dict) and t_args.get("doc_id") else 0,
+                                page_start=int(t_args.get("page_start", 0)) if isinstance(t_args, dict) and t_args.get("page_start") else 0,
+                                page_end=int(t_args.get("page_end", 0)) if isinstance(t_args, dict) and t_args.get("page_end") else 0
+                            )
                         elif t_name_normalized == "ROLLING_SCRATCHPAD_AUDIT":
                             t_doc_id = int(t_args.get("doc_id", 0)) if isinstance(t_args, dict) else 0
                             t_focus = (t_args.get("focus_query") or t_args.get("focus_terms") or self.user_question) if isinstance(t_args, dict) else self.user_question
@@ -1797,15 +1951,15 @@ FINAL RESPONSE FORMAT (ROMANIAN):
             )
             
             # 1. ANTI-SURRENDER FORENSIC GUARD:
-            # If the model tries to conclude early that documents/payments/records are missing, reject surrender and push it to search
+            # If the model tries to conclude early that documents/records are missing WITHOUT having used ANY search tools, push it to search
             is_surrender = any(phrase in final_content.lower() for phrase in [
                 "nu există", "nu au fost găsite", "nu a fost găsit", "lipsesc dovezi", 
                 "imposibilă determinarea", "nu cuprind tranzacția", "nu există dovezi", "nu pot furniza"
             ])
-            if is_surrender and step < 5 and not has_used_search_text:
+            if is_surrender and step < 4 and not has_used_tools:
                 messages.append({
                     "role": "user", 
-                    "content": "FORENSIC DIRECTIVE: Do NOT conclude early that documents or transactions are missing. You have not thoroughly explored the evidence. Execute SEARCH_TEXT now for: 1) Specific document/invoice codes or numbers mentioned in the user question; 2) Relevant entity names; 3) Document types (e.g. borderou, aviz, extras, factura). Find the concrete proof before concluding."
+                    "content": f"FORENSIC DIRECTIVE: Do NOT conclude that records are missing without having searched first. Call INSPECT_FORENSIC_LEDGER or SEARCH_TEXT for the specific subjects and entities in the question: '{self.user_question}'."
                 })
                 continue
 

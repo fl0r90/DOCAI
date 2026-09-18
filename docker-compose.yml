@@ -79,7 +79,13 @@ services:
       dockerfile: Dockerfile
     image: v2-backend:latest
     container_name: v2-backend
-    # runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     networks: [forensic_net, access_net]
     ports:
       - "8000:8000"

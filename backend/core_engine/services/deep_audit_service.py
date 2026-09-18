@@ -77,32 +77,36 @@ class DeepForensicAuditor:
         print(f"============================================================")
         
         # 1. Macro & Identificare
-        self._set_progress(10.0, f"Pasul 1/7: Clasificare & Identificare Macro ({self.filename})...")
+        self._set_progress(10.0, f"Pasul 1/8: Clasificare & Identificare Macro ({self.filename})...")
         macro_meta = await self._audit_macro_governance()
 
         # 2. Extracție Financiară
-        self._set_progress(30.0, "Pasul 2/7: Extracție Financiară & Tranzacțională Granulară...")
+        self._set_progress(25.0, "Pasul 2/8: Extracție Financiară & Tranzacțională Granulară...")
         fin_items = await self._audit_financial_data(macro_meta)
 
         # 3. Factori de Risc, Litigii & Clauze Penale
-        self._set_progress(50.0, "Pasul 3/7: Audit Criminalistic Riscuri, Litigii, Anchete & Clauze...")
+        self._set_progress(40.0, "Pasul 3/8: Audit Criminalistic Riscuri, Litigii, Anchete & Clauze...")
         forensic_risks = await self._audit_risks_and_litigations()
 
         # 4. Rezoluție Entități Master
-        self._set_progress(65.0, "Pasul 4/7: Rezoluție Entități Master & Creare Legături SQL...")
+        self._set_progress(55.0, "Pasul 4/8: Rezoluție Entități Master & Creare Legături SQL...")
         entities_list = await self._resolve_and_link_entities(macro_meta, fin_items, forensic_risks)
 
-        # 5. Cuprins Structural
-        self._set_progress(78.0, "Pasul 5/7: Generare Cuprins Criminalistic (TOC Ierarhizat)...")
+        # 5. Dosar Criminalistic Granular pe Calupuri (Forensic Ledger)
+        self._set_progress(70.0, "Pasul 5/8: Generare Dosar Criminalistic Granular pe Calupuri...")
+        forensic_ledger = await self._audit_granular_chunk_ledger()
+
+        # 6. Cuprins Structural
+        self._set_progress(82.0, "Pasul 6/8: Generare Cuprins Criminalistic (TOC Ierarhizat)...")
         toc_obj = self._generate_hierarchical_toc()
 
-        # 6. Sinteză Executivă
-        self._set_progress(88.0, "Pasul 6/7: Redactare Raport Executiv Forensic (Sinteză AI)...")
-        ai_summary_text = await self._generate_executive_summary(macro_meta, fin_items, forensic_risks)
+        # 7. Sinteză Executivă
+        self._set_progress(90.0, "Pasul 7/8: Redactare Raport Executiv Forensic (Sinteză AI)...")
+        ai_summary_text = await self._generate_executive_summary(macro_meta, fin_items, forensic_risks, forensic_ledger)
 
-        # 7. Sincronizare & Persistență
-        self._set_progress(95.0, "Pasul 7/7: Persistență doc_metadata JSONB & Sincronizare Neo4j...")
-        await self._persist_and_sync(macro_meta, fin_items, forensic_risks, entities_list, toc_obj, ai_summary_text)
+        # 8. Sincronizare & Persistență
+        self._set_progress(96.0, "Pasul 8/8: Persistență doc_metadata JSONB & Sincronizare Neo4j...")
+        await self._persist_and_sync(macro_meta, fin_items, forensic_risks, entities_list, toc_obj, ai_summary_text, forensic_ledger)
 
         self._set_progress(100.0, "Audit Forensic Universal finalizat cu succes!", stage="COMPLETED")
         await self.llm.close()
@@ -115,6 +119,7 @@ class DeepForensicAuditor:
             "doc_type": macro_meta.get("tip_document"),
             "entities_count": len(entities_list),
             "financial_items_count": len(fin_items),
+            "ledger_chunks_count": len(forensic_ledger),
             "summary_length": len(ai_summary_text)
         }
 
@@ -553,13 +558,90 @@ FRAGMENTE RELEVANTE PENTRU RISCURI ȘI LITIGII:
         )
         return toc
 
+    async def _audit_granular_chunk_ledger(self) -> List[Dict[str, Any]]:
+        """
+        Pasul 5: Audit Granular pe Calupuri (Forensic Ledger per Section).
+        Generează un dosar analitic dens (~1500-2500 caractere) pentru fiecare calup din document,
+        calibrat dinamic în funcție de processing_ctx (RTX 5000 Ada vs laptop/CPU).
+        """
+        processing_ctx = int(self.cfg.get("processing_ctx", 32768))
+        avail_tokens = max(4000, processing_ctx - 4500)
+        chunk_chars = max(25000, int(avail_tokens * 3.5))
+        overlap_chars = min(3000, max(1000, int(chunk_chars * 0.05)))
+
+        slices = []
+        curr_pos = 0
+        raw_len = len(self.raw_text)
+        while curr_pos < raw_len:
+            end_pos = min(raw_len, curr_pos + chunk_chars)
+            slices.append((curr_pos, end_pos, self.raw_text[curr_pos:end_pos]))
+            if end_pos >= raw_len:
+                break
+            curr_pos = end_pos - overlap_chars
+
+        total_chunks = len(slices)
+        print(f"[*] Generare Forensic Ledger: {total_chunks} calupuri de ~{chunk_chars:,} caractere (processing_ctx={processing_ctx})")
+
+        ledger = []
+        for idx, (s_start, s_end, c_text) in enumerate(slices, 1):
+            p_markers = re.findall(r'<!--\s*PAGE:\s*(\d+)\s*-->', c_text)
+            if p_markers:
+                p_nums = [int(p) for p in p_markers]
+                p_start, p_end = min(p_nums), max(p_nums)
+            else:
+                p_start = max(1, int(s_start / 2500) + 1)
+                p_end = max(1, int(s_end / 2500) + 1)
+
+            prompt = f"""### System:
+Ești un Senior Forensic Auditor și Criminalist Textual.
+Analizează detaliat următorul fragment ({idx}/{total_chunks}) din documentul '{self.filename}' (Paginile {p_start}-{p_end}, offset {s_start:,}-{s_end:,} car.).
+Extrage un DOSAR CRIMINALISTIC GRANULAR (~1500-2500 caractere) structurat ferm pe următoarele 6 axe esențiale:
+
+1. [SUBIECT & ANCORĂ]: Titlul secțiunii/capitolului, interval pagini și obiectul principal al fragmentului.
+2. [PĂRȚI & ENTITĂȚI]: Persoane, companii, instituții, semnatari, funcții, reprezentanți legali menționați.
+3. [CLAUZE LEGALE & OBLIGAȚII]: Drepturi, obligații, clauze de reziliere, forță majoră, penalități, jurisdicție, termene limită, articole de lege sau regulamente menționate.
+4. [FINANCIAR & CIFRE EXACTE]: Sume exacte, cote TVA, procente, numere de facturi, contracte, conturi bancare, cantități, prețuri unitare.
+5. [CRONOLOGIE & EVENIMENTE]: Fapte, acțiuni, decizii cu date calendaristice certe (cine ce a făcut la ce dată).
+6. [RISCURI, ANOMALII & RED FLAGS]: Mențiuni suspecte, divergențe, litigii, investigații, lipsuri declarate sau clauze derogatorii.
+
+Fii extrem de specific, citează cifrele, numele și numerele exacte. Dacă o axă nu are date în acest fragment, notează "N/A". Răspunde direct și concis cu cele 6 puncte structurate, fără introduceri, concluzii sau raționamente discursive interne.
+
+### User:
+{c_text}
+"""
+            try:
+                chunk_dossier = await self.llm.generate(prompt, self.model, is_json=False, max_tokens=1500)
+                ledger_text = (chunk_dossier or "").strip()
+            except Exception as e:
+                print(f"[!] Eroare LLM la Forensic Ledger calup {idx}: {e}")
+                ledger_text = f"Calupul {idx}/{total_chunks} (Paginile {p_start}-{p_end}): Analiză parțială din cauza unei erori de inferență."
+
+            ledger.append({
+                "chunk_idx": idx,
+                "total_chunks": total_chunks,
+                "page_start": p_start,
+                "page_end": p_end,
+                "char_start": s_start,
+                "char_end": s_end,
+                "dossier_text": ledger_text
+            })
+
+        print(f"[+] Generat Forensic Ledger cu {len(ledger)} secțiuni granulare!")
+        return ledger
+
     async def _generate_executive_summary(
         self,
         macro_meta: Dict[str, Any],
         fin_items: List[Dict[str, Any]],
-        forensic_risks: Dict[str, Any]
+        forensic_risks: Dict[str, Any],
+        forensic_ledger: Optional[List[Dict[str, Any]]] = None
     ) -> str:
         """Generează raportul criminalistic executiv de înaltă densitate."""
+        ledger_preview = ""
+        if forensic_ledger:
+            sample_ledgers = [f"Secțiunea {c['chunk_idx']} (Pag. {c['page_start']}-{c['page_end']}):\n{c['dossier_text'][:400]}" for c in forensic_ledger[:4]]
+            ledger_preview = "\n\n".join(sample_ledgers)
+
         prompt = f"""### System:
 Ești un Senior Forensic Investigator și Auditor Criminalist de Elită.
 Redactează un RAPORT EXECUTIV CRIMINALISTIC (Forensic Audit Summary) complet, dens și riguros structurat în limba ROMÂNĂ pentru documentul '{self.filename}'.
@@ -581,6 +663,9 @@ DATE FINANCIARE CHEIE:
 
 FACTORI DE RISC & LITIGII:
 {json.dumps(forensic_risks, indent=2, ensure_ascii=False)}
+
+PROBE DIN DOSARUL GRANULAR (EXTRASE):
+{ledger_preview}
 """
         try:
             summary = await self.llm.generate(prompt, self.model, is_json=False)
@@ -614,7 +699,8 @@ FACTORI DE RISC & LITIGII:
         forensic_risks: Dict[str, Any],
         entities_list: List[Dict[str, Any]],
         toc_obj: DocumentTOC,
-        ai_summary_text: str
+        ai_summary_text: str,
+        forensic_ledger: Optional[List[Dict[str, Any]]] = None
     ):
         """Salvează metadatele JSONB în PostgreSQL și sincronizează graful Neo4j."""
         self.doc.doc_type = macro_meta.get("tip_document") or self.doc.doc_type or "RAPORT"
@@ -647,6 +733,11 @@ FACTORI DE RISC & LITIGII:
             "financial_data": fin_items,
             "toc": toc_obj.model_dump() if toc_obj else {},
             "outline": toc_obj.to_flat_list() if toc_obj else [],
+            "forensic_ledger": forensic_ledger or [],
+            "forensic_ledger_summary": "\n\n---\n\n".join([
+                f"### Secțiunea {c['chunk_idx']}/{c['total_chunks']} (Pag. {c['page_start']}-{c['page_end']}):\n{c['dossier_text']}"
+                for c in (forensic_ledger or [])
+            ]),
             "graph_data": {
                 "entitati": entities_list,
                 "relatii": []
@@ -674,5 +765,6 @@ FACTORI DE RISC & LITIGII:
             "doc_id": self.doc_id,
             "filename": self.filename,
             "entities": len(entities_list),
-            "financial_items": len(fin_items)
+            "financial_items": len(fin_items),
+            "ledger_chunks": len(forensic_ledger or [])
         })

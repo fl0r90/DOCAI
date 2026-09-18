@@ -14,6 +14,6 @@ class LLMService:
     async def close(self):
         pass
 
-    async def generate(self, prompt: str, model: str, is_json: bool = False, provider: str = "") -> Union[str, Dict[str, Any]]:
+    async def generate(self, prompt: str, model: str, is_json: bool = False, provider: str = "", max_tokens: Optional[int] = None) -> Union[str, Dict[str, Any]]:
         """Interfață asincronă pentru generare text/JSON via UnifiedLLMClient."""
-        return await UnifiedLLMClient.async_generate(prompt=prompt, model=model, is_json=is_json, timeout=self.timeout)
+        return await UnifiedLLMClient.async_generate(prompt=prompt, model=model, is_json=is_json, timeout=self.timeout, max_tokens=max_tokens)

@@ -773,7 +773,7 @@ class UnifiedLLMClient:
     @classmethod
     async def async_generate(cls, prompt: str, model: Optional[str] = None, 
                              is_json: bool = False, temperature: float = 0.1, 
-                             timeout: int = 180) -> Union[str, Dict[str, Any]]:
+                             timeout: int = 180, max_tokens: Optional[int] = None) -> Union[str, Dict[str, Any]]:
         """Generare asincronă utilizată de Grinder / Document Processor."""
         cfg = cls.get_engine_config()
         engine = cfg.get("active_llm_engine", "ollama").lower()
@@ -805,6 +805,8 @@ class UnifiedLLMClient:
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": temperature,
                 }
+                if max_tokens:
+                    payload["max_tokens"] = max_tokens
                 if is_json:
                     payload["response_format"] = {"type": "json_object"}
 
@@ -834,14 +836,18 @@ class UnifiedLLMClient:
                 # Ollama /api/generate
                 ollama_url = os.getenv("OLLAMA_URL", "http://llm:11434").rstrip("/")
                 url = f"{ollama_url}/api/generate"
+                proc_ctx = int(cfg.get("processing_ctx") or cfg.get("narrative_ctx") or 16384)
+                options: Dict[str, Any] = {
+                    "temperature": temperature,
+                    "num_ctx": proc_ctx,
+                    "num_predict": max_tokens or 2048
+                }
                 payload = {
                     "model": active_model,
                     "prompt": prompt,
+                    "think": False,
                     "stream": False,
-                    "options": {
-                        "temperature": temperature,
-                        "num_ctx": 16384
-                    }
+                    "options": options
                 }
                 if is_json:
                     payload["format"] = "json"
@@ -849,7 +855,8 @@ class UnifiedLLMClient:
                 try:
                     resp = await client.post(url, json=payload)
                     resp.raise_for_status()
-                    raw = resp.json().get("response", "")
+                    resp_data = resp.json()
+                    raw = resp_data.get("response") or resp_data.get("thinking") or ""
                     if is_json:
                         return cls._parse_json(raw)
                     return raw
