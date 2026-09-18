@@ -8,8 +8,7 @@ class RerankService:
     @classmethod
     def get_instance(cls):
         if cls._instance is None:
-            default_device = "cuda" if torch.cuda.is_available() else "cpu"
-            device = os.getenv("RERANKER_DEVICE", default_device)
+            device = os.getenv("RERANKER_DEVICE", "cpu")
             model_name = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
             print(f"[*] Initializing Reranker ({model_name}) on {device}...")
             try:

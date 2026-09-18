@@ -141,26 +141,53 @@ class UnifiedLLMClient:
 
     @classmethod
     def _normalize_tool_calls(cls, tool_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Normalizează tool_calls astfel încât arguments să fie un dicționar Python."""
+        """Normalizează tool_calls astfel încât arguments să fie un dicționar Python valid,
+        desfăcând JSON-uri multiple concatenate generate de streaming (ex: Qwen/Ollama)."""
         normalized = []
         for idx, tc in enumerate(tool_calls or []):
             fn = tc.get("function", {})
             name = fn.get("name", "")
+            # Curățăm repetiții dacă numele a fost concatenat în streaming (ex: SEARCH_TEXTSEARCH_TEXT)
+            rep_match = re.match(r"^([A-Za-z0-9_]+?)\1+$", name)
+            if rep_match:
+                name = rep_match.group(1)
+            
             args = fn.get("arguments", {})
-            call_id = tc.get("id") or f"call_{idx}_{name}"
+            parsed_args_list = []
             if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except Exception:
-                    pass
-            normalized.append({
-                "id": call_id,
-                "type": "function",
-                "function": {
-                    "name": name,
-                    "arguments": args
-                }
-            })
+                raw_args = args.strip()
+                if raw_args:
+                    decoder = json.JSONDecoder()
+                    pos = 0
+                    while pos < len(raw_args):
+                        while pos < len(raw_args) and raw_args[pos].isspace():
+                            pos += 1
+                        if pos >= len(raw_args):
+                            break
+                        try:
+                            obj, end = decoder.raw_decode(raw_args, idx=pos)
+                            if isinstance(obj, dict):
+                                parsed_args_list.append(obj)
+                            pos = end
+                        except Exception:
+                            break
+                if not parsed_args_list:
+                    parsed_args_list = [{}]
+            elif isinstance(args, dict):
+                parsed_args_list = [args]
+            else:
+                parsed_args_list = [{}]
+
+            for sub_idx, p_args in enumerate(parsed_args_list):
+                call_id = f"call_{len(normalized)}_{name}"
+                normalized.append({
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": p_args
+                    }
+                })
         return normalized
 
     @classmethod
@@ -724,7 +751,10 @@ class UnifiedLLMClient:
                 fn = tc.get("function", {}) or {}
                 name = fn.get("name")
                 if isinstance(name, str):
-                    acc_tools[idx]["name"] += name
+                    if not acc_tools[idx]["name"]:
+                        acc_tools[idx]["name"] = name
+                    elif acc_tools[idx]["name"] != name and not name.startswith(acc_tools[idx]["name"]):
+                        acc_tools[idx]["name"] += name
                 args = fn.get("arguments")
                 if args is not None:
                     if isinstance(args, str):

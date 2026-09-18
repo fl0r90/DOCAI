@@ -144,6 +144,8 @@ class AgenticInvestigator:
             for i, t in enumerate(self.sub_targets, 1)
         }
         self.searched_queries = []
+        self.working_memory = {}
+        self.evidence_cache = {}
         self._load_history()
         self._pre_process_query()
 
@@ -1416,641 +1418,194 @@ MAI CAUT ÎN CONTINUARE: (ce a rămas de lămurit din obiectiv, sau scrie exact 
             return f"MATH RESULT: {eval(expr):,.2f}"
         except: return "Math error: invalid expression."
 
+    def _generate_investigation_plan(self) -> List[Dict[str, Any]]:
+        """Decompune semantic întrebarea utilizatorului în 1-4 obiective atomice folosind LLM cu fallback determinist."""
+        plan_prompt = (
+            "You are a Senior Forensic Data Auditor. Decompose the user inquiry into 1 to 4 distinct atomic verification targets.\n"
+            "For each target, identify:\n"
+            "- id: sequential integer (1, 2, ...)\n"
+            "- title: short description of what must be verified\n"
+            "- keys: 1 to 3 specific exact identifiers (document/invoice codes, person names, technical terms, channels like WhatsApp)\n\n"
+            "Output ONLY valid JSON matching this schema:\n"
+            "{\"targets\": [{\"id\": 1, \"title\": \"...\", \"keys\": [\"...\"]}]}\n\n"
+            f"USER INQUIRY: {self.user_question}"
+        )
+        try:
+            res = UnifiedLLMClient.chat_step(
+                messages=[
+                    {"role": "system", "content": "You are a Forensic Planning Engine. Output strictly valid JSON."},
+                    {"role": "user", "content": plan_prompt}
+                ],
+                model=self.active_model,
+                temperature=0.0,
+                num_ctx=4096,
+                stop_check=self._stop_check
+            )
+            content = res.get("content", "").strip()
+            json_match = re.search(r'\{.*\}', content, re.DOTALL)
+            if json_match:
+                parsed = json.loads(json_match.group(0))
+                targets = parsed.get("targets", [])
+                if targets and isinstance(targets, list):
+                    clean_targets = []
+                    for idx, t in enumerate(targets, 1):
+                        keys = [str(k).strip() for k in t.get("keys", []) if str(k).strip()]
+                        clean_targets.append({
+                            "id": idx,
+                            "title": t.get("title", f"Obiectiv {idx}"),
+                            "keys": keys or [t.get("title", f"Obiectiv {idx}")[:40]]
+                        })
+                    if clean_targets:
+                        return clean_targets
+        except Exception as e:
+            print(f"[!] Plan generation via LLM fallback to heuristic: {e}")
+
+        # Fallback dacă LLM-ul nu a răspuns în JSON:
+        sub_qs = decompose_question(self.user_question)
+        unsearched = self._extract_unsearched_key_terms()
+        clean_targets = []
+        for idx, sq in enumerate(sub_qs, 1):
+            matching_keys = [k for k in unsearched if k.lower() in sq.lower()]
+            if not matching_keys and idx <= len(unsearched):
+                matching_keys = [unsearched[idx - 1]]
+            clean_targets.append({
+                "id": idx,
+                "title": sq,
+                "keys": matching_keys or [sq[:50]]
+            })
+        return clean_targets
+
+    def _execute_sub_target(self, target: Dict[str, Any]) -> str:
+        """Rezolvă un target individual într-un context izolat și curat (Context-Flush)."""
+        evidence_snippets = []
+        keys_to_search = target.get("keys", []) or []
+        for k in keys_to_search:
+            if self._stop_check():
+                raise ChatStoppedError("Stop request received during sub-target.")
+            obs = self.tool_search_text(k)
+            if obs and "No text fragments found" not in obs and "No valid keywords" not in obs:
+                evidence_snippets.append(obs)
+                self.searched_queries.append(k)
+
+        # Dacă nu s-au găsit fragmente relevante prin chei, încercăm cu titlul targetului
+        if not evidence_snippets:
+            obs = self.tool_search_text(target["title"])
+            if obs and "No text fragments found" not in obs:
+                evidence_snippets.append(obs)
+                self.searched_queries.append(target["title"])
+
+        combined_evidence = "\n\n".join(evidence_snippets)
+        if not combined_evidence:
+            combined_evidence = "Nu s-au identificat fragmente relevante în dosar pentru acest criteriu."
+
+        # Informații contextuale suplimentare din working memory precedent (pentru calcule dependente)
+        prev_facts_ctx = ""
+        if self.working_memory:
+            prev_facts_ctx = "DATE PRECEDENTE DEJA CONFIRMATE ÎN INVESTIGAȚIE:\n" + "\n".join([
+                f"- Ținta {tid}: {fact}" for tid, fact in self.working_memory.items()
+            ]) + "\n\n"
+
+        prompt = (
+            f"OBIECTIV DE INVESTIGAT: {target['title']}\n\n"
+            f"{prev_facts_ctx}"
+            f"DOVEZI IDENTIFICATE DIN DOSAR:\n{combined_evidence[:8000]}\n\n"
+            "CERINȚĂ: Formulează concluzia factuală concretă pentru acest obiectiv în limba ROMÂNĂ. "
+            "Extrage cifre exacte, cantități, diferențe și citează obligatoriu referințele [REF x]. "
+            "Efectuează calcule matematice directe dacă obiectivul cere o diferență sau o valoare. "
+            "Dacă dovezile nu conțin nicio mențiune sau document despre acest obiectiv, specifică explicit 'Nu s-au găsit dovezi'."
+        )
+
+        step_res = UnifiedLLMClient.chat_step(
+            messages=[
+                {"role": "system", "content": "You are a Forensic Evidence Auditor. Answer strictly using the provided citations in ROMANIAN. Be concise, rigorous, and direct (2-4 sentences)."},
+                {"role": "user", "content": prompt}
+            ],
+            model=self.active_model,
+            temperature=0.0,
+            num_ctx=4096,
+            stop_check=self._stop_check
+        )
+        return step_res.get("content", "").strip()
+
+    def _synthesize_final_report(self, plan: List[Dict[str, Any]]) -> str:
+        """Generează raportul final unificat din faptele verificate per target."""
+        facts_summary = "\n\n".join([
+            f"### Ținta {t['id']}: {t['title']}\n{self.working_memory.get(t['id'], 'Lipsesc dovezi.')}"
+            for t in plan
+        ])
+
+        final_prompt = (
+            f"ÎNTREBAREA INVESTIGATĂ:\n{self.user_question}\n\n"
+            f"CONCLUZII ȘI FAPTE VERIFICATE PE OBIECTIVE:\n{facts_summary}\n\n"
+            "Redactează raportul final unificat în limba ROMÂNĂ conform formatului criminalistic standard:\n"
+            "[FACTS]\n"
+            "- Listă detaliată a tuturor faptelor confirmate, cantităților și participanților, citând referințele [x]\n"
+            "[ANALYSIS]\n"
+            "- Conexiuni logice între documente, contradicții identificate (ex: discrepanțe între acte formale și discuții informale)\n"
+            "[CONCLUSION]\n"
+            "- Răspunsul direct, clar și complet la fiecare aspect din întrebarea utilizatorului\n"
+            "[MISSING EVIDENCE]\n"
+            "- Ce date lipsesc efectiv, sau 'N/A'\n"
+            "[CONFIDENCE]: HIGH"
+        )
+
+        final_res = UnifiedLLMClient.chat_step(
+            messages=[
+                {"role": "system", "content": "You are a Master Forensic Auditor. Synthesize verified evidence into a professional forensic report in ROMANIAN."},
+                {"role": "user", "content": final_prompt}
+            ],
+            model=self.active_model,
+            temperature=0.0,
+            num_ctx=6144,
+            stop_check=self._stop_check
+        )
+        return final_res.get("content", "").strip()
+
     def run(self):
         yield json.dumps({"type": "status", "data": "Forensic Agent is thinking..."})
-        
-        system_prompt = """You are a Master Forensic Data Auditor equipped with PROGRESSIVE WORKING MEMORY, specialized in multi-domain evidence analysis:
-- CONTRACTS & LEGAL AGREEMENTS: Inspect parties, clauses, obligations, liabilities, penalty terms, termination conditions, dates, and signature/annex sections.
-- WHATSAPP & DIGITAL CHATS: Reconstruct chronological message streams, sender/recipient identities, exact timestamps, sequence of replies, and informal agreements or contradictions against formal documents.
-- FINANCIAL & TABULAR RECORDS: Extract exact amounts, invoices, currency, IBANs, and ledger balances.
-- EXTENSIVE DOSSIERS & BOOKS: Track thesis evolution, chapter progression, ideological stances, and concluding philosophies.
+        if self._stop_check():
+            yield json.dumps({"type": "final", "data": "Investigație oprită de utilizator.", "citations": self.citations})
+            return
 
-CORE RULES:
-1. AGNOSTICISM: You have no prior knowledge of any persons, companies, or events. Answer ONLY using evidence from tools or provided context.
+        # 1. Pasul 0: Planificare Semantică Agnostică
+        yield json.dumps({"type": "step", "data": "Etapa 1: Stabilire plan de investigație..."})
+        plan = self._generate_investigation_plan()
+        titles_str = "; ".join(f"[{t['id']}] {t['title']}" for t in plan)
+        yield json.dumps({"type": "observation", "data": f"Plan investigație aprobat ({len(plan)} obiective): {titles_str}"})
 
-2. TOOL SELECTION & HIERARCHICAL RETRIEVAL GUIDE (CHOOSE APPROPRIATELY):
-    - INSPECT_FORENSIC_LEDGER: **CALL THIS FIRST** to search the pre-extracted forensic audit dossier (sections, key legal clauses, entities, financials, red flags). If it contains sufficient facts, answer immediately. If it indicates relevant page numbers, use SEARCH_TEXT to zoom in!
-    - SEARCH_TEXT: For targeted queries or for SURGICAL ZOOM-IN with the neural reranker on specific pages (page_start, page_end) or documents (doc_id).
-    - SEARCH_STRUCTURED_DATA: For counting entities, finding amounts, or specific transaction records from PostgreSQL tables.
-    - FETCH_FULL_DOCUMENT(doc_id): For reviewing a full document.
-    - ROLLING_SCRATCHPAD_AUDIT(doc_id): Use as the final comprehensive safety net for multi-chapter evolution when simpler searches are insufficient.
-
-3. ATOMIC TARGET RESOLUTION: The question is decomposed into atomic targets in your WORKING MEMORY.
-    - Use INSPECT_FORENSIC_LEDGER or SEARCH_TEXT for targeted queries first.
-    - If results are incomplete, ambiguous, or you need full document context, use FETCH_FULL_DOCUMENT(doc_id) OR ROLLING_SCRATCHPAD_AUDIT(doc_id).
-    - Positional queries: If the inquiry asks about boundary sections (e.g., 'at the end of the book', 'in the preamble', 'signatures', 'annexes'), prioritize the corresponding initial or final sections of the document.
-3. STRICT EVIDENCE-ONLY (NO SPECULATION):
-   - Never invent or assume facts, names, or locations not present in the citations.
-   - If the user asks about specific entities (e.g., a person, a city, an amount, a clause) and your initial search does not mention them, do NOT speculate or substitute with general knowledge. Perform a dedicated SEARCH_TEXT for those exact terms, or explicitly list them under [MISSING EVIDENCE].
-4. FINAL RECOMPOSITION: When all targets have reached Confidence: HIGH (either resolved with facts or verified NOT FOUND in all documents), immediately output the [FINAL RESPONSE] synthesizing all verified findings.
-5. LANGUAGE: Think in English, but the FINAL ANSWER must be in ROMANIAN.
-6. PRECISION: Extract specific facts (names, dates, timestamps, amounts, exact clause numbers).
-7. SCOPE: Answer strictly the current question. When a new entity or subject is introduced, answer exclusively using evidence for that query without including past topics or unrelated entities.
-8. CITATIONS: Every fact MUST be cited using [x], matching the [REF x] from observations.
-9. FINALITY: If you have sufficient evidence to answer all targets, you MUST provide the [FINAL RESPONSE] immediately, even in the first or second step.
-10. INVESTIGATION PLAN PROTOCOL (MANDATORY IN STEP 1):
-Before issuing search queries, you MUST understand the full inquiry and decompose it into a structured plan:
-- Identify all document identifiers, codes, parties, entities, and channels mentioned.
-- Specify the exact evidence needed from each source (e.g., dispatched quantity from delivery notice, received quantity from scale slips, prices/amounts from invoice, informal statements from chat).
-- MULTI-SOURCE INQUIRIES: If the question asks about multiple sources (e.g. formal documents AND informal chat/messages/person), you MUST search for evidence for EVERY individual source before concluding. Never skip a channel or person mentioned in the inquiry.
-- Execute targeted tool calls strictly for those identifiers or entities. NEVER search for random generic words (e.g. "financiar", "rezultat", "note"). Search exclusively for exact codes, names, or technical terms.
-
-FINAL RESPONSE FORMAT (ROMANIAN):
-[FACTS]
-- List of specific facts and unique entities found with citations [x], addressing each target.
-[ANALYSIS]
-- Brief reasoning connecting the facts. Highlight [CONTRADICTIONS] (e.g. between chat messages and contracts, or between different testimonies).
-[CONCLUSION]
-- The direct answer to the user's question addressing all decomposed targets.
-[MISSING EVIDENCE]
-- Relevant data that was NOT found (or "N/A" if all targets were fully confirmed).
-[CONFIDENCE]: LOW/MEDIUM/HIGH"""
-        
-        tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "ROLLING_SCRATCHPAD_AUDIT",
-                    "description": "Read and audit an entire large document (or book/dossier) across ALL pages using progressive rolling context windows and an accumulating scratchpad. Guarantees 100% full-text coverage without missing early, middle, or ending chapters. Ideal for complex multi-chapter synthesis, comparative analysis, or exhaustive evidence gathering.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "doc_id": {"type": "integer", "description": "Document ID to audit in full. If omitted or 0, audits the primary/largest document in the case."},
-                            "focus_query": {"type": "string", "description": "The specific question, topics, or themes to track and extract across all pages."}
-                        },
-                        "required": ["focus_query"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "SEARCH_STRUCTURED_DATA",
-                    "description": "Find and aggregate records from tables. Use this for COUNTING entities, finding amounts, or specific records. Set aggregate=True for deduplicated counts. If you need a comprehensive list of unique rows, set a higher limit.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "subject": {"type": "string", "description": "Entity or keyword to find in table rows."},
-                            "match_pattern": {"type": "string", "description": "Optional pattern to filter rows (case-insensitive)."},
-                            "aggregate": {"type": "boolean", "description": "If true, returns a deduplicated count and unique records instead of raw text."},
-                            "limit": {"type": "integer", "description": "Maximum number of unique records to return (defaults to 100. Set to 100 to avoid performance bottleneck/GPU thrashing)."}
-                        },
-                        "required": ["subject"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "INSPECT_FORENSIC_LEDGER",
-                    "description": "Search and inspect the high-density forensic audit ledger of the documents in the case. Use this FIRST to see which sections/pages contain the answers before running expensive scans. If this tool provides sufficient evidence, answer immediately. If you need verbatim clauses or exact numbers, call SEARCH_TEXT with page_start and page_end to zoom in.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "query": {"type": "string", "description": "Keywords, topics, legal clauses, entities, or questions to look up in the forensic ledger."},
-                            "doc_id": {"type": "integer", "description": "Optional document ID to inspect specifically."}
-                        },
-                        "required": ["query"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "SEARCH_TEXT",
-                    "description": "Search the full text and tables of all case documents using Hybrid Search (pgvector + lexical + neural reranker). Supports surgical zoom-in on specific page ranges or document IDs.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "concept": {"type": "string", "description": "Keywords, entity names, identifiers, or dates to search."},
-                            "semantic_intent": {"type": "string", "description": "Optional type of document (e.g. RAPORT, CONTRACT, DECLARATIE, PROCES VERBAL)."},
-                            "doc_id": {"type": "integer", "description": "Optional specific document ID to target."},
-                            "page_start": {"type": "integer", "description": "Optional starting page number for surgical reranker zoom-in."},
-                            "page_end": {"type": "integer", "description": "Optional ending page number for surgical reranker zoom-in."}
-                        },
-                        "required": ["concept"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "FETCH_FULL_DOCUMENT",
-                    "description": "Retrieve the complete text (dynamically sized to match the active context window) of a specific document ID. Use this when confidence for a target is MEDIUM to inspect surrounding paragraphs or verify details.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "doc_id": {"type": "integer", "description": "Document ID to inspect in full."},
-                            "focus_terms": {"type": "string", "description": "Optional keywords to center the expanded window around."}
-                        },
-                        "required": ["doc_id"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "GET_DOCUMENT_OUTLINE",
-                    "description": "Inspect the structural table of contents (TOC / Outline) of a document: chapters, articles, clauses, annexes, and scale tickets with exact page numbers. Call this to locate relevant sections before fetching chunks.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "doc_id": {"type": "integer", "description": "Document ID to inspect table of contents."}
-                        },
-                        "required": ["doc_id"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "EXPLORE_GRAPH",
-                    "description": "Find relationships and links between entities.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "entity": {"type": "string", "description": "Entity name to explore"}
-                        },
-                        "required": ["entity"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "CALCULATE",
-                    "description": "Perform math calculations.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "expression": {"type": "string", "description": "Math expression (e.g. 1500 + 200)"}
-                        },
-                        "required": ["expression"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "TIMELINE",
-                    "description": "Get a chronological timeline of events for an entity.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "entity": {"type": "string", "description": "Entity name to track"}
-                        },
-                        "required": ["entity"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "DETECT_FINANCIAL_ANOMALIES",
-                    "description": "Run forensic statistical anomaly detection: Benford's Law deviation, smurfing/split-invoicing, duplicate payments, and round number clustering across case transactions.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {}
-                    }
-                }
-            }
-        ]
-
-        messages = [
-            {"role": "system", "content": system_prompt}
-        ]
-        
-        # Add chat history
-        messages.extend(self.history)
-        
-        # Add current question with injected evidence
-        messages.append({
-            "role": "user", 
-            "content": f"EVIDENCE ALREADY IN CONTEXT:\n{self.injected_evidence}\n\nQUESTION: {self.user_question}\n\nREMINDER: You are an Agnostic Forensic Auditor. Follow these rules STRICTLY:\n1. If the question asks about FINAL amounts, conclusions, annexes (e.g., 'sumă totală', 'prejudiciu final', 'anexa nr', 'concluzii'), you MUST use ROLLING_SCRATCHPAD_AUDIT immediately - DO NOT rely on partial SEARCH_TEXT results.\n2. If the question spans multiple years (e.g., 2013-2018), you MUST use ROLLING_SCRATCHPAD_AUDIT to ensure complete temporal coverage.\n3. If your initial searches return incomplete evidence or low confidence, AMPLIFY by using ROLLING_SCRATCHPAD_AUDIT before concluding.\n4. NEVER conclude that a document section is missing without first trying ROLLING_SCRATCHPAD_AUDIT for comprehensive analysis.\n5. When searching for payments, invoices, or deliveries, search both the full alphanumeric reference and the numeric identifier across bank statements, ledgers, and delivery documents.\n6. Compute exact math on any figures, dates, delays, quantities, or financial differences asked in the question.\n7. CURRENT QUERY FOCUS: Answer ONLY the current question. Ignore past topics, codes, or entities from previous conversation turns unless explicitly asked again.\n8. STRUCTURED INVESTIGATION PLAN: In Phase 1, decompose the question into a structured plan identifying each document code, entity, and quantity/clause needed. DO NOT query random generic words; query the specific codes, entities, and technical terms identified in your plan."
-        })
-
-        has_used_tools = False
-        has_used_search_text = False
-
-        for step in range(1, 16):
+        # 2. Execuție Secvențială pe Ținte cu Context-Flush
+        for target in plan:
             if self._stop_check():
                 yield json.dumps({"type": "final", "data": "Investigație oprită de utilizator.", "citations": self.citations})
                 return
-            yield json.dumps({"type": "step", "data": f"Phase {step}: Investigating..."})
-            debug_logger.step_start(session_id=str(self.case_id), step=step, action="INVESTIGATION_STEP", case_id=self.case_id)
-            
-            # Tools are always available
-            current_tools = tools
-            
-            # If the model tries to end without evidence after phase 1
-            if step > 1 and not has_used_tools and step < 4:
-                messages.append({"role": "user", "content": "You haven't used any tools yet. Use SEARCH_TEXT or SEARCH_STRUCTURED_DATA to find evidence before concluding."})
-            
-            # Truncate messages to prevent context overflow and timeouts
-            max_messages = int(UnifiedLLMClient.get_engine_config().get("max_messages", 12))
-            messages = truncate_messages(messages, max_messages)
-            
-            chat_ctx = int(UnifiedLLMClient.get_engine_config().get("chat_ctx", 16384))
+
+            yield json.dumps({"type": "step", "data": f"Investigare Ținta {target['id']}/{len(plan)}: {target['title']}"})
             try:
-                chat_res = UnifiedLLMClient.chat_step(
-                    messages=messages,
-                    tools=current_tools,
-                    model=self.active_model,
-                    temperature=0.0,
-                    num_ctx=chat_ctx,
-                    stop_check=self._stop_check
-                )
-                assistant_msg = {
-                    "role": "assistant",
-                    "content": chat_res.get("content", ""),
-                    "tool_calls": chat_res.get("tool_calls", [])
-                }
+                fact_result = self._execute_sub_target(target)
             except ChatStoppedError:
                 yield json.dumps({"type": "final", "data": "Investigație oprită de utilizator.", "citations": self.citations})
                 return
             except Exception as e:
-                err_msg = str(e)
-                if hasattr(e, 'response') and e.response is not None:
-                    try:
-                        resp_text = e.response.text[:2000]
-                        if resp_text != err_msg:
-                            err_msg = f"{err_msg} | Response: {resp_text}"
-                    except Exception:
-                        pass
-                yield json.dumps({"type": "final", "data": f"Eroare LLM Engine (Timeout/500): {err_msg}"})
-                return
+                fact_result = f"Eroare la analiza țintei: {e}"
 
-            messages.append(assistant_msg)
-            
-            # Yield thinking/reasoning if present
-            reasoning_text = chat_res.get("reasoning")
-            if reasoning_text:
-                yield json.dumps({"type": "thought", "data": str(reasoning_text).strip()})
+            self.working_memory[target["id"]] = fact_result
+            yield json.dumps({"type": "observation", "data": f"✓ Ținta {target['id']} finalizată: {fact_result[:300]}..."})
 
-            content = assistant_msg.get("content", "").strip()
-            
-            # FAIL-SAFE: If model writes tool calls in text instead of using tool_calls field
-            synthetic_tool_calls = []
-            if not assistant_msg.get("tool_calls"):
-                if "[SEARCH_STRUCTURED_DATA]" in content:
-                    # Basic extraction for Qwen's common text-calling format
-                    subject_match = re.search(r"subject:\s*([^\\n]+)", content)
-                    if subject_match:
-                        synthetic_tool_calls.append({
-                            "function": {
-                                "name": "SEARCH_STRUCTURED_DATA",
-                                "arguments": {"subject": subject_match.group(1).strip()}
-                            }
-                        })
-                elif "[SEARCH_TEXT]" in content:
-                    concept_match = re.search(r"concept:\s*([^\\n]+)", content)
-                    if concept_match:
-                        has_used_search_text = True
-                        synthetic_tool_calls.append({
-                            "function": {
-                                "name": "SEARCH_TEXT",
-                                "arguments": {"concept": concept_match.group(1).strip()}
-                            }
-                        })
-                elif "[ROLLING_SCRATCHPAD_AUDIT]" in content:
-                    query_match = re.search(r"focus_query:\s*([^\\n]+)", content)
-                    doc_match = re.search(r"doc_id:\s*(\d+)", content)
-                    synthetic_tool_calls.append({
-                        "function": {
-                            "name": "ROLLING_SCRATCHPAD_AUDIT",
-                            "arguments": {
-                                "doc_id": int(doc_match.group(1)) if doc_match else 0,
-                                "focus_query": query_match.group(1).strip() if query_match else self.user_question
-                            }
-                        }
-                    })
-                elif "[FETCH_FULL_DOCUMENT]" in content:
-                    doc_match = re.search(r"doc_id:\s*(\d+)", content)
-                    focus_match = re.search(r"focus_terms:\s*([^\\n]+)", content)
-                    synthetic_tool_calls.append({
-                        "function": {
-                            "name": "FETCH_FULL_DOCUMENT",
-                            "arguments": {
-                                "doc_id": int(doc_match.group(1)) if doc_match else 0,
-                                "focus_terms": focus_match.group(1).strip() if focus_match else ""
-                            }
-                        }
-                    })
-                elif "[INSPECT_FORENSIC_LEDGER]" in content:
-                    query_match = re.search(r"query:\s*([^\\n]+)", content)
-                    doc_match = re.search(r"doc_id:\s*(\d+)", content)
-                    synthetic_tool_calls.append({
-                        "function": {
-                            "name": "INSPECT_FORENSIC_LEDGER",
-                            "arguments": {
-                                "query": query_match.group(1).strip() if query_match else self.user_question,
-                                "doc_id": int(doc_match.group(1)) if doc_match else 0
-                            }
-                        }
-                    })
-                elif "[GET_DOCUMENT_OUTLINE]" in content:
-                    doc_match = re.search(r"doc_id:\s*(\d+)", content)
-                    synthetic_tool_calls.append({
-                        "function": {
-                            "name": "GET_DOCUMENT_OUTLINE",
-                            "arguments": {
-                                "doc_id": int(doc_match.group(1)) if doc_match else 0
-                            }
-                        }
-                    })
+        # 3. Sinteză Finală Verificată
+        if self._stop_check():
+            yield json.dumps({"type": "final", "data": "Investigație oprită de utilizator.", "citations": self.citations})
+            return
 
-            if content:
-                yield json.dumps({"type": "observation", "data": f"Thinking: {content}"})
+        yield json.dumps({"type": "step", "data": "Etapa Finală: Redactare raport de sinteză..."})
+        try:
+            final_report = self._synthesize_final_report(plan)
+        except ChatStoppedError:
+            yield json.dumps({"type": "final", "data": "Investigație oprită de utilizator.", "citations": self.citations})
+            return
+        except Exception as e:
+            final_report = f"Eroare la redactarea raportului final: {e}"
 
-            # Check if tools were called (real or synthetic)
-            tool_calls = assistant_msg.get("tool_calls", []) or synthetic_tool_calls
-            
-            # Debug: log raw tool calls for troubleshooting
-            debug_logger.tool_raw(raw_calls=tool_calls, trace_id=str(self.case_id))
-            print(f"[TOOL_DEBUG] Raw tool_calls from LLM: {assistant_msg.get('tool_calls', [])}")
-            print(f"[TOOL_DEBUG] Synthetic tool_calls: {synthetic_tool_calls}")
-            
-            if tool_calls:
-                has_used_tools = True
-                for tc in tool_calls:
-                    if self._stop_check():
-                        yield json.dumps({"type": "final", "data": "Investigație oprită de utilizator.", "citations": self.citations})
-                        return
-                    # Normalize tool name: strip whitespace and convert to uppercase for comparison
-                    t_name_raw = tc["function"]["name"]
-                    t_name_stripped = t_name_raw.strip()
-                    t_name_upper = t_name_stripped.upper()
-                    
-                    # Map normalized names back to original case-sensitive names
-                    tool_name_map = {
-                        "INSPECT_FORENSIC_LEDGER": "INSPECT_FORENSIC_LEDGER",
-                        "SEARCH_TEXT": "SEARCH_TEXT",
-                        "SEARCH_STRUCTURED_DATA": "SEARCH_STRUCTURED_DATA", 
-                        "FETCH_FULL_DOCUMENT": "FETCH_FULL_DOCUMENT",
-                        "GET_DOCUMENT_OUTLINE": "GET_DOCUMENT_OUTLINE",
-                        "EXPLORE_GRAPH": "EXPLORE_GRAPH",
-                        "TIMELINE": "TIMELINE",
-                        "CALCULATE": "CALCULATE",
-                        "DETECT_FINANCIAL_ANOMALIES": "DETECT_FINANCIAL_ANOMALIES",
-                        "ROLLING_SCRATCHPAD_AUDIT": "ROLLING_SCRATCHPAD_AUDIT"
-                    }
-                    
-                    # First try exact match
-                    t_name_normalized = tool_name_map.get(t_name_upper, t_name_stripped)
-                    
-                    # If still not found, try partial matching (e.g., "search" matches "SEARCH_TEXT")
-                    if t_name_normalized == t_name_stripped:
-                        for expected_name in tool_name_map.values():
-                            if expected_name.startswith(t_name_upper) or t_name_upper in expected_name:
-                                t_name_normalized = expected_name
-                                break
-                    
-                    # Handle concatenated tool names (e.g., "SEARCH_TEXTSEARCH_STRUCTURED_DATA")
-                    if t_name_normalized == t_name_stripped and len(t_name_stripped) > 20:
-                        for expected_name in tool_name_map.values():
-                            if t_name_stripped.startswith(expected_name):
-                                t_name_normalized = expected_name
-                                break
-                    
-                    # If still not found, try to split concatenated names
-                    split_names = None
-                    if t_name_normalized == t_name_stripped:
-                        for expected_name in sorted(tool_name_map.values(), key=len, reverse=True):
-                            remaining = t_name_stripped[len(expected_name):]
-                            if remaining and remaining in tool_name_map.values():
-                                # This is a concatenated name - split into separate tool calls
-                                print(f"[TOOL_DEBUG] Found concatenated tool names: {t_name_stripped}")
-                                print(f"[TOOL_DEBUG] Splitting into: {expected_name} and {remaining}")
-                                split_names = [expected_name, remaining]
-                                
-                                # Create a new tool call for the remaining tool
-                                new_tc = tc.copy()
-                                new_tc["function"]["name"] = remaining
-                                # Keep same arguments, just split the call
-                                tool_calls.insert(tool_calls.index(tc) + 1, new_tc)
-                                
-                                t_name_normalized = expected_name
-                                break
-                    
-                    # Extract tool arguments
-                    t_args = tc["function"]["arguments"]
-                    
-                    if t_name_normalized == "SEARCH_TEXT":
-                        has_used_search_text = True
-                    
-                    if isinstance(t_args, str):
-                        try:
-                            t_args = json.loads(t_args)
-                        except:
-                            t_args = {"subject": t_args, "concept": t_args, "query": t_args, "entity": t_args, "expression": t_args}
-                            
-                    if isinstance(t_args, dict):
-                        subject_val = t_args.get("subject", "")
-                        if isinstance(subject_val, str) and "\n" in subject_val:
-                            lines = subject_val.split("\n")
-                            t_args["subject"] = lines[0].replace("- subject:", "").replace("subject:", "").strip()
-                            for line in lines[1:]:
-                                if "aggregate" in line.lower():
-                                    t_args["aggregate"] = "true" in line.lower()
-                                if "match_pattern" in line.lower():
-                                    t_args["match_pattern"] = line.split(":")[-1].strip().strip("'\"")
-                                if "date_filter" in line.lower():
-                                    t_args["date_filter"] = line.split(":")[-1].strip().strip("'\"")
-
-                    debug_logger.tool_normalized(
-                        original_name=t_name_raw,
-                        normalized_name=t_name_normalized,
-                        args=t_args if isinstance(t_args, dict) else {"raw": str(t_args)},
-                        split_calls=split_names,
-                        trace_id=str(self.case_id)
-                    )
-                                    
-                    yield json.dumps({"type": "tool_call", "tool": t_name_raw.strip(), "params": str(t_args)})
-
-                    # Înregistrăm termenul de căutare pentru gardianul anti-surrender
-                    if t_name_normalized in ("SEARCH_TEXT", "INSPECT_FORENSIC_LEDGER", "SEARCH_STRUCTURED_DATA", "FETCH_FULL_DOCUMENT"):
-                        q_val = ""
-                        if isinstance(t_args, dict):
-                            q_val = str(t_args.get("concept") or t_args.get("query") or t_args.get("subject") or t_args.get("focus_terms") or "")
-                        elif isinstance(t_args, str):
-                            q_val = str(t_args)
-                        if q_val:
-                            self.searched_queries.append(q_val)
-                    
-                    observation = ""
-                    t_exec_start = time.time()
-                    exec_success = True
-                    exec_err = None
-                    try:
-                        if t_name_normalized == "INSPECT_FORENSIC_LEDGER":
-                            observation = self.tool_inspect_forensic_ledger(
-                                query=t_args.get("query", "") if isinstance(t_args, dict) else str(t_args),
-                                doc_id=int(t_args.get("doc_id", 0)) if isinstance(t_args, dict) and t_args.get("doc_id") else 0
-                            )
-                        elif t_name_normalized == "SEARCH_STRUCTURED_DATA":
-                            observation = self.tool_search_transactions(
-                                subject=t_args.get("subject", "") if isinstance(t_args, dict) else "", 
-                                date_filter=t_args.get("date_filter", "") if isinstance(t_args, dict) else "",
-                                match_pattern=t_args.get("match_pattern", "") if isinstance(t_args, dict) else "",
-                                aggregate=t_args.get("aggregate", False) if isinstance(t_args, dict) else False,
-                                limit=int(t_args.get("limit", 30)) if isinstance(t_args, dict) and t_args.get("limit") is not None else 30
-                            )
-                        elif t_name_normalized == "SEARCH_TEXT":
-                            observation = self.tool_search_text(
-                                query=t_args.get("concept", "") if isinstance(t_args, dict) else str(t_args),
-                                semantic_intent=t_args.get("semantic_intent", "") if isinstance(t_args, dict) else "",
-                                doc_id=int(t_args.get("doc_id", 0)) if isinstance(t_args, dict) and t_args.get("doc_id") else 0,
-                                page_start=int(t_args.get("page_start", 0)) if isinstance(t_args, dict) and t_args.get("page_start") else 0,
-                                page_end=int(t_args.get("page_end", 0)) if isinstance(t_args, dict) and t_args.get("page_end") else 0
-                            )
-                        elif t_name_normalized == "ROLLING_SCRATCHPAD_AUDIT":
-                            t_doc_id = int(t_args.get("doc_id", 0)) if isinstance(t_args, dict) else 0
-                            t_focus = (t_args.get("focus_query") or t_args.get("focus_terms") or self.user_question) if isinstance(t_args, dict) else self.user_question
-                            for status_msg, is_final, final_obs in self.run_rolling_scratchpad_digest(t_doc_id, t_focus):
-                                yield json.dumps({"type": "observation", "data": status_msg})
-                                if is_final:
-                                    observation = final_obs
-                        elif t_name_normalized == "FETCH_FULL_DOCUMENT":
-                            t_doc_id = int(t_args.get("doc_id", 0)) if isinstance(t_args, dict) else 0
-                            t_focus = (t_args.get("focus_terms") or self.user_question) if isinstance(t_args, dict) else ""
-                            with SessionLocal() as db_chk:
-                                d_chk = db_chk.query(Document).filter(Document.id == t_doc_id).first()
-                                d_len = len(d_chk.raw_text or "") if d_chk else 0
-                            budget = self._get_context_budget()
-                            if d_len > budget["doc_context_limit"]:
-                                for status_msg, is_final, final_obs in self.run_rolling_scratchpad_digest(t_doc_id, t_focus):
-                                    yield json.dumps({"type": "observation", "data": status_msg})
-                                    if is_final:
-                                        observation = final_obs
-                            else:
-                                observation = self.tool_fetch_full_document(doc_id=t_doc_id, focus_terms=t_focus)
-                        elif t_name_normalized == "GET_DOCUMENT_OUTLINE":
-                            t_doc_id = int(t_args.get("doc_id", 0)) if isinstance(t_args, dict) else 0
-                            observation = self.tool_get_document_outline(doc_id=t_doc_id)
-                        elif t_name_normalized == "EXPLORE_GRAPH":
-                            observation = self.tool_explore_graph(t_args.get("entity", ""))
-                        elif t_name_normalized == "TIMELINE":
-                            observation = self.tool_timeline(t_args.get("entity", ""))
-                        elif t_name_normalized == "CALCULATE":
-                            observation = self.tool_calculate(t_args.get("expression", ""))
-                        elif t_name_normalized == "DETECT_FINANCIAL_ANOMALIES":
-                            from .anomaly_service import anomaly_service
-                            with SessionLocal() as db:
-                                res = anomaly_service.analyze_case(self.case_id, db)
-                                observation = json.dumps(res, indent=2, ensure_ascii=False)
-                        else:
-                            # Log unknown tool for debugging
-                            logger.warning(f"Unknown tool called: {t_name_raw.strip()} (normalized: {t_name_normalized})")
-                            observation = f"Tool '{t_name_raw.strip()}' is not recognized. Available tools: SEARCH_TEXT, SEARCH_STRUCTURED_DATA, FETCH_FULL_DOCUMENT, GET_DOCUMENT_OUTLINE, EXPLORE_GRAPH, TIMELINE, CALCULATE, DETECT_FINANCIAL_ANOMALIES, ROLLING_SCRATCHPAD_AUDIT."
-                    except ChatStoppedError:
-                        yield json.dumps({"type": "final", "data": "Investigație oprită de utilizator.", "citations": self.citations})
-                        return
-                    except Exception as e:
-                        exec_success = False
-                        exec_err = str(e)
-                        observation = f"Eroare la executarea tool-ului {t_name_raw.strip()}: {str(e)}"
-                    finally:
-                        t_exec_dur = (time.time() - t_exec_start) * 1000
-                        debug_logger.tool_exec(
-                            tool_name=t_name_normalized,
-                            duration_ms=t_exec_dur,
-                            success=exec_success,
-                            obs_len=len(observation),
-                            error=exec_err,
-                            trace_id=str(self.case_id)
-                        )
-                    
-                    yield json.dumps({"type": "observation", "data": observation[:2500]})
-                    
-                    tool_msg = {
-                        "role": "tool",
-                        "content": observation[:3500] if len(observation) > 3500 else observation
-                    }
-                    if tc.get("id"):
-                        tool_msg["tool_call_id"] = tc["id"]
-                    messages.append(tool_msg)
-                
-                # Add a prompt for the model to process the tool results
-                messages.append({
-                    "role": "user",
-                    "content": "Mulțumesc pentru rezultatele instrumentelor. Te rog analizează observațiile și continuă investigația sau oferă un răspuns final bazat pe dovezile găsite."
-                })
-                
-                continue # Go to next iteration to let model think about the observation
-            
-            # If no tools called, we check if we have the final answer
-            final_content = assistant_msg.get("content", "").strip()
-            
-            is_final_candidate = (
-                "[FINAL RESPONSE]" in final_content or 
-                "[FACTS]" in final_content or 
-                "[CONCLUSION]" in final_content or 
-                "CONCLUZIE" in final_content.upper() or
-                "[CONCLUZIE]" in final_content or
-                "CONFIDENCE: HIGH" in final_content.upper()
-            )
-            
-            # 1. ANTI-SURRENDER FORENSIC GUARD:
-            # Detectăm dacă modelul încearcă să declare că lipsesc dovezi / nu există documente înainte de a căuta toți termenii cheie
-            surrender_phrases = [
-                "nu există", "nu au fost găsite", "nu a fost găsit", "lipsesc dovezi", 
-                "imposibilă determinarea", "nu cuprind tranzacția", "nu există dovezi", 
-                "nu pot furniza", "nu conțin niciun document", "nu conțin referință",
-                "nu menționează", "nu este disponibilă în dozele", "nu este disponibilă în dovezile",
-                "nu conține informație despre", "nu conțin informație despre"
-            ]
-            is_surrender = any(phrase in final_content.lower() for phrase in surrender_phrases)
-            unsearched_terms = self._extract_unsearched_key_terms()
-
-            if is_surrender and step < 5 and (not has_used_tools or unsearched_terms):
-                if unsearched_terms:
-                    prompt_reminder = (
-                        f"FORENSIC DIRECTIVE: Ai declarat că lipsesc dovezi sau că nu există informații pentru una dintre cerințe, "
-                        f"însă nu ai efectuat căutări pentru toți termenii sau entitățile din întrebare: {', '.join(unsearched_terms[:4])}. "
-                        f"Apelează SEARCH_TEXT dedicat pentru fiecare dintre acești termeni înainte de a concluziona."
-                    )
-                else:
-                    prompt_reminder = (
-                        f"FORENSIC DIRECTIVE: Do NOT conclude that records are missing without having searched first. "
-                        f"Call INSPECT_FORENSIC_LEDGER or SEARCH_TEXT for the specific subjects and entities in the question: '{self.user_question}'."
-                    )
-                messages.append({
-                    "role": "user", 
-                    "content": prompt_reminder
-                })
-                continue
-
-            if is_final_candidate and has_used_tools:
-                # Extract clean final response part if it's mixed with planning/thinking
-                if "[FINAL RESPONSE]" in final_content:
-                    parts = final_content.split("[FINAL RESPONSE]")
-                    display_content = parts[-1].strip()
-                    if not display_content and len(parts) > 1 and parts[0].strip():
-                        display_content = parts[0].strip()
-                else:
-                    display_content = final_content
-                
-                if display_content:
-                    yield json.dumps({"type": "final", "data": display_content, "citations": self.citations})
-                    return
-
-            if not has_used_tools and step < 4:
-                messages.append({"role": "user", "content": "Continuă investigația folosind uneltele (SEARCH_TEXT, FETCH_FULL_DOCUMENT, SEARCH_STRUCTURED_DATA) pentru a găsi dovezi clare înainte de a concluziona."})
-                continue
-            
-            # Fallback: If model is struggling, suggest ROLLING_SCRATCHPAD_AUDIT for comprehensive document analysis
-            if has_used_tools and step >= 4 and not final_content:
-                messages.append({
-                    "role": "user", 
-                    "content": "⚠️ LOW CONFIDENCE DETECTED: Your previous searches did not yield sufficient evidence. You MUST use ROLLING_SCRATCHPAD_AUDIT to analyze entire documents comprehensively. This tool traverses 100% of text and builds complete forensic understanding without missing any sections."
-                })
-                continue
-                
-            if final_content and has_used_tools:
-                yield json.dumps({"type": "final", "data": final_content, "citations": self.citations})
-                return
-
-        yield json.dumps({"type": "final", "data": "Am atins limita de 15 pași de investigație. Rezumat parțial bazat pe dovezile găsite:", "citations": self.citations})
+        yield json.dumps({"type": "final", "data": final_report, "citations": self.citations})
 
 def truncate_messages(messages: List[Dict], max_messages: int = 12) -> List[Dict]:
     """Truncate message history to keep only recent messages while preserving system prompt."""
