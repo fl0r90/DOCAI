@@ -740,6 +740,7 @@ class UnifiedLLMClient:
                 raise
 
             acc_content = ""
+            acc_thinking = ""
             acc_tools: List[Dict[str, Any]] = []  # fiecare: {"name": str, "args_parts": [str]}
 
             def _merge_tool_call(tc: Dict[str, Any]) -> None:
@@ -777,11 +778,19 @@ class UnifiedLLMClient:
                     piece = msg.get("content")
                     if isinstance(piece, str):
                         acc_content += piece
+                    th_piece = msg.get("thinking")
+                    if isinstance(th_piece, str):
+                        acc_thinking += th_piece
                     for tc in (msg.get("tool_calls") or []):
                         _merge_tool_call(tc)
             finally:
                 # Închiderea conexiunii abortează slotul server-side (eliberează CPU-ul).
                 resp.close()
+
+            # Dacă content este gol dar modelul a generat în thinking (ex: Qwen 3.5 / DeepSeek R1),
+            # folosim reasoning-ul ca conținut pentru a nu pierde faptele extrase!
+            if not acc_content.strip() and acc_thinking.strip() and not acc_tools:
+                acc_content = acc_thinking.strip()
 
             tool_calls = cls._normalize_tool_calls([
                 {
@@ -798,7 +807,12 @@ class UnifiedLLMClient:
                 tokens_out_est=int(len(acc_content) // 3.5),
                 tool_calls_count=len(tool_calls)
             )
-            return {"content": acc_content, "tool_calls": tool_calls, "raw": {"role": "assistant", "content": acc_content}}
+            return {
+                "content": acc_content,
+                "tool_calls": tool_calls,
+                "reasoning": acc_thinking.strip(),
+                "raw": {"role": "assistant", "content": acc_content}
+            }
 
     @classmethod
     async def async_generate(cls, prompt: str, model: Optional[str] = None, 

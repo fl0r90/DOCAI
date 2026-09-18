@@ -146,6 +146,12 @@ class AgenticInvestigator:
         self.searched_queries = []
         self.working_memory = {}
         self.evidence_cache = {}
+        # Configurație de context flexibilă și dinamică (scalabilă de la 8K la 64K)
+        cfg = UnifiedLLMClient.get_engine_config()
+        self.processing_ctx = int(cfg.get("processing_ctx") or cfg.get("narrative_ctx") or 8192)
+        # Prag de compactare stil OpenCode: 75% din contextul configurat (ex: 6.144 pt 8K, 24.576 pt 32K)
+        self.compaction_threshold_tokens = int(self.processing_ctx * 0.75)
+        self.max_evidence_chars = int((self.processing_ctx - 1500) * 3.5)
         self._load_history()
         self._pre_process_query()
 
@@ -1438,7 +1444,7 @@ MAI CAUT ÎN CONTINUARE: (ce a rămas de lămurit din obiectiv, sau scrie exact 
                 ],
                 model=self.active_model,
                 temperature=0.0,
-                num_ctx=4096,
+                num_ctx=self.processing_ctx,
                 stop_check=self._stop_check
             )
             content = res.get("content", "").strip()
@@ -1475,6 +1481,44 @@ MAI CAUT ÎN CONTINUARE: (ce a rămas de lămurit din obiectiv, sau scrie exact 
             })
         return clean_targets
 
+    def _compact_evidence_if_needed(self, raw_evidence: str, target_title: str) -> str:
+        """Compactare dinamică stil OpenCode când volumul de text depășește pragul flexibil de context (75%)."""
+        est_tokens = len(raw_evidence) // 3.5
+        if est_tokens <= self.compaction_threshold_tokens:
+            return raw_evidence
+
+        print(f"[*] Trigger Dynamic Context Compaction: {est_tokens:.0f} tokens > {self.compaction_threshold_tokens} threshold (processing_ctx={self.processing_ctx})")
+        compaction_prompt = (
+            f"Ești un Forensic Memory Compactor. Condensează următoarele fragmente de probe din dosar pentru obiectivul '{target_title}'.\n\n"
+            "REGULI STRICTE DE CONDENSARE:\n"
+            "1. Păstrează OBLIGATORIU toate cifrele, cantitățile și unitățile de măsură (ex: 450 tone, 388,50 tone, 61,50 tone).\n"
+            "2. Păstrează OBLIGATORIU toate codurile de documente și numerele (AVIZ, FACT, BORDEROU, tichete cântar, serii).\n"
+            "3. Păstrează OBLIGATORIU valorile monetare, prețurile unitare și TVA (ex: 1.100 RON/to, 495.000 RON).\n"
+            "4. Păstrează OBLIGATORIU declarațiile și citatele directe din discuții/conversații (ex: ce a spus șoferul Vasile, ce a instruit Mihai Stanciu despre custodie).\n"
+            "5. Păstrează etichetele de referință [REF x] pentru fiecare probă.\n"
+            "6. Elimină orice text de umplutură, boilerplate notarial, antete goale sau linii redundante.\n\n"
+            f"DOVEZI BRUTE:\n{raw_evidence}"
+        )
+        try:
+            res = UnifiedLLMClient.chat_step(
+                messages=[
+                    {"role": "system", "content": "You are a Forensic Memory Compactor. Output high-density factual summary in ROMANIAN. Preserve all numbers, quotes, and citations."},
+                    {"role": "user", "content": compaction_prompt}
+                ],
+                model=self.active_model,
+                temperature=0.0,
+                num_ctx=self.processing_ctx,
+                stop_check=self._stop_check
+            )
+            compacted = res.get("content", "").strip()
+            if compacted and len(compacted) > 100:
+                print(f"[+] Context Compaction reușită: redus de la {len(raw_evidence)} la {len(compacted)} caractere.")
+                return compacted
+        except Exception as e:
+            print(f"[!] Eroare la compactare context: {e}")
+
+        return raw_evidence[:self.max_evidence_chars]
+
     def _execute_sub_target(self, target: Dict[str, Any]) -> str:
         """Rezolvă un target individual într-un context izolat și curat (Context-Flush)."""
         evidence_snippets = []
@@ -1497,6 +1541,8 @@ MAI CAUT ÎN CONTINUARE: (ce a rămas de lămurit din obiectiv, sau scrie exact 
         combined_evidence = "\n\n".join(evidence_snippets)
         if not combined_evidence:
             combined_evidence = "Nu s-au identificat fragmente relevante în dosar pentru acest criteriu."
+        else:
+            combined_evidence = self._compact_evidence_if_needed(combined_evidence, target["title"])
 
         # Informații contextuale suplimentare din working memory precedent (pentru calcule dependente)
         prev_facts_ctx = ""
@@ -1508,10 +1554,11 @@ MAI CAUT ÎN CONTINUARE: (ce a rămas de lămurit din obiectiv, sau scrie exact 
         prompt = (
             f"OBIECTIV DE INVESTIGAT: {target['title']}\n\n"
             f"{prev_facts_ctx}"
-            f"DOVEZI IDENTIFICATE DIN DOSAR:\n{combined_evidence[:8000]}\n\n"
+            f"DOVEZI IDENTIFICATE DIN DOSAR:\n{combined_evidence[:self.max_evidence_chars]}\n\n"
             "CERINȚĂ: Formulează concluzia factuală concretă pentru acest obiectiv în limba ROMÂNĂ. "
             "Extrage cifre exacte, cantități, diferențe și citează obligatoriu referințele [REF x]. "
             "Efectuează calcule matematice directe dacă obiectivul cere o diferență sau o valoare. "
+            "Dacă dovezile conțin discuții sau instrucțiuni despre nereguli, diferențe sau aranjamente (ex: pe WhatsApp), expune-le explicit. "
             "Dacă dovezile nu conțin nicio mențiune sau document despre acest obiectiv, specifică explicit 'Nu s-au găsit dovezi'."
         )
 
@@ -1522,7 +1569,7 @@ MAI CAUT ÎN CONTINUARE: (ce a rămas de lămurit din obiectiv, sau scrie exact 
             ],
             model=self.active_model,
             temperature=0.0,
-            num_ctx=4096,
+            num_ctx=self.processing_ctx,
             stop_check=self._stop_check
         )
         return step_res.get("content", "").strip()
@@ -1556,7 +1603,7 @@ MAI CAUT ÎN CONTINUARE: (ce a rămas de lămurit din obiectiv, sau scrie exact 
             ],
             model=self.active_model,
             temperature=0.0,
-            num_ctx=6144,
+            num_ctx=self.processing_ctx,
             stop_check=self._stop_check
         )
         return final_res.get("content", "").strip()

@@ -306,10 +306,51 @@
         - `grinder.py`: Deleagă la `DeepForensicAuditor` dacă este furnizat `doc_id`.
         - `cases.py`: Expus endpoint dedicat `POST /cases/documents/{doc_id}/audit_only` pentru declanșarea exclusivă a auditului AI în fundal pe documente existente, fără reluarea OCR-ului sau re-indexare vectorială.
 
-    - *Corecție Telemetrie LLM Client (`llm_client.py`):* Adăugat importul lipsă `import time`, a cărui absență declanșa eroarea `NameError: name 'time' is not defined` la apelurile de inferență când se calcula latența `t_llm_dur`.
+### Etapa 41: Granular Forensic Ledger Ingestion, Goal-Conditioned Working State & Surgical Reranker Zoom - IMPLEMENTAT (Septembrie 2026)
+- **Problemă rezolvată (Gâtuirea Rolling Scratchpad și ineficiența căutărilor pe documente mari):**
+    - Vechiul motor `run_rolling_scratchpad_digest` suferea de un efect de bulgăre de zăpadă: la fiecare calup nou, forța LLM-ul să rescrie integral întregul scratchpad acumulat din calupurile anterioare. Aceasta ducea la:
+        1. Încetinire exponențială (de la câteva secunde la peste 1-2 minute per calup din cauza miilor de tokeni de output generați repetat).
+        2. Pierderea dovezilor (*catastrophic forgetting*) prin re-comprimare continuă.
+        3. Un bug critic de crash `NameError: name 'focus_terms' is not defined` la documente care se încadrau în limita de context.
+    - În plus, pentru întrebări punctuale (clauze contractuale specifice, notificări, sume, semnatari), declanșarea automată a scanării oarbe pe tot documentul era un consum inutil de resurse.
+- **Arhitectura actualizată (`deep_audit_service.py`, `chat_service.py`):**
+    - *1. Audit Granular la Ingestie (`_audit_granular_chunk_ledger`):*
+        - La procesarea documentului, textul brut este partiționat dinamic în funcție de `processing_ctx` (calibrat automat pentru RTX 5000 Ada la 32K/64K sau laptop la 16K: `chunk_chars = (processing_ctx - 4500) * 3.5`).
+        - Pentru fiecare calup, se generează un micro-dosar dens (~1.500 - 2.500 caractere) structurat agnostică pe 6 axe criminalistice: Subiect/Ancoră, Părți & Entități, Clauze Legale & Obligații, Financiar & Cifre Exacte, Cronologie & Evenimente, Riscuri/Anomalii.
+        - Salvat structurat în PostgreSQL în `doc_metadata['forensic_ledger']` și `doc_metadata['forensic_ledger_summary']`.
+    - *2. Arhitectură de Căutare Ierarhizată (Hierarchical Retrieval):*
+        - **Treapta 1 (Fast-Path / Pre-Scratchpad Ledger Hit):** În `_pre_process_query`, sistemul scanează direct dosarul granular din metadate. Dacă probele sunt complete, utilizatorul primește răspuns instantaneu (sub 2 secunde). Expusă și unealta dedicată `INSPECT_FORENSIC_LEDGER`.
+        - **Treapta 2 (Surgical Reranker Zoom):** Dacă auditul identifică secțiunea/capitolul (ex: Paginile 18-24), dar este necesar textul cuvânt cu cuvânt sau formula de calcul, unealta `SEARCH_TEXT` suportă acum parametrii `doc_id`, `page_start` și `page_end`. Reranker-ul `bge-reranker-v2-m3` este aplicat strict pe candidații din acele pagini, garantând precizie chirurgicală fără zgomot.
+        - **Treapta 3 (Rolling Scratchpad cu Goal-Conditioned Working State):**
+            - *Context Curat & Append-Only:* LLM-ul nu mai rescrie notițele din urmă. Primește doar starea compactă de anchetă (`CE AM GĂSIT PÂNĂ ACUM` vs `CE MAI CĂUTĂM ÎN ACEST FRAGMENT`) și fragmentul curent.
+            - *Accumulated Findings Ledger:* Dovezile noi (`[NOI_PROBE_IDENTIFICATE]`) sunt colectate într-o listă Python în memorie/Redis, fără context bloat.
+            - *Early Stopping:* Când starea devine `COMPLET` (toate componentele întrebării au fost confirmate) și întrebarea nu solicită analiză transversală pe toate capitolele, investigația se finalizează rapid fără parcurgerea redundantă a restului de zeci de pagini.
+
+### Etapa 42: Context-Isolated Multi-Target Engine, Dynamic Rolling Compaction & Native Thinking Capture - IMPLEMENTAT (Septembrie 2026)
+- **Problemă rezolvată (Sufocarea contextului la întrebări compuse & halucinații din cauza pierderii tokenilor de raționament):**
+    1. *Context Overflow (8.578 tokeni vs 8.192 n_ctx):* În întrebările multi-criteriale (ex: corelarea avizelor formale cu facturi, borderouri de cântar și chaturi WhatsApp), acumularea iterativă a 12 mesaje cu fragmente mari de text depășea limita fizică a contextului Ollama, generând HTTP 400 (`request exceeds available context size`).
+    2. *Bug-ul de Pierdere a Tokenilor de Raționament (`thinking` în Qwen 3.5 / DeepSeek R1):* În streaming-ul nativ Ollama (`/api/chat`), modelele de tip reasoning emit monologul intern în câmpul `msg["thinking"]`, iar `msg["content"]` rămânea gol. Extractorul returna șir vid (`tokens_out_est: 0`), golind memoria temporară (`working_memory`) și forțând LLM-ul să inventeze din burtă cifre rotunde și povești ireale la sinteza finală.
+    3. *Randare invizibilă în UI:* Regex-ul de parsare din frontend nu accepta titluri markdown (`### [FACTS]`), returnând un container gol în interfață.
+- **Arhitectura actualizată (`chat_service.py`, `llm_client.py`, `frontend/src/app/cases/[id]/page.tsx`):**
+    - *1. Context-Isolated Multi-Target Engine (Plan-and-Solve cu Context Flush):*
+        - La Pasul 0, întrebarea este descompusă agnostică în 1–4 ținte atomice de verificare cu identificatori și chei specifice.
+        - Fiecare țintă este investigată și rezolvată secvențial într-un context izolat (<2.500 tokeni), extragând faptele concrete și citările directe.
+        - Faptele verificate sunt salvate în `self.working_memory`, iar balastul de text brut este eliminat complet din memorie înainte de trecerea la următoarea țintă.
+    - *2. Dynamic Rolling Context Compaction (OpenCode Style):*
+        - Limită flexibilă și dinamică calibrată automat în funcție de `processing_ctx` (8K pe laptop, 32K/64K pe server).
+        - Prag de activare automat la 75% din capacitatea configurată (`self.compaction_threshold_tokens`).
+        - La depășirea pragului, se declanșează compactarea criminalistică prin `_compact_evidence_if_needed`: modelul condensează datele într-un micro-dosar factual de mare densitate, păstrând obligatoriu toate cantitățile, seriile, sumele, TVA-ul, citatele cuvânt cu cuvânt și referințele `[REF x]`, eliminând zgomotul notarial și liniile redundante.
+    - *3. Native Thinking Capture & Reasoning Fallback (`llm_client.py`):*
+        - Adaptorul nativ Ollama acumulează atât `acc_content`, cât și `acc_thinking`.
+        - Dacă `content` este gol dar modelul a generat în `thinking`, conținutul este extras automat din reasoning, garantând că nicio dovadă extrasă nu se mai pierde.
+    - *4. UI Forensic Markdown Resilience & Safety Fallback (`page.tsx`):*
+        - Regex permisiv pentru secțiunile `[FACTS]`, `[ANALYSIS]`, `[CONCLUSION]`, `[MISSING EVIDENCE]`, suportând `#`, `##`, `###`, `**` sau text simplu.
+        - Afișarea antetului de dosar (`INTRO`) și fallback automat la conținut complet cu citări dacă structura nu conține tag-urile standard.
+    - *5. Reranker pe CPU:*
+        - `BAAI/bge-reranker-v2-m3` rulează pe CPU pentru a elibera integral cei 8GB VRAM pentru inferența LLM pe GPU.
 
 ---
-*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 35 (Universal Deep Forensic Multi-Pass Audit Engine & Large Document Resilience) și remediere telemetrie LLM Client.*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 42 (Context-Isolated Multi-Target Engine, Dynamic Rolling Compaction & Native Thinking Capture).*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:
@@ -318,4 +359,5 @@ Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), 
 3. **Hybrid Search cu Reranker:** Pentru text (contracte, extrase), se apeleaza `SEARCH_TEXT`. Vectorii sunt adusi din extensia `pgvector` (folosind `BAAI/bge-m3`), apoi rerankati cu `BAAI/bge-reranker-v2-m3` (Cross-Encoder multilingv de înaltă rezoluție) pentru a asigura densitatea si relevanta informatiei.
 4. **Early Stop Mechanism:** Agentul nu e fortat sa ajunga la pasul 15. Imediat ce are `[FACTS]` complete care raspund integral la intrebarea utilizatorului, opreste bucla si emite o concluzie.
 5. **Graph Search (Harta Documentului):** Utilizand `Neo4j`, cand agentul gaseste entitati (nume de companii), poate extrage conexiunile ierarhice (actionariat, auto-tranzactionare, management overlap).
+
 
