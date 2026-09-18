@@ -373,51 +373,6 @@ class AgenticInvestigator:
         if anchors:
             self.injected_evidence += "Relational Check: Entities detected. EXPLORE_GRAPH may provide links.\n"
 
-        # Pre-Scratchpad Forensic Dossier Direct Matching (Fast-Path)
-        try:
-            with SessionLocal() as db_ledger:
-                docs_with_ledger = db_ledger.query(Document).filter(Document.case_id == self.case_id).all()
-                q_words = [w.lower() for w in re.findall(r'\b\w{3,}\b', self.user_question) if w.lower() not in ["despre", "care", "este", "sunt", "cum", "cine", "unde", "cand", "acest", "pentru"]]
-                hits = []
-                for doc in docs_with_ledger:
-                    meta = doc.doc_metadata if isinstance(doc.doc_metadata, dict) else {}
-                    ledger = meta.get("forensic_ledger", [])
-                    for item in ledger:
-                        d_txt = item.get("dossier_text", "")
-                        d_txt_lower = d_txt.lower()
-                        matched_words = [w for w in q_words if w in d_txt_lower]
-                        
-                        # Require anchor or code alignment if present in question
-                        has_anchor_match = True
-                        if doc_codes:
-                            has_anchor_match = any(dc.lower() in d_txt_lower for dc in doc_codes)
-                        elif anchors:
-                            has_anchor_match = any(a.lower() in d_txt_lower for a in anchors)
-                        
-                        min_matches = max(3, int(len(q_words) * 0.35))
-                        if len(matched_words) >= min_matches and has_anchor_match:
-                            p_start = item.get("page_start", 1)
-                            p_end = item.get("page_end", 1)
-                            hits.append({
-                                "doc_id": doc.id,
-                                "filename": doc.filename,
-                                "page_start": p_start,
-                                "page_end": p_end,
-                                "chunk_idx": item.get("chunk_idx", 1),
-                                "total_chunks": item.get("total_chunks", 1),
-                                "matched_count": len(matched_words),
-                                "text": d_txt[:700]
-                            })
-                if hits:
-                    hits.sort(key=lambda h: h["matched_count"], reverse=True)
-                    top_hit = hits[0]
-                    self.injected_evidence += f"\n=== PRE-SCRATCHPAD FORENSIC AUDIT DIRECT HIT ===\n"
-                    self.injected_evidence += f"Identified section in '{top_hit['filename']}' (Doc ID {top_hit['doc_id']}), Secțiunea {top_hit['chunk_idx']}/{top_hit['total_chunks']} (Paginile {top_hit['page_start']}-{top_hit['page_end']}):\n"
-                    self.injected_evidence += f"{top_hit['text']}...\n"
-                    self.injected_evidence += f"ACTION RULE (ZOOM-IN): If this pre-audit summary answers the question, formulate [FINAL RESPONSE] immediately. If you need verbatim quotes or exact line numbers, call SEARCH_TEXT(concept='...', doc_id={top_hit['doc_id']}, page_start={top_hit['page_start']}, page_end={top_hit['page_end']}) to zoom in with the reranker!\n"
-        except Exception as e:
-            print(f"[!] Pre-audit ledger check error: {e}")
-
         if self.scratchpad:
             self.injected_evidence += "\n" + self._render_scratchpad() + "\n"
         
@@ -1461,6 +1416,11 @@ CORE RULES:
 7. SCOPE: Answer strictly the current question. When a new entity or subject is introduced, answer exclusively using evidence for that query without including past topics or unrelated entities.
 8. CITATIONS: Every fact MUST be cited using [x], matching the [REF x] from observations.
 9. FINALITY: If you have sufficient evidence to answer all targets, you MUST provide the [FINAL RESPONSE] immediately, even in the first or second step.
+10. INVESTIGATION PLAN PROTOCOL (MANDATORY IN STEP 1):
+Before issuing search queries, you MUST understand the full inquiry and decompose it into a structured plan:
+- Identify all document identifiers, codes, parties, entities, and channels mentioned.
+- Specify the exact evidence needed from each source (e.g., dispatched quantity from delivery notice, received quantity from scale slips, prices/amounts from invoice, informal statements from chat).
+- Execute targeted tool calls strictly for those identifiers or entities. NEVER search for random generic words (e.g. "financiar", "rezultat", "note"). Search exclusively for exact codes, names, or technical terms.
 
 FINAL RESPONSE FORMAT (ROMANIAN):
 [FACTS]
@@ -1633,7 +1593,7 @@ FINAL RESPONSE FORMAT (ROMANIAN):
         # Add current question with injected evidence
         messages.append({
             "role": "user", 
-            "content": f"EVIDENCE ALREADY IN CONTEXT:\n{self.injected_evidence}\n\nQUESTION: {self.user_question}\n\nREMINDER: You are an Agnostic Forensic Auditor. Follow these rules STRICTLY:\n1. If the question asks about FINAL amounts, conclusions, annexes (e.g., 'sumă totală', 'prejudiciu final', 'anexa nr', 'concluzii'), you MUST use ROLLING_SCRATCHPAD_AUDIT immediately - DO NOT rely on partial SEARCH_TEXT results.\n2. If the question spans multiple years (e.g., 2013-2018), you MUST use ROLLING_SCRATCHPAD_AUDIT to ensure complete temporal coverage.\n3. If your initial searches return incomplete evidence or low confidence, AMPLIFY by using ROLLING_SCRATCHPAD_AUDIT before concluding.\n4. NEVER conclude that a document section is missing without first trying ROLLING_SCRATCHPAD_AUDIT for comprehensive analysis.\n5. When searching for payments, invoices, or deliveries, search both the full alphanumeric reference and the numeric identifier across bank statements, ledgers, and delivery documents.\n6. Compute exact math on any figures, dates, delays, quantities, or financial differences asked in the question.\n7. CURRENT QUERY FOCUS: Answer ONLY the current question. Ignore past topics, codes, or entities from previous conversation turns unless explicitly asked again."
+            "content": f"EVIDENCE ALREADY IN CONTEXT:\n{self.injected_evidence}\n\nQUESTION: {self.user_question}\n\nREMINDER: You are an Agnostic Forensic Auditor. Follow these rules STRICTLY:\n1. If the question asks about FINAL amounts, conclusions, annexes (e.g., 'sumă totală', 'prejudiciu final', 'anexa nr', 'concluzii'), you MUST use ROLLING_SCRATCHPAD_AUDIT immediately - DO NOT rely on partial SEARCH_TEXT results.\n2. If the question spans multiple years (e.g., 2013-2018), you MUST use ROLLING_SCRATCHPAD_AUDIT to ensure complete temporal coverage.\n3. If your initial searches return incomplete evidence or low confidence, AMPLIFY by using ROLLING_SCRATCHPAD_AUDIT before concluding.\n4. NEVER conclude that a document section is missing without first trying ROLLING_SCRATCHPAD_AUDIT for comprehensive analysis.\n5. When searching for payments, invoices, or deliveries, search both the full alphanumeric reference and the numeric identifier across bank statements, ledgers, and delivery documents.\n6. Compute exact math on any figures, dates, delays, quantities, or financial differences asked in the question.\n7. CURRENT QUERY FOCUS: Answer ONLY the current question. Ignore past topics, codes, or entities from previous conversation turns unless explicitly asked again.\n8. STRUCTURED INVESTIGATION PLAN: In Phase 1, decompose the question into a structured plan identifying each document code, entity, and quantity/clause needed. DO NOT query random generic words; query the specific codes, entities, and technical terms identified in your plan."
         })
 
         has_used_tools = False
