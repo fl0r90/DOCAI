@@ -280,8 +280,16 @@ class AgenticInvestigator:
                     if "[CONCLUSION]" in clean_content:
                         conclusion_part = clean_content.split("[CONCLUSION]")[-1].split("[MISSING EVIDENCE]")[0].strip()
                         clean_content = f"[CONCLUZIE RUNDA ANTERIOARĂ]: {conclusion_part[:500]}"
-                    elif len(clean_content) > 600:
-                        clean_content = clean_content[:600] + "\n[... Conținut anterior sintetizat ...]"
+                    elif "[CONCLUZIE]" in clean_content:
+                        conclusion_part = clean_content.split("[CONCLUZIE]")[-1].split("[MISSING EVIDENCE]")[0].strip()
+                        clean_content = f"[CONCLUZIE RUNDA ANTERIOARĂ]: {conclusion_part[:500]}"
+                    elif "[FACTS]" in clean_content:
+                        facts_part = clean_content.split("[FACTS]")[-1].split("[ANALYSIS]")[0].strip()
+                        clean_content = f"[DATE RUNDA ANTERIOARĂ]: {facts_part[:400]}"
+                    elif "FORENSIC STEP:" in clean_content or "SEARCH_TEXT" in clean_content:
+                        continue
+                    elif len(clean_content) > 300:
+                        clean_content = f"[RĂSPUNS ANTERIOR]: {clean_content[:300]}..."
                 if clean_content:
                     self.history.append({"role": m.role, "content": clean_content})
             
@@ -364,7 +372,16 @@ class AgenticInvestigator:
                         d_txt = item.get("dossier_text", "")
                         d_txt_lower = d_txt.lower()
                         matched_words = [w for w in q_words if w in d_txt_lower]
-                        if len(matched_words) >= max(1, min(2, len(q_words))):
+                        
+                        # Require anchor or code alignment if present in question
+                        has_anchor_match = True
+                        if doc_codes:
+                            has_anchor_match = any(dc.lower() in d_txt_lower for dc in doc_codes)
+                        elif anchors:
+                            has_anchor_match = any(a.lower() in d_txt_lower for a in anchors)
+                        
+                        min_matches = max(3, int(len(q_words) * 0.35))
+                        if len(matched_words) >= min_matches and has_anchor_match:
                             p_start = item.get("page_start", 1)
                             p_end = item.get("page_end", 1)
                             hits.append({
