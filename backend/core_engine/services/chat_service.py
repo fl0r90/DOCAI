@@ -262,36 +262,50 @@ class AgenticInvestigator:
         }
 
     def _load_history(self):
-        """Loads last 4 messages (2 turns) for context window, excluding the current question if already saved."""
+        """Loads last completed turns (user + assistant pairs) for context window."""
         with SessionLocal() as db:
-            past_msgs = db.query(ChatMessage).filter(ChatMessage.case_id == self.case_id).order_by(ChatMessage.created_at.desc()).limit(7).all()
-            # If the most recent message in DB is the current user question (saved by cases.py before launching), skip it
-            if past_msgs and past_msgs[0].role == "user":
-                past_msgs = past_msgs[1:5]
-            else:
-                past_msgs = past_msgs[:4]
+            past_msgs = db.query(ChatMessage).filter(ChatMessage.case_id == self.case_id).order_by(ChatMessage.created_at.desc()).limit(12).all()
+            if not past_msgs:
+                return
 
-            # Reverse to get chronological order
-            for m in reversed(past_msgs):
-                # We strip the investigation logs from history to keep context clean
-                clean_content = m.content.split("**LOG INVESTIGATIE:**")[0].strip()
-                # Compact past assistant messages to prevent prompt context pollution and anchor drift
+            # The most recent message in DB is the current user question saved by cases.py - skip it
+            if past_msgs[0].role == "user":
+                past_msgs = past_msgs[1:]
+
+            turns = []
+            i = 0
+            while i < len(past_msgs) and len(turns) < 2:
+                m = past_msgs[i]
                 if m.role == "assistant":
-                    if "[CONCLUSION]" in clean_content:
-                        conclusion_part = clean_content.split("[CONCLUSION]")[-1].split("[MISSING EVIDENCE]")[0].strip()
-                        clean_content = f"[CONCLUZIE RUNDA ANTERIOARĂ]: {conclusion_part[:500]}"
-                    elif "[CONCLUZIE]" in clean_content:
-                        conclusion_part = clean_content.split("[CONCLUZIE]")[-1].split("[MISSING EVIDENCE]")[0].strip()
-                        clean_content = f"[CONCLUZIE RUNDA ANTERIOARĂ]: {conclusion_part[:500]}"
-                    elif "[FACTS]" in clean_content:
-                        facts_part = clean_content.split("[FACTS]")[-1].split("[ANALYSIS]")[0].strip()
-                        clean_content = f"[DATE RUNDA ANTERIOARĂ]: {facts_part[:400]}"
-                    elif "FORENSIC STEP:" in clean_content or "SEARCH_TEXT" in clean_content:
+                    clean_asst = m.content.split("**LOG INVESTIGATIE:**")[0].strip()
+                    if "FORENSIC STEP:" in clean_asst or "SEARCH_TEXT" in clean_asst:
+                        i += 1
                         continue
-                    elif len(clean_content) > 300:
-                        clean_content = f"[RĂSPUNS ANTERIOR]: {clean_content[:300]}..."
-                if clean_content:
-                    self.history.append({"role": m.role, "content": clean_content})
+                    if "[CONCLUSION]" in clean_asst:
+                        conclusion_part = clean_asst.split("[CONCLUSION]")[-1].split("[MISSING EVIDENCE]")[0].strip()
+                        clean_asst = f"[CONCLUZIE ANTERIOARĂ]: {conclusion_part[:400]}"
+                    elif "[CONCLUZIE]" in clean_asst:
+                        conclusion_part = clean_asst.split("[CONCLUZIE]")[-1].split("[MISSING EVIDENCE]")[0].strip()
+                        clean_asst = f"[CONCLUZIE ANTERIOARĂ]: {conclusion_part[:400]}"
+                    elif "[FACTS]" in clean_asst:
+                        facts_part = clean_asst.split("[FACTS]")[-1].split("[ANALYSIS]")[0].strip()
+                        clean_asst = f"[DATE ANTERIOARE]: {facts_part[:300]}"
+                    elif len(clean_asst) > 200:
+                        clean_asst = f"[RĂSPUNS ANTERIOR]: {clean_asst[:200]}..."
+
+                    # Ensure paired with the preceding user message
+                    if i + 1 < len(past_msgs) and past_msgs[i+1].role == "user":
+                        clean_user = re.sub(r'[│┃┆┇┊┋|┌┐└┘├┤┬┴┼─━]', ' ', past_msgs[i+1].content)
+                        clean_user = re.sub(r'\s+', ' ', clean_user).strip()
+                        if clean_user and clean_asst:
+                            turns.append((clean_user, clean_asst))
+                        i += 2
+                        continue
+                i += 1
+
+            for u_text, a_text in reversed(turns):
+                self.history.append({"role": "user", "content": u_text})
+                self.history.append({"role": "assistant", "content": a_text})
             
             # Truncate history to prevent unbounded growth
             max_history = int(UnifiedLLMClient.get_engine_config().get("max_messages", 12))
