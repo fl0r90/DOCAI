@@ -117,20 +117,31 @@ export default function CaseDetail() {
     const sections: Record<string, string> = {};
     const sectionNames = ['FACTS', 'ANALYSIS', 'CONCLUSION', 'MISSING EVIDENCE', 'CONFIDENCE'];
     
-    let currentSection = "";
+    let currentSection = "INTRO";
     content.split('\n').forEach(line => {
-      // Regex mai flexibil care acceptă și formatări de tipul **[FACTS]** sau [FACTS]:
-      const match = line.match(/^\s*(\*\*)?\[(FACTS|ANALYSIS|CONCLUSION|MISSING EVIDENCE|CONFIDENCE)\](\*\*)?:?/);
+      // Regex permisiv ce acceptă markdown headings (#, ##, ###), bold (**), paranteze și două puncte
+      const match = line.match(/^\s*(?:#{1,6}\s*)?(\*\*)?\[(FACTS|ANALYSIS|CONCLUSION|MISSING EVIDENCE|CONFIDENCE)\](\*\*)?:?/i);
       if (match) {
-        currentSection = match[2];
+        currentSection = match[2].toUpperCase();
         sections[currentSection] = "";
       } else if (currentSection) {
+        if (!sections[currentSection]) sections[currentSection] = "";
         sections[currentSection] += line + '\n';
       }
     });
 
+    // Fallback de siguranță: dacă secțiunile principale nu au putut fi decupate, randăm conținutul complet cu citări
+    if (!sections['FACTS'] && !sections['CONCLUSION']) {
+      return renderContentWithCitations(content, citations);
+    }
+
     return (
       <div className="space-y-4 forensic-report text-slate-800 dark:text-slate-200">
+        {sections['INTRO'] && sections['INTRO'].trim() && (
+          <div className="text-xs font-semibold text-slate-600 dark:text-slate-400 border-b border-slate-200 dark:border-white/10 pb-3 mb-2 whitespace-pre-wrap">
+            {renderContentWithCitations(sections['INTRO'].trim(), citations)}
+          </div>
+        )}
         {sections['FACTS'] && (
           <div className="bg-blue-500/5 border border-blue-500/10 rounded-2xl p-4">
             <h4 className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-blue-600 dark:text-blue-400 mb-3">
