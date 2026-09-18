@@ -143,8 +143,34 @@ class AgenticInvestigator:
             i: {"target": t, "status": "PENDING", "confidence": "NONE", "fact": "", "citations": []}
             for i, t in enumerate(self.sub_targets, 1)
         }
+        self.searched_queries = []
         self._load_history()
         self._pre_process_query()
+
+    def _extract_unsearched_key_terms(self) -> list:
+        """Identifică agnostic termenii cheie (coduri tehnice, entități, canale) din întrebare care nu au fost căutați."""
+        STOP_WORDS = {
+            "verifică", "verifica", "există", "exista", "care", "ce", "dacă", "daca", 
+            "compara", "analizează", "analizeaza", "unde", "când", "cand", "cum", 
+            "please", "verify", "check", "what", "where", "when", "how", "total", "suma", "sumă",
+            "despre", "intre", "între", "toate", "toți", "toti", "prin", "pentru"
+        }
+        compound = [
+            t for t in re.findall(r"\b[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)+\b", self.user_question)
+            if len(t) >= 4 and (any(c.isdigit() for c in t) or t.isupper())
+        ]
+        entities = [
+            w for w in re.findall(r"\b[A-Z][a-zA-Z0-9_]{2,}\b", self.user_question) 
+            if w.lower() not in STOP_WORDS and len(w) >= 3
+        ]
+        raw_terms = list(dict.fromkeys(compound + entities))
+        unique_terms = [t for t in raw_terms if not any(t != other and t in other for other in raw_terms)]
+        
+        unsearched = [
+            t for t in unique_terms 
+            if not any(t.lower() in sq.lower() for sq in self.searched_queries)
+        ]
+        return unsearched
 
     def _stop_check(self) -> bool:
         """Verifică flag-ul de stop din Redis (setat de POST /cases/{id}/chat/stop)."""
@@ -1426,6 +1452,7 @@ CORE RULES:
 Before issuing search queries, you MUST understand the full inquiry and decompose it into a structured plan:
 - Identify all document identifiers, codes, parties, entities, and channels mentioned.
 - Specify the exact evidence needed from each source (e.g., dispatched quantity from delivery notice, received quantity from scale slips, prices/amounts from invoice, informal statements from chat).
+- MULTI-SOURCE INQUIRIES: If the question asks about multiple sources (e.g. formal documents AND informal chat/messages/person), you MUST search for evidence for EVERY individual source before concluding. Never skip a channel or person mentioned in the inquiry.
 - Execute targeted tool calls strictly for those identifiers or entities. NEVER search for random generic words (e.g. "financiar", "rezultat", "note"). Search exclusively for exact codes, names, or technical terms.
 
 FINAL RESPONSE FORMAT (ROMANIAN):
@@ -1839,6 +1866,16 @@ FINAL RESPONSE FORMAT (ROMANIAN):
                     )
                                     
                     yield json.dumps({"type": "tool_call", "tool": t_name_raw.strip(), "params": str(t_args)})
+
+                    # Înregistrăm termenul de căutare pentru gardianul anti-surrender
+                    if t_name_normalized in ("SEARCH_TEXT", "INSPECT_FORENSIC_LEDGER", "SEARCH_STRUCTURED_DATA", "FETCH_FULL_DOCUMENT"):
+                        q_val = ""
+                        if isinstance(t_args, dict):
+                            q_val = str(t_args.get("concept") or t_args.get("query") or t_args.get("subject") or t_args.get("focus_terms") or "")
+                        elif isinstance(t_args, str):
+                            q_val = str(t_args)
+                        if q_val:
+                            self.searched_queries.append(q_val)
                     
                     observation = ""
                     t_exec_start = time.time()
@@ -1954,15 +1991,32 @@ FINAL RESPONSE FORMAT (ROMANIAN):
             )
             
             # 1. ANTI-SURRENDER FORENSIC GUARD:
-            # If the model tries to conclude early that documents/records are missing WITHOUT having used ANY search tools, push it to search
-            is_surrender = any(phrase in final_content.lower() for phrase in [
+            # Detectăm dacă modelul încearcă să declare că lipsesc dovezi / nu există documente înainte de a căuta toți termenii cheie
+            surrender_phrases = [
                 "nu există", "nu au fost găsite", "nu a fost găsit", "lipsesc dovezi", 
-                "imposibilă determinarea", "nu cuprind tranzacția", "nu există dovezi", "nu pot furniza"
-            ])
-            if is_surrender and step < 4 and not has_used_tools:
+                "imposibilă determinarea", "nu cuprind tranzacția", "nu există dovezi", 
+                "nu pot furniza", "nu conțin niciun document", "nu conțin referință",
+                "nu menționează", "nu este disponibilă în dozele", "nu este disponibilă în dovezile",
+                "nu conține informație despre", "nu conțin informație despre"
+            ]
+            is_surrender = any(phrase in final_content.lower() for phrase in surrender_phrases)
+            unsearched_terms = self._extract_unsearched_key_terms()
+
+            if is_surrender and step < 5 and (not has_used_tools or unsearched_terms):
+                if unsearched_terms:
+                    prompt_reminder = (
+                        f"FORENSIC DIRECTIVE: Ai declarat că lipsesc dovezi sau că nu există informații pentru una dintre cerințe, "
+                        f"însă nu ai efectuat căutări pentru toți termenii sau entitățile din întrebare: {', '.join(unsearched_terms[:4])}. "
+                        f"Apelează SEARCH_TEXT dedicat pentru fiecare dintre acești termeni înainte de a concluziona."
+                    )
+                else:
+                    prompt_reminder = (
+                        f"FORENSIC DIRECTIVE: Do NOT conclude that records are missing without having searched first. "
+                        f"Call INSPECT_FORENSIC_LEDGER or SEARCH_TEXT for the specific subjects and entities in the question: '{self.user_question}'."
+                    )
                 messages.append({
                     "role": "user", 
-                    "content": f"FORENSIC DIRECTIVE: Do NOT conclude that records are missing without having searched first. Call INSPECT_FORENSIC_LEDGER or SEARCH_TEXT for the specific subjects and entities in the question: '{self.user_question}'."
+                    "content": prompt_reminder
                 })
                 continue
 
