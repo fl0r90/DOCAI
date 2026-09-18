@@ -6,6 +6,7 @@ import re
 import time
 import logging
 import redis
+import threading
 from typing import List, Dict, Tuple, Optional, Any
 
 logger = logging.getLogger(__name__)
@@ -146,6 +147,10 @@ class AgenticInvestigator:
         self.searched_queries = []
         self.working_memory = {}
         self.evidence_cache = {}
+        self.cache_lock = threading.Lock()
+        self.search_lock = threading.Lock()
+        self.prefetch_events: Dict[str, threading.Event] = {}
+        self.prefetch_thread: Optional[threading.Thread] = None
         # Configurație de context flexibilă și dinamică (scalabilă de la 8K la 64K)
         cfg = UnifiedLLMClient.get_engine_config()
         self.processing_ctx = int(cfg.get("processing_ctx") or cfg.get("narrative_ctx") or 8192)
@@ -154,6 +159,10 @@ class AgenticInvestigator:
         self.max_evidence_chars = int((self.processing_ctx - 1500) * 3.5)
         self._load_history()
         self._pre_process_query()
+
+    @staticmethod
+    def _make_cache_key(query: str, semantic_intent: str = "", doc_id: int = 0, page_start: int = 0, page_end: int = 0) -> str:
+        return f"{doc_id}:{page_start}:{page_end}:{semantic_intent.strip().lower()}:{query.strip().lower()}"
 
     def _extract_unsearched_key_terms(self) -> list:
         """Identifică agnostic termenii cheie (coduri tehnice, entități, canale) din întrebare care nu au fost căutați."""
@@ -473,6 +482,45 @@ class AgenticInvestigator:
         """Tool 1: Hybrid Search (Lexical + Vector + Date-Aware) in document chunks with optional targeted page zoom."""
         if self._stop_check():
             raise ChatStoppedError("Stop request received before hybrid search.")
+
+        cache_key = self._make_cache_key(query, semantic_intent, doc_id, page_start, page_end)
+
+        # 1. Verificare rapidă în cache (0 ms)
+        with self.cache_lock:
+            if cache_key in self.evidence_cache:
+                print(f"[*] [Speculative Search] HIT instant din cache (0 ms) pentru: '{query}'")
+                return self.evidence_cache[cache_key]
+            event = self.prefetch_events.get(cache_key)
+
+        # 2. Dacă prefetch-ul de fundal rulează deja această căutare, așteptăm finalizarea lui
+        if event is not None and threading.current_thread() != self.prefetch_thread:
+            print(f"[*] [Speculative Search] Așteptare finalizare prefetch pentru: '{query}'...")
+            event.wait(timeout=120)
+            with self.cache_lock:
+                if cache_key in self.evidence_cache:
+                    print(f"[*] [Speculative Search] HIT din prefetch după așteptare pentru: '{query}'")
+                    return self.evidence_cache[cache_key]
+
+        # 3. Execuție sincronizată pe CPU / DB (evităm suprasolicitarea CPU cu două rerankere)
+        with self.search_lock:
+            with self.cache_lock:
+                if cache_key in self.evidence_cache:
+                    return self.evidence_cache[cache_key]
+
+            try:
+                res = self._do_search_text(query, semantic_intent, doc_id, page_start, page_end)
+                with self.cache_lock:
+                    self.evidence_cache[cache_key] = res
+                    if cache_key in self.prefetch_events:
+                        self.prefetch_events[cache_key].set()
+                return res
+            except Exception:
+                with self.cache_lock:
+                    if cache_key in self.prefetch_events:
+                        self.prefetch_events[cache_key].set()
+                raise
+
+    def _do_search_text(self, query: str, semantic_intent: str = "", doc_id: int = 0, page_start: int = 0, page_end: int = 0) -> str:
         with SessionLocal() as db:
             all_docs = db.query(Document).filter(Document.case_id == self.case_id).all()
             if doc_id and doc_id > 0:
@@ -657,7 +705,6 @@ class AgenticInvestigator:
             )
 
             # 5. Dynamic Context-Aware Document Assembly
-            # Calculează dinamic volumul de text injectat pe măsura ferestrei active (chat_ctx)
             budget = self._get_context_budget()
             DOC_CONTEXT_LIMIT = budget["doc_context_limit"]
             MAX_TOTAL_CHARS = budget["max_total_chars"]
@@ -685,9 +732,6 @@ class AgenticInvestigator:
 
                 page_num = getattr(chunk, 'page_number', 1) or 1
 
-                # Context de înaltă fidelitate:
-                # Dacă documentul brut este foarte scurt (<= 3000 chars - ex. factură/aviz), folosim raw_text
-                # Altfel, conținutul chunk-ului extras de Docling este semantic, curat și conține fix secțiunea relevantă
                 raw_len = len(doc_obj.raw_text.strip()) if (doc_obj.raw_text and doc_obj.raw_text.strip()) else 0
                 if doc_obj.raw_text and raw_len <= 3000:
                     doc_context = doc_obj.raw_text.strip()
@@ -699,7 +743,6 @@ class AgenticInvestigator:
 
                 doc_chunk_counts[doc_id] += 1
                 total_chars_accumulated += len(doc_context)
-                citation_id = len(self.citations) + 1
 
                 # Extragem un extras relevant (snippet) centrat pe termenii căutați
                 best_clean = re.sub(r'<!--\s*image\s*-->|\[Doc:[^\]]*\]', '', chunk.content or "", flags=re.IGNORECASE).strip()
@@ -710,15 +753,17 @@ class AgenticInvestigator:
                     max_len=550
                 )
 
-                self.citations.append({
-                    "id": citation_id,
-                    "doc_id": doc_obj.id,
-                    "page": page_num,
-                    "content": snippet_text,
-                    "highlight_term": highlight_term,
-                    "filename": doc_obj.filename if doc_obj else "unknown",
-                    "spatial": getattr(chunk, "spatial", "") or ""
-                })
+                with self.cache_lock:
+                    citation_id = len(self.citations) + 1
+                    self.citations.append({
+                        "id": citation_id,
+                        "doc_id": doc_obj.id,
+                        "page": page_num,
+                        "content": snippet_text,
+                        "highlight_term": highlight_term,
+                        "filename": doc_obj.filename if doc_obj else "unknown",
+                        "spatial": getattr(chunk, "spatial", "") or ""
+                    })
 
                 doc_type_tag = f" | {doc_obj.doc_type}" if (doc_obj and doc_obj.doc_type) else ""
                 dyn_meta = ""
@@ -1481,6 +1526,57 @@ MAI CAUT ÎN CONTINUARE: (ce a rămas de lămurit din obiectiv, sau scrie exact 
             })
         return clean_targets
 
+    def _launch_speculative_prefetch(self, plan: List[Dict[str, Any]]):
+        """Lansează în background pe CPU căutarea și rerankarea speculativă pentru obiectivele viitoare."""
+        if len(plan) <= 1:
+            return
+
+        # Cheile țintei 1 sunt procesate direct pe thread-ul principal
+        target_1_keys = {k.strip().lower() for k in plan[0].get("keys", []) if k.strip()}
+        upcoming_keys = []
+        for t in plan[1:]:
+            for k in t.get("keys", []):
+                clean_k = k.strip()
+                if clean_k and clean_k.lower() not in target_1_keys and clean_k not in upcoming_keys:
+                    upcoming_keys.append(clean_k)
+
+        if not upcoming_keys:
+            return
+
+        # Înregistrăm evenimentele de sincronizare pentru fiecare cheie speculativă
+        with self.cache_lock:
+            for k in upcoming_keys:
+                ck = self._make_cache_key(k)
+                if ck not in self.prefetch_events:
+                    self.prefetch_events[ck] = threading.Event()
+
+        def _worker():
+            print(f"[*] [Speculative Prefetch] Worker activat pentru {len(upcoming_keys)} chei viitoare: {upcoming_keys}")
+            for k in upcoming_keys:
+                if self._stop_check():
+                    print("[*] [Speculative Prefetch] Semnal stop primit, oprire worker.")
+                    break
+                ck = self._make_cache_key(k)
+                with self.cache_lock:
+                    if ck in self.evidence_cache:
+                        continue
+                try:
+                    print(f"[*] [Speculative Prefetch] Se pre-calculează pe CPU: '{k}'...")
+                    self.tool_search_text(k)
+                except ChatStoppedError:
+                    print("[*] [Speculative Prefetch] ChatStoppedError capturat, worker terminat.")
+                    break
+                except Exception as e:
+                    print(f"[!] [Speculative Prefetch] Eroare la prefetch pentru '{k}': {e}")
+                finally:
+                    with self.cache_lock:
+                        if ck in self.prefetch_events:
+                            self.prefetch_events[ck].set()
+            print("[*] [Speculative Prefetch] Toate cheile viitoare au fost procesate.")
+
+        self.prefetch_thread = threading.Thread(target=_worker, name="SpeculativePrefetchWorker", daemon=True)
+        self.prefetch_thread.start()
+
     def _compact_evidence_if_needed(self, raw_evidence: str, target_title: str) -> str:
         """Compactare dinamică stil OpenCode când volumul de text depășește pragul flexibil de context (75%)."""
         est_tokens = len(raw_evidence) // 3.5
@@ -1619,6 +1715,9 @@ MAI CAUT ÎN CONTINUARE: (ce a rămas de lămurit din obiectiv, sau scrie exact 
         plan = self._generate_investigation_plan()
         titles_str = "; ".join(f"[{t['id']}] {t['title']}" for t in plan)
         yield json.dumps({"type": "observation", "data": f"Plan investigație aprobat ({len(plan)} obiective): {titles_str}"})
+
+        # Lansare Căutare Speculativă în fundal pe CPU pentru obiectivele viitoare
+        self._launch_speculative_prefetch(plan)
 
         # 2. Execuție Secvențială pe Ținte cu Context-Flush
         for target in plan:
