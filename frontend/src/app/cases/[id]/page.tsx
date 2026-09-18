@@ -1207,9 +1207,13 @@ export default function CaseDetail() {
                     </p>
                     <button 
                       onClick={async () => {
-                        await api.post(`/cases/${caseId}/chat/stop`);
+                        try {
+                          await api.post(`/cases/${caseId}/chat/stop`);
+                        } catch (e) {
+                          console.error("Failed to stop chat:", e);
+                        }
                         setBackgroundChatStatus(null);
-                        fetchData();
+                        api.get(`/cases/${caseId}/chat`).then(cRes => setMessages(cRes.data));
                       }}
                       className="px-2 py-1 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 rounded-lg text-[9px] font-black text-red-500 uppercase transition-all flex items-center gap-1"
                     >
@@ -1240,10 +1244,15 @@ export default function CaseDetail() {
                     </p>
                     <button 
                       onClick={async () => {
-                        await api.post(`/cases/${caseId}/chat/stop`);
+                        try {
+                          await api.post(`/cases/${caseId}/chat/stop`);
+                        } catch (e) {
+                          console.error("Failed to stop chat:", e);
+                        }
                         setIsChatLoading(false);
                         setStreamingMessage(null);
-                        fetchData();
+                        setBackgroundChatStatus(null);
+                        api.get(`/cases/${caseId}/chat`).then(cRes => setMessages(cRes.data));
                       }}
                       className="px-2 py-1 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 rounded-lg text-[9px] font-black text-red-500 uppercase transition-all flex items-center gap-1"
                     >

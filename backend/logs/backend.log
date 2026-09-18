@@ -9,3 +9,7 @@
 2026-05-27 18:27:46 - [INFO] - [94mAction: LOGIN_SUCCESS | User: 1 | Case: None | Details: None[0m
 2026-05-27 18:27:48 - [INFO] - [94mAction: LOGIN_SUCCESS | User: 1 | Case: None | Details: None[0m
 2026-05-27 18:27:48 - [INFO] - [94mAction: LOGIN_SUCCESS | User: 1 | Case: None | Details: None[0m
+2026-09-18 18:52:10 - [WARNING] - [93mAction: LOGIN_FAILED | User: None | Case: None | Details: {"username": "admin"}[0m
+2026-09-18 18:52:14 - [INFO] - [94mAction: LOGIN_SUCCESS | User: 1 | Case: None | Details: None[0m
+2026-09-18 18:52:20 - [INFO] - [94mAction: LOGIN_SUCCESS | User: 1 | Case: None | Details: None[0m
+2026-09-18 18:52:46 - [INFO] - [94mAction: LOGIN_SUCCESS | User: 1 | Case: None | Details: None[0m

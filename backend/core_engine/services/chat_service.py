@@ -380,6 +380,8 @@ class AgenticInvestigator:
 
     def tool_inspect_forensic_ledger(self, query: str = "", doc_id: int = 0):
         """Tool: Search and inspect the pre-extracted granular forensic ledger (structured sections, key legal clauses, entities, financials)."""
+        if self._stop_check():
+            raise ChatStoppedError("Stop request received before ledger inspection.")
         with SessionLocal() as db:
             docs_query = db.query(Document).filter(Document.case_id == self.case_id)
             if doc_id > 0:
@@ -435,6 +437,8 @@ class AgenticInvestigator:
 
     def tool_search_text(self, query: str, semantic_intent: str = "", doc_id: int = 0, page_start: int = 0, page_end: int = 0):
         """Tool 1: Hybrid Search (Lexical + Vector + Date-Aware) in document chunks with optional targeted page zoom."""
+        if self._stop_check():
+            raise ChatStoppedError("Stop request received before hybrid search.")
         with SessionLocal() as db:
             all_docs = db.query(Document).filter(Document.case_id == self.case_id).all()
             if doc_id and doc_id > 0:
@@ -554,6 +558,8 @@ class AgenticInvestigator:
             if not merged_results: return "No text fragments found."
 
             # 5. Neural Reranking via SentenceTransformers (with Rule-based Fallback)
+            if self._stop_check():
+                raise ChatStoppedError("Stop request received before reranker.")
             scored_res = []
             try:
                 from .rerank_service import RerankService
@@ -1600,6 +1606,9 @@ FINAL RESPONSE FORMAT (ROMANIAN):
         has_used_search_text = False
 
         for step in range(1, 16):
+            if self._stop_check():
+                yield json.dumps({"type": "final", "data": "Investigație oprită de utilizator.", "citations": self.citations})
+                return
             yield json.dumps({"type": "step", "data": f"Phase {step}: Investigating..."})
             debug_logger.step_start(session_id=str(self.case_id), step=step, action="INVESTIGATION_STEP", case_id=self.case_id)
             
@@ -1737,6 +1746,9 @@ FINAL RESPONSE FORMAT (ROMANIAN):
             if tool_calls:
                 has_used_tools = True
                 for tc in tool_calls:
+                    if self._stop_check():
+                        yield json.dumps({"type": "final", "data": "Investigație oprită de utilizator.", "citations": self.citations})
+                        return
                     # Normalize tool name: strip whitespace and convert to uppercase for comparison
                     t_name_raw = tc["function"]["name"]
                     t_name_stripped = t_name_raw.strip()

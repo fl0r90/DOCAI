@@ -479,10 +479,10 @@ def delete_message(case_id: int, msg_id: int, user: models.User = Depends(get_cu
 @router.post("/{case_id}/chat/stop")
 def stop_chat(case_id: int, user: models.User = Depends(get_current_user), db: Session = Depends(get_forensic_db)):
     _check_access(case_id, user, db)
-    # Fără TTL: semnalul de stop trebuie să supraviețuiască oricât durează pasul LLM curent.
-    # Se șterge explicit la pornirea unei conversații noi (vezi mai jos) și după consumare.
-    r.set(f"chat_stop_{case_id}", "1")
-    return {"status": "stopping"}
+    # Semnalăm oprirea în Redis și ștergem imediat starea de investigație activă
+    r.set(f"chat_stop_{case_id}", "1", ex=60)
+    r.delete(f"chat_status_{case_id}")
+    return {"status": "stopped"}
 
 
 @router.post("/{case_id}/chat")
@@ -513,7 +513,6 @@ def chat(case_id: int, payload: dict = Body(...), user: models.User = Depends(ge
         try:
             for chunk_json in agent.run():
                 if r.exists(f"chat_stop_{case_id}"):
-                    r.delete(f"chat_stop_{case_id}")
                     stop_evt = json.dumps({"type": "final", "data": "Investigație oprită de utilizator.", "citations": agent.citations})
                     chunk_queue.put(stop_evt)
                     final_content = "Investigație oprită de utilizator."
@@ -527,7 +526,11 @@ def chat(case_id: int, payload: dict = Body(...), user: models.User = Depends(ge
                 else:
                     trace_logs.append(evt)
 
-                # Actualizăm starea în Redis pentru supraviețuire la refresh / tab închis
+                # Actualizăm starea în Redis doar dacă nu s-a cerut oprirea
+                if r.exists(f"chat_stop_{case_id}"):
+                    final_content = "Investigație oprită de utilizator."
+                    break
+
                 step_text = ""
                 if evt.get("type") == "thought":
                     step_text = f"Raționament: {evt.get('data', '')[:100]}..."
@@ -543,7 +546,7 @@ def chat(case_id: int, payload: dict = Body(...), user: models.User = Depends(ge
 
                 chunk_queue.put(chunk_json)
         except ChatStoppedError:
-            # Oprit cerut de utilizator în timpul unui tool (ex: Rolling Scratchpad) —
+            # Oprit cerut de utilizator în timpul unui tool (ex: Rolling Scratchpad sau search) —
             # generarea a fost deja abortată server-side; salvăm mesajul final curat.
             stop_evt = json.dumps({"type": "final", "data": "Investigație oprită de utilizator.", "citations": agent.citations})
             chunk_queue.put(stop_evt)
@@ -557,6 +560,7 @@ def chat(case_id: int, payload: dict = Body(...), user: models.User = Depends(ge
         finally:
             chunk_queue.put(STOP_SENTINEL)
             r.delete(f"chat_status_{case_id}")
+            r.delete(f"chat_stop_{case_id}")
             # Salvare garantată în baza de date, chiar dacă utilizatorul a navigat Back sau a închis tab-ul
             try:
                 from ..database import ForensicSessionLocal
@@ -596,6 +600,8 @@ def chat(case_id: int, payload: dict = Body(...), user: models.User = Depends(ge
 @router.get("/{case_id}/chat/status")
 def get_chat_status(case_id: int, user: models.User = Depends(get_current_user), db: Session = Depends(get_forensic_db)):
     _check_access(case_id, user, db)
+    if r.exists(f"chat_stop_{case_id}"):
+        return {"is_running": False, "stopped": True}
     raw = r.get(f"chat_status_{case_id}")
     if raw:
         try:
