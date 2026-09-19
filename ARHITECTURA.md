@@ -460,9 +460,13 @@
         - Integrat un exemplu structural pur generic (`TRX-909`, `250.000 EUR`, `Compania Alpha`, `Popescu Ion`), validat prin testare live pe container cu zero scurgeri (leakage) și zero halucinații.
         - Eliminat ultimele instanțe de denumiri specifice („șoferul Vasile”, „Mihai Stanciu”) din `compaction_prompt`, respectând 100% mandatul de agnosticism total.
         - Toate mesajele de sistem (`system prompts`) din pașii de execuție sub-ținte și sinteză finală (`_execute_sub_target`, `_synthesize_final_report`, `_compact_evidence_if_needed`) au fost convertite în limba română, eradicând complet bias-ul limbii engleze la modelele open-weights.
+    - *9. Clean Text Flow & Sliding Citations Drawer (Varianta C) (`page.tsx`):*
+        - S-a eliminat poluarea vizuală cauzată de zecile de etichete `[REF x]` inline din corpul textului: funcția `renderContentWithCitations` curăță acum etichetele de citare și corectează spațierea tipografică, lăsând un raport criminalistic 100% fluid și lizibil.
+        - În antetul raportului criminalistic și la subsolul fiecărui mesaj s-a integrat un buton elegant: `🛡️ X Dovezi Verificate`.
+        - La click, se deschide un panou lateral glisant (Citations Drawer) cu toate sursele, numerele de pagină și citatele din dosar, permițând deschiderea instantanee a oricărui document direct în viewer-ul PDF.
 
 ---
-*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 46 (Dynamic Neural Reranker Control), Etapa 47 (Anti-Runaway Reasoning Sanitization) și Etapa 48 (Online Model Ingestion, Keep-Alive SSE, SOTA Forensic Mega-Prompt & Native Romanian Alignment).*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 46 (Dynamic Neural Reranker Control), Etapa 47 (Anti-Runaway Reasoning Sanitization) și Etapa 48 (Online Model Ingestion, Keep-Alive SSE, SOTA Forensic Mega-Prompt & Clean Sliding Citations Drawer).*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:
