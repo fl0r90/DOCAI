@@ -451,6 +451,23 @@ export default function CaseDetail() {
     return () => clearInterval(interval);
   }, [caseId]);
 
+  // Polling accelerat la 1.5s când o investigație este activă pentru actualizare pași live în timp real
+  useEffect(() => {
+    if (!caseId || !backgroundChatStatus?.is_running) return;
+    const pollInterval = setInterval(async () => {
+      try {
+        const sRes = await api.get(`/cases/${caseId}/chat/status`);
+        if (sRes.data?.is_running) {
+          setBackgroundChatStatus(sRes.data);
+        } else {
+          setBackgroundChatStatus(null);
+          api.get(`/cases/${caseId}/chat`).then(cRes => setMessages(cRes.data));
+        }
+      } catch (e) {}
+    }, 1500);
+    return () => clearInterval(pollInterval);
+  }, [backgroundChatStatus?.is_running, caseId]);
+
   const handleBack = () => {
     if (typeof window !== 'undefined' && window.history.state && window.history.state.idx > 0) {
       router.back();
@@ -567,6 +584,10 @@ export default function CaseDetail() {
           if (!line.trim()) continue;
           try {
             const data = JSON.parse(line);
+            
+            if (data.type === 'ping') {
+              continue;
+            }
             
             if (data.type === 'status' || data.type === 'step') {
               localTraceLogs.push(data);
@@ -1205,16 +1226,16 @@ export default function CaseDetail() {
             );
             })}
 
-            {/* Indicator investigație activă în fundal (supraviețuire la refresh / tab închis) */}
+            {/* Indicator investigație activă (sincronizat în timp real chiar și după refresh) */}
             {!streamingMessage && backgroundChatStatus?.is_running && (
               <div className="flex justify-start">
-                <div className="max-w-[85%] rounded-3xl p-5 bg-white dark:bg-slate-900 border-2 border-amber-500/30 shadow-2xl relative overflow-hidden">
-                  <div className="absolute top-0 left-0 w-full h-1 bg-amber-500/10 overflow-hidden">
-                     <div className="h-full bg-amber-500 animate-pulse" style={{ width: '100%' }}></div>
+                <div className="max-w-[85%] rounded-3xl p-5 bg-white dark:bg-slate-900 border-2 border-blue-500/30 shadow-2xl relative overflow-hidden">
+                  <div className="absolute top-0 left-0 w-full h-1 bg-blue-500/10 overflow-hidden">
+                     <div className="h-full bg-blue-500 animate-pulse" style={{ width: '100%' }}></div>
                   </div>
-                  <div className="flex justify-between items-start mb-2">
-                    <p className="text-[10px] font-black text-amber-500 uppercase tracking-widest flex items-center gap-2">
-                      <Loader2 className="w-3 h-3 animate-spin" /> Investigație activă pe server...
+                  <div className="flex justify-between items-start mb-3">
+                    <p className="text-[10px] font-black text-blue-500 uppercase tracking-widest flex items-center gap-2">
+                      <Loader2 className="w-3 h-3 animate-spin" /> Investigare în curs...
                     </p>
                     <button 
                       onClick={async () => {
@@ -1231,13 +1252,63 @@ export default function CaseDetail() {
                       <Square className="w-2 h-2 fill-current" /> Stop
                     </button>
                   </div>
-                  <div className="text-xs text-slate-700 dark:text-slate-300 font-medium py-1.5 flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-amber-500 animate-ping shrink-0" />
+
+                  {/* Jurnal Investigare Sincronizat */}
+                  {backgroundChatStatus.trace_logs && backgroundChatStatus.trace_logs.length > 0 && (
+                    <details open className="mb-4 bg-slate-100/50 dark:bg-slate-950/50 rounded-xl border border-slate-200 dark:border-white/5 overflow-hidden group/trace">
+                      <summary className="px-4 py-2.5 text-[10px] font-bold text-slate-500 dark:text-slate-400 cursor-pointer hover:text-blue-500 dark:hover:text-blue-400 flex items-center gap-2 list-none uppercase tracking-tighter">
+                        <ScrollText className="w-3.5 h-3.5" /> Jurnal Investigare Live ({backgroundChatStatus.trace_logs.filter((l: any) => l.type === 'tool_call').length} Tool Calls) <ChevronDown className="w-3 h-3 group-open/trace:rotate-180 transition-transform" />
+                      </summary>
+                      <div className="px-4 pb-4 text-[11px] text-slate-600 dark:text-slate-400 font-medium leading-relaxed border-t border-slate-200 dark:border-white/5 pt-3 space-y-3">
+                        {backgroundChatStatus.trace_logs.map((log: any, i: number) => {
+                          if (log.type === 'status' || log.type === 'step') {
+                            return (
+                              <div key={i} className="flex items-center gap-2 text-[10px] text-slate-400 dark:text-slate-500 font-bold uppercase tracking-tight animate-pulse">
+                                <div className="w-1.5 h-1.5 rounded-full bg-blue-500/50 animate-pulse" /> {log.data}
+                              </div>
+                            );
+                          }
+                          if (log.type === 'tool_call') {
+                            return (
+                              <div key={i} className="p-3 bg-blue-500/5 dark:bg-blue-500/10 border border-blue-500/10 dark:border-blue-500/20 rounded-xl">
+                                <div className="text-[9px] font-black text-blue-600 dark:text-blue-400 uppercase mb-2 flex items-center gap-1">
+                                  <Search className="w-3 h-3" /> Executare Tool: {log.tool}
+                                </div>
+                                <pre className="text-[10px] font-mono text-slate-700 dark:text-slate-300 whitespace-pre-wrap break-all bg-slate-200/50 dark:bg-slate-950/80 p-2.5 rounded-lg border border-slate-300/30 dark:border-white/5 overflow-x-auto">
+                                  {typeof log.params === 'object' ? JSON.stringify(log.params, null, 2) : log.params}
+                                </pre>
+                              </div>
+                            );
+                          }
+                          if (log.type === 'observation') {
+                            return (
+                              <div key={i} className="p-3 bg-emerald-500/5 dark:bg-emerald-500/10 border border-emerald-500/10 dark:border-emerald-500/20 rounded-xl">
+                                <div className="text-[9px] font-black text-emerald-600 dark:text-emerald-500 uppercase mb-2 flex items-center gap-1">
+                                  <FileText className="w-3 h-3" /> Rezultat / Observație
+                                </div>
+                                <div className="text-[10px] text-slate-600 dark:text-slate-300 max-h-60 overflow-y-auto whitespace-pre-wrap font-mono bg-slate-200/50 dark:bg-slate-950/80 p-2.5 rounded-lg border border-slate-300/30 dark:border-white/5 custom-scrollbar">
+                                  {log.data}
+                                </div>
+                              </div>
+                            );
+                          }
+                          return null;
+                        })}
+                      </div>
+                    </details>
+                  )}
+
+                  {/* Pasul activ */}
+                  <div className="text-xs text-slate-700 dark:text-slate-300 font-semibold py-1.5 flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-blue-500 animate-ping shrink-0" />
                     <span>{backgroundChatStatus.step || "Analiză în curs de desfășurare pe server..."}</span>
                   </div>
-                  <p className="text-[10px] text-slate-400 dark:text-slate-500 italic mt-1">
-                    Procesul rulează pe server chiar dacă schimbi pagina sau dai refresh. Rezultatul va fi afișat automat aici când este gata.
-                  </p>
+
+                  <div className="flex gap-1 items-center py-2 mt-1">
+                    <div className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-bounce" style={{ animationDelay: '0s' }} />
+                    <div className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-bounce" style={{ animationDelay: '0.2s' }} />
+                    <div className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-bounce" style={{ animationDelay: '0.4s' }} />
+                  </div>
                 </div>
               </div>
             )}

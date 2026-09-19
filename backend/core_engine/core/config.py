@@ -45,6 +45,10 @@ def get_llm_config():
 
             # Ollama API mode: "native" (/api/chat) | "openai" (/v1/chat/completions)
             "ollama_api_mode": config.get("ollama_api_mode", os.getenv("OLLAMA_API_MODE", "native")),
+
+            # Reranker Settings (Cross-Encoder)
+            "reranker_device": config.get("reranker_device", os.getenv("RERANKER_DEVICE", "cpu")),
+            "reranker_model": config.get("reranker_model", os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")),
         }
     except:
         env_model = os.getenv("ACTIVE_MODEL", "")
@@ -69,6 +73,8 @@ def get_llm_config():
             "lmstudio_api_key": "",
             "lmstudio_timeout": 300,
             "ollama_api_mode": os.getenv("OLLAMA_API_MODE", "native"),
+            "reranker_device": os.getenv("RERANKER_DEVICE", "cpu"),
+            "reranker_model": os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3"),
         }
     finally:
         db.close()

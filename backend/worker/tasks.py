@@ -283,81 +283,121 @@ def _create_chunks_and_embeddings(doc_id, chunks_data, filename="unknown", raw_m
     print(f"[+] Successfully indexed {len(inserted_ids)} child chunks under {len(parent_groups)} parent chunks for doc {doc_id}.")
     return inserted_ids
 
-def unified_worker_pipeline():
-    """Pipeline Liniar UNIFICAT v0.7.0 (Resource-Aware, Distributed & Multi-Node)"""
-    worker_id = os.getenv("WORKER_ID", f"worker-{uuid.uuid4().hex[:6]}")
-    print(f"!!! PIPELINE FORENSIC v0.7.0 - DISTRIBUTED WORKER [{worker_id}] !!!")
-    
-    from core_engine.services.grinder import _unload_ollama
-    import gc
-    import torch
-    
+def _cpu_ingestion_loop(worker_id: str):
+    """Treapta 1: CPU Pipeline (Docling OCR + Semantic Chunking + Vectorizare pgvector).
+    Procesează documentele din QUEUED, extrage textul, construiește chunk-urile și embedding-urile pe CPU.
+    Când termină, marchează documentul ca AI_PENDING pentru ca GPU Auditor să-l preia instant.
+    Nu descarcă și nu atinge GPU VRAM!
+    """
+    print(f"[*] [Worker Stage 1 - CPU Extractor] Pornit pe worker {worker_id}...")
     while True:
-        r.set(f"worker_heartbeat_{worker_id}", json.dumps({
-            "worker_id": worker_id,
-            "timestamp": int(time.time()),
-            "status": "IDLE"
-        }), ex=60)
-
-        if check_llm_pause(): time.sleep(10); continue
         try:
             doc_id, filename = None, None
             with SafeSession() as db:
-                next_doc = db.query(models.Document).filter(models.Document.status == "QUEUED").order_by(models.Document.created_at.asc()).first()
-                if not next_doc: time.sleep(5); continue
+                next_doc = db.query(models.Document).filter(
+                    models.Document.status == "QUEUED"
+                ).order_by(models.Document.created_at.asc()).first()
+                if not next_doc:
+                    time.sleep(2)
+                    continue
                 doc_id, filename = next_doc.id, next_doc.filename
-                next_doc.status = "PROCESSING"; db.commit()
-            
-            r.set(f"worker_heartbeat_{worker_id}", json.dumps({
-                "worker_id": worker_id,
-                "timestamp": int(time.time()),
-                "status": "PROCESSING",
-                "current_doc": filename
-            }), ex=60)
-            print(f"[*] --- START [{worker_id}]: {filename} ---")
+                next_doc.status = "PROCESSING"
+                db.commit()
+
+            print(f"[*] [CPU Extractor] Start OCR & Vectorizare: Doc {doc_id} ({filename})")
             file_path = os.path.join("/app/uploads", filename)
-            if not os.path.exists(file_path): file_path = os.path.join("/app/shared_uploads", filename)
+            if not os.path.exists(file_path):
+                file_path = os.path.join("/app/shared_uploads", filename)
 
             from core_engine.services.progress_tracker import DocProgressTracker
             tracker = DocProgressTracker(doc_id, filename, file_path, redis_client=r)
 
             with SafeSession() as db:
                 next_doc = db.query(models.Document).filter(models.Document.id == doc_id).first()
-                resolver = EntityResolver(db_session=db)
                 debug_logger.task_stage(doc_id=doc_id, stage="PIPELINE_START", status="STARTED", details={"filename": filename, "worker_id": worker_id})
-                
-                # 1. VRAM MARSHALLING (Eliberăm Ollama pentru Docling)
+
+                # 1. DOCLING OCR pe CPU
                 tracker.start_ocr_phase()
-                _unload_ollama()
-                
-                # 2. DOCLING OCR
                 ocr_result = process_document(file_path)
-                if not ocr_result or "error" in ocr_result: 
+                if not ocr_result or "error" in ocr_result:
                     tracker.fail("OCR structural a eșuat.")
                     debug_logger.task_stage(doc_id=doc_id, stage="OCR", status="FAILED", details={"error": ocr_result.get("error") if isinstance(ocr_result, dict) else "unknown"})
-                    next_doc.status = "FAILED"; db.commit(); continue
-                
+                    next_doc.status = "FAILED"
+                    db.commit()
+                    continue
+
                 items = ocr_result.get("items", []) if isinstance(ocr_result, dict) else []
                 num_tables = len([it for it in items if it.get("type") in ["TABLE", "TABLE_PART"]])
                 tracker.finish_ocr_phase(num_tables=num_tables)
                 debug_logger.task_stage(doc_id=doc_id, stage="OCR", status="COMPLETED", details={"tables_count": num_tables})
 
-                next_doc.raw_text = ocr_result.get("markdown", ""); db.commit()
+                next_doc.raw_text = ocr_result.get("markdown", "")
+                db.commit()
 
-                # 3. VRAM MARSHALLING (Eliberăm PyTorch pentru Ollama)
-                gc.collect()
-                if torch.cuda.is_available(): torch.cuda.empty_cache()
-
-                # 4. EMBEDDINGS (pgvector)
+                # 2. EMBEDDINGS & CHUNKS pe CPU (pgvector)
                 chunks_info = _create_chunks_and_embeddings(doc_id, ocr_result, filename=filename, raw_markdown=ocr_result.get("markdown", ""), tracker=tracker)
                 debug_logger.task_stage(doc_id=doc_id, stage="EMBEDDINGS", status="COMPLETED", details={"chunks_count": len(chunks_info)})
-                
-                # 5. STRUCTURED EXTRACTION (Universal Deep Forensic AI Audit Engine)
-                tracker.start_grinder_overview(total_tables=num_tables)
-                from core_engine.services.deep_audit_service import DeepForensicAuditor
+
+                # 3. Marcare ca AI_PENDING pentru GPU Auditor
+                next_doc.status = "AI_PENDING"
+                db.commit()
+                print(f"[+] [CPU Extractor] Doc {doc_id} ({filename}) -> Gata pentru AI Audit (status: AI_PENDING).")
+                try:
+                    r.set(f"doc_progress_{doc_id}", json.dumps({
+                        "status": "AI_PENDING",
+                        "percent": 60.0,
+                        "message": f"OCR & Vectorizare finalizată ({len(chunks_info)} fragmente). În așteptare audit AI...",
+                        "stage": "AI_PENDING",
+                        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S")
+                    }))
+                except Exception:
+                    pass
+
+        except Exception as e:
+            if 'tracker' in locals() and tracker:
+                tracker.fail(str(e))
+            print(f"[!] Eroare CPU Extractor: {e}")
+            debug_logger.error("worker_tasks", "CPU_EXTRACTOR_FAILED", str(e), doc_id=doc_id if 'doc_id' in locals() else None, details={"filename": filename if 'filename' in locals() else None})
+            time.sleep(3)
+
+
+def _gpu_audit_loop(worker_id: str):
+    """Treapta 2: GPU Pipeline (Universal Deep Forensic AI Audit Engine).
+    Preia documentele cu status AI_PENDING, păstrează modelul LLM cald în VRAM permanent,
+    și efectuează auditul criminalistic profund fără nicio descărcare repetată.
+    """
+    print(f"[*] [Worker Stage 2 - GPU Auditor] Pornit pe worker {worker_id}...")
+    from core_engine.services.deep_audit_service import DeepForensicAuditor
+
+    while True:
+        if check_llm_pause():
+            time.sleep(5)
+            continue
+        try:
+            doc_id, filename = None, None
+            with SafeSession() as db:
+                next_doc = db.query(models.Document).filter(
+                    models.Document.status == "AI_PENDING"
+                ).order_by(models.Document.created_at.asc()).first()
+                if not next_doc:
+                    time.sleep(2)
+                    continue
+                doc_id, filename = next_doc.id, next_doc.filename
+                next_doc.status = "AI_AUDITING"
+                db.commit()
+
+            print(f"[*] [GPU Auditor] Start Deep Forensic Audit: Doc {doc_id} ({filename})")
+            file_path = os.path.join("/app/uploads", filename)
+            if not os.path.exists(file_path):
+                file_path = os.path.join("/app/shared_uploads", filename)
+
+            from core_engine.services.progress_tracker import DocProgressTracker
+            tracker = DocProgressTracker(doc_id, filename, file_path, redis_client=r)
+
+            with SafeSession() as db:
+                next_doc = db.query(models.Document).filter(models.Document.id == doc_id).first()
                 auditor = DeepForensicAuditor(doc_id)
                 audit_res = asyncio.run(auditor.run_audit())
-                tracker.finish_grinder_overview()
 
                 ents_found = audit_res.get("entities_count", 0)
                 has_summary = bool(audit_res.get("summary_length", 0) > 50)
@@ -368,12 +408,34 @@ def unified_worker_pipeline():
                 tracker.complete()
                 pipe_status = "SUCCESS" if (ents_found > 0 or has_summary) else "COMPLETED_WITH_WARNINGS"
                 debug_logger.task_stage(doc_id=doc_id, stage="PIPELINE_END", status=pipe_status, details={"filename": filename, "entities_count": ents_found, "has_summary": has_summary})
+                print(f"[+] [GPU Auditor] Doc {doc_id} ({filename}) -> Finalizat cu succes (COMPLETED).")
 
-        except Exception as e: 
+        except Exception as e:
             if 'tracker' in locals() and tracker:
                 tracker.fail(str(e))
-            print(f"[!] Eroare Worker Pipeline: {e}")
-            debug_logger.error("worker_tasks", "PIPELINE_FAILED", str(e), doc_id=doc_id if 'doc_id' in locals() else None, details={"filename": filename if 'filename' in locals() else None})
-            time.sleep(5)
+            print(f"[!] Eroare GPU Auditor: {e}")
+            debug_logger.error("worker_tasks", "GPU_AUDITOR_FAILED", str(e), doc_id=doc_id if 'doc_id' in locals() else None, details={"filename": filename if 'filename' in locals() else None})
+            time.sleep(3)
+
+
+def unified_worker_pipeline():
+    """Pipeline Asincron în 2 Trepte v0.8.0 (CPU Extractor || GPU Auditor Concurrency)"""
+    worker_id = os.getenv("WORKER_ID", f"worker-{uuid.uuid4().hex[:6]}")
+    print(f"!!! PIPELINE FORENSIC v0.8.0 - 2-STAGE ASYNC WORKER [{worker_id}] !!!")
+
+    t_cpu = threading.Thread(target=_cpu_ingestion_loop, args=(worker_id,), name="CPUExtractorThread", daemon=True)
+    t_gpu = threading.Thread(target=_gpu_audit_loop, args=(worker_id,), name="GPUAuditorThread", daemon=True)
+
+    t_cpu.start()
+    t_gpu.start()
+
+    while True:
+        r.set(f"worker_heartbeat_{worker_id}", json.dumps({
+            "worker_id": worker_id,
+            "timestamp": int(time.time()),
+            "status": "RUNNING",
+            "stages": ["CPU_EXTRACTOR", "GPU_AUDITOR"]
+        }), ex=60)
+        time.sleep(10)
 if __name__ == "__main__":
     unified_worker_pipeline()

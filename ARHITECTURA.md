@@ -349,8 +349,41 @@
     - *5. Reranker pe CPU:*
         - `BAAI/bge-reranker-v2-m3` rulează pe CPU pentru a elibera integral cei 8GB VRAM pentru inferența LLM pe GPU.
 
+### Etapa 43: Speculative Search Engine & Background Cross-Encoder Reranking - IMPLEMENTAT (Septembrie 2026)
+- **Problemă rezolvată (Gâtuirea căutării secvențiale pe CPU & GPU Idle Wait):**
+    - Reranker-ul `BAAI/bge-reranker-v2-m3` rulează pe CPU pentru a păstra cei 8GB VRAM curați pentru inferența Ollama (Qwen 3.5). Fiecare căutare hibridă durează ~35–60s pe CPU pentru filtrarea a 50–150 candidați.
+    - Într-o investigație multi-target cu 3–4 obiective, executarea secvențială (Căutare 1 -> LLM 1 -> Căutare 2 -> LLM 2 -> Căutare 3 -> LLM 3) irosea peste 150–200s, deoarece GPU-ul aștepta CPU-ul, iar CPU-ul aștepta GPU-ul.
+- **Arhitectura actualizată (`backend/core_engine/services/chat_service.py`):**
+    - *1. Suprapunere Paralelă CPU / GPU (Speculative Prefetch):*
+        - Imediat după aprobarea planului de investigație la Pasul 0, este lansat în fundal `_launch_speculative_prefetch(plan)` pe un thread daemon (`SpeculativePrefetchWorker`).
+        - În timp ce Ținta 1 efectuează raționamentul pe GPU (60–90 secunde în Ollama), CPU-ul pre-calculează deja căutările hibride și rerankarea neurală pentru Țintele 2 și 3.
+    - *2. Instant Cache HIT (0 ms):*
+        - Când Țintele 2 și 3 își încep execuția pe thread-ul principal, dovezile rerankate sunt deja disponibile în `self.evidence_cache`.
+        - Timpul de căutare pentru obiectivele ulterioare scade de la 45–60 secunde la 0 ms (economisind peste 2 minute per interogare complexă).
+    - *3. Sincronizare Thread-Safe Fără Deadlock (`search_lock`, `cache_lock` & `prefetch_events`):*
+        - `search_lock`: serializează execuțiile pe CPU pentru a preveni saturarea nucleelor sau conflictele de memorie în PyTorch CrossEncoder.
+        - `prefetch_events`: dicționar de `threading.Event()` per cheie canonică de căutare. Dacă o țintă ajunge la pasul de interogare înainte ca worker-ul de fundal să termine, aceasta așteaptă non-blocant finalizarea worker-ului, preluând direct rezultatul din cache fără interogări duplicate.
+        - `self.citations` este sincronizat sub `cache_lock`, păstrând strict indexarea coerentă a referințelor criminalistice `[REF x]`.
+
+### Etapa 44: Hierarchical 2-Stage Reranking (Macro-Audit Reranking ➔ Micro-Chunk Zoom ➔ Rolling Scratchpad Fallback) - IMPLEMENTAT (Septembrie 2026)
+- **Problemă rezolvată (Căutare 'oarbă' prin mii de chunk-uri & zgomot în dosare complexe):**
+    - Când dosarele conțin zeci sau sute de documente, o căutare semantică directă pe mii de fragmente/chunk-uri (`SEARCH_TEXT`) riscă să aducă pasaje din documente irelevante care au cuvinte cheie comune (ex: clauze standard din contracte neafiliate).
+    - În documentele foarte lungi, dacă chunk-urile nu conțin exact cuvintele căutate, agentul pierdea proba esențială.
+- **Arhitectura actualizată (`backend/core_engine/services/chat_service.py`):**
+    - *1. Stage 1: Macro-Audit Reranking (Filtrare la nivel de dosar de document):*
+        - La nivel de caz, se construiește reprezentarea compactă a fiecărui document (`filename + doc_type + ai_summary + dynamic_attributes`).
+        - Înainte de căutarea granulară pe chunk-uri, interogarea trece prin `_rank_relevant_documents` (CrossEncoder pe CPU, ~1s), identificând top 3-4 documente direct vizate (`target_doc_ids`).
+        - Căutările pe text sunt restricționate strict în cadrul documentelor selectate la nivel macro, eliminând 95% din zgomot. Dacă nu se găsește niciun rezultat, sistemul face fallback automat la întregul dosar.
+    - *2. Stage 2: Micro-Chunk Zoom & Speculative Cache:*
+        - Paginile și paragrafele documentelor țintă sunt rerankate neural la nivel de micro-chunk.
+        - Worker-ul speculativ de prefetch rulează în fundal pe CPU în timp ce LLM-ul gândește pe GPU, producând cache hit-uri instantanee (0 ms) pentru toate țintele ulterioare.
+    - *3. Stage 3: Rolling Scratchpad Fallback:*
+        - Dacă căutarea textuală nu returnează niciun fragment relevant, sistemul nu capitulează: apelează `tool_fetch_full_document(best_doc_id)` și parcurge documentul complet pagină cu pagină conform protocolului Rolling Scratchpad.
+    - *4. Optimizare Volum Chunk-uri (În curs de finisare):*
+        - Limitarea și deduplicarea fragmentelor per sub-target la top 6-8 chunk-uri unice pentru a menține volumul sub 8.000 caractere (~2.000 tokeni), prevenind compactarea distructivă și blocajele de sampler în `llama-server`.
+
 ---
-*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 42 (Context-Isolated Multi-Target Engine, Dynamic Rolling Compaction & Native Thinking Capture).*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 44 (Hierarchical 2-Stage Reranking & Fallback Scratchpad).*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:

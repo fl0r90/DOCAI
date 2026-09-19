@@ -541,6 +541,7 @@ def chat(case_id: int, payload: dict = Body(...), user: models.User = Depends(ge
                         "is_running": True,
                         "step": step_text,
                         "question": question,
+                        "trace_logs": trace_logs[-40:],
                         "updated_at": datetime.utcnow().isoformat()
                     }), ex=3600)
 
@@ -584,9 +585,11 @@ def chat(case_id: int, payload: dict = Body(...), user: models.User = Depends(ge
         try:
             while True:
                 try:
-                    item = chunk_queue.get(timeout=180)
+                    item = chunk_queue.get(timeout=5.0)
                 except queue.Empty:
-                    break
+                    # Emitem periodic ping keep-alive ca să prevenim deconectarea HTTP/SSE în timpul raționamentelor lungi
+                    yield json.dumps({"type": "ping"}) + "\n"
+                    continue
                 if item is STOP_SENTINEL:
                     break
                 yield item + "\n"

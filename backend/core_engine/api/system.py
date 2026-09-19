@@ -227,6 +227,8 @@ def get_llm_config_api(admin: User = Depends(check_admin), db: Session = Depends
         "lmstudio_api_key": config.get("lmstudio_api_key", ""),
         "lmstudio_timeout": int(config.get("lmstudio_timeout", 300)),
         "ollama_api_mode": config.get("ollama_api_mode", os.getenv("OLLAMA_API_MODE", "native")),
+        "reranker_device": config.get("reranker_device", os.getenv("RERANKER_DEVICE", "cpu")),
+        "reranker_model": config.get("reranker_model", os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")),
     }
 
 @router.post("/llm/config")
@@ -250,6 +252,14 @@ def update_llm_config(payload: dict, admin: User = Depends(check_admin), db: Ses
         if s: s.value = str(value)
         else: db.add(SystemSetting(key=key, value=str(value)))
     db.commit()
+
+    # Hot-reload RerankService dacă s-au schimbat parametrii de reranker
+    if "reranker_device" in payload or "reranker_model" in payload:
+        try:
+            from ..services.rerank_service import RerankService
+            RerankService.reset_instance()
+        except Exception as e:
+            print(f"[!] Warning la resetare RerankService: {e}")
 
     # LOGICA DE GESTIONARE CONTAINERE (Auto-Switch)
     if "active_llm_engine" in payload:
@@ -534,23 +544,289 @@ def restore_backup(filename: str, bg_tasks: BackgroundTasks, admin: User = Depen
     bg_tasks.add_task(run_system_script, "scripts/restore_v2.sh", [backup_path])
     return {"message": "Restaurarea a fost inițiată. Sistemul ar putea fi indisponibil câteva momente."}
 
+def _run_model_import_task(item_name: str):
+    import redis, json, zipfile, tarfile, shutil, re
+    r = redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
+    import_dir = "/app/ollama_models/import"
+    target_dir = "/app/ollama_models"
+    item_path = os.path.join(import_dir, item_name)
+    progress_key = "model_import_progress"
+
+    r.set(progress_key, json.dumps({
+        "active": True,
+        "item": item_name,
+        "status": "processing",
+        "detail": f"Procesare '{item_name}'...",
+        "percent": 10
+    }), ex=3600)
+
+    try:
+        low = item_name.lower()
+        imported_gguf_name = None
+
+        # 1. Arhivă ZIP / TAR -> Dezarhivare automată
+        if low.endswith(".zip") or low.endswith(".tar.gz") or low.endswith(".tgz") or low.endswith(".tar"):
+            extract_tmp = os.path.join(import_dir, f"_extracted_{int(time.time())}")
+            os.makedirs(extract_tmp, exist_ok=True)
+            r.set(progress_key, json.dumps({
+                "active": True,
+                "item": item_name,
+                "status": "unzipping",
+                "detail": "Dezarhivare arhivă în curs...",
+                "percent": 30
+            }), ex=3600)
+
+            if low.endswith(".zip"):
+                with zipfile.ZipFile(item_path, 'r') as zf:
+                    zf.extractall(extract_tmp)
+            elif low.endswith(".tar.gz") or low.endswith(".tgz"):
+                with tarfile.open(item_path, 'r:gz') as tf:
+                    tf.extractall(extract_tmp)
+            elif low.endswith(".tar"):
+                with tarfile.open(item_path, 'r:') as tf:
+                    tf.extractall(extract_tmp)
+
+            # Căutăm fișiere .gguf extrase
+            gguf_files = []
+            for root, _, files in os.walk(extract_tmp):
+                for f in files:
+                    if f.lower().endswith(".gguf"):
+                        gguf_files.append(os.path.join(root, f))
+
+            if not gguf_files:
+                raise ValueError("Arhiva nu conține niciun fișier .gguf!")
+
+            src_gguf = gguf_files[0]
+            dest_filename = os.path.basename(src_gguf)
+            dest_path = os.path.join(target_dir, dest_filename)
+            shutil.move(src_gguf, dest_path)
+            shutil.rmtree(extract_tmp, ignore_errors=True)
+            try:
+                os.remove(item_path)
+            except Exception:
+                pass
+            imported_gguf_name = dest_filename
+
+        # 2. Fișier GGUF direct
+        elif low.endswith(".gguf"):
+            dest_path = os.path.join(target_dir, item_name)
+            shutil.move(item_path, dest_path)
+            imported_gguf_name = item_name
+
+        # 3. Subfolder (Structură Ollama blobs/manifests sau folder cu .gguf)
+        elif os.path.isdir(item_path):
+            if os.path.exists(os.path.join(item_path, "blobs")) or os.path.exists(os.path.join(item_path, "manifests")):
+                for it in os.listdir(item_path):
+                    s = os.path.join(item_path, it)
+                    d = os.path.join(target_dir, it)
+                    if os.path.isdir(s):
+                        shutil.copytree(s, d, dirs_exist_ok=True)
+                    else:
+                        shutil.copy2(s, d)
+                shutil.rmtree(item_path, ignore_errors=True)
+                r.set(progress_key, json.dumps({
+                    "active": False,
+                    "item": item_name,
+                    "status": "completed",
+                    "detail": "Structura Ollama a fost importată cu succes!",
+                    "percent": 100
+                }), ex=3600)
+                return
+            else:
+                found_ggufs = [f for f in os.listdir(item_path) if f.lower().endswith(".gguf")]
+                if not found_ggufs:
+                    raise ValueError("Folderul nu conține niciun fișier .gguf!")
+                dest_filename = found_ggufs[0]
+                shutil.move(os.path.join(item_path, dest_filename), os.path.join(target_dir, dest_filename))
+                shutil.rmtree(item_path, ignore_errors=True)
+                imported_gguf_name = dest_filename
+        else:
+            raise ValueError(f"Format nesuportat pentru {item_name}")
+
+        # Înregistrare automată în Ollama prin REST API nativ
+        clean_tag = re.sub(r'\.gguf$', '', imported_gguf_name, flags=re.IGNORECASE)
+        clean_tag = re.sub(r'[^a-zA-Z0-9_.-]', '-', clean_tag).lower().strip("-")
+        if ":" not in clean_tag:
+            clean_tag = f"{clean_tag}:latest"
+
+        r.set(progress_key, json.dumps({
+            "active": True,
+            "item": item_name,
+            "status": "registering",
+            "detail": f"Înregistrare în Ollama sub tag-ul '{clean_tag}'...",
+            "percent": 70
+        }), ex=3600)
+
+        ollama_payload = {
+            "name": clean_tag,
+            "from": f"/root/.ollama/{imported_gguf_name}"
+        }
+        res = requests.post(f"{OLLAMA_URL}/api/create", json=ollama_payload, timeout=600)
+        if res.status_code == 200:
+            r.set(progress_key, json.dumps({
+                "active": False,
+                "item": item_name,
+                "status": "completed",
+                "detail": f"Modelul '{clean_tag}' a fost înregistrat cu succes în Ollama!",
+                "percent": 100,
+                "model_name": clean_tag
+            }), ex=3600)
+        else:
+            raise RuntimeError(f"Ollama a returnat eroarea {res.status_code}: {res.text}")
+
+    except Exception as e:
+        print(f"[!] Eroare la import model {item_name}: {e}")
+        r.set(progress_key, json.dumps({
+            "active": False,
+            "item": item_name,
+            "status": "error",
+            "detail": str(e),
+            "percent": 0
+        }), ex=3600)
+
+
 @router.get("/models/import/available")
 def list_import_models(admin: User = Depends(check_admin)):
     import_path = "/app/ollama_models/import"
     if not os.path.exists(import_path):
         os.makedirs(import_path, exist_ok=True)
-    # Listăm doar directoarele din folderul de import
-    return [d for d in os.listdir(import_path) if os.path.isdir(os.path.join(import_path, d))]
+    items = []
+    try:
+        for entry in os.listdir(import_path):
+            if entry.startswith(".") or entry.startswith("_"):
+                continue
+            full_p = os.path.join(import_path, entry)
+            if os.path.isdir(full_p):
+                size_mb = 0
+                try:
+                    size_mb = round(sum(os.path.getsize(os.path.join(dp, f)) for dp, _, fn in os.walk(full_p) for f in fn) / (1024 * 1024), 1)
+                except Exception: pass
+                items.append({
+                    "name": entry,
+                    "type": "folder",
+                    "size_mb": size_mb,
+                    "display": f"{entry} (Folder - {size_mb} MB)"
+                })
+            elif os.path.isfile(full_p):
+                size_mb = round(os.path.getsize(full_p) / (1024 * 1024), 1)
+                low = entry.lower()
+                if low.endswith(".gguf"):
+                    items.append({
+                        "name": entry,
+                        "type": "gguf",
+                        "size_mb": size_mb,
+                        "display": f"{entry} (Model GGUF - {size_mb} MB)"
+                    })
+                elif low.endswith(".zip") or low.endswith(".tar.gz") or low.endswith(".tgz") or low.endswith(".tar"):
+                    items.append({
+                        "name": entry,
+                        "type": "archive",
+                        "size_mb": size_mb,
+                        "display": f"{entry} (Arhivă - {size_mb} MB)"
+                    })
+    except Exception as e:
+        print(f"[!] Eroare listare import modele: {e}")
+    return items
 
-@router.post("/models/import/run/{folder_name}")
-def run_model_import(folder_name: str, bg_tasks: BackgroundTasks, admin: User = Depends(check_admin)):
-    import_path = f"/app/ollama_models/import/{folder_name}"
+@router.post("/models/import/run/{item_name}")
+def run_model_import(item_name: str, bg_tasks: BackgroundTasks, admin: User = Depends(check_admin)):
+    import_path = f"/app/ollama_models/import/{item_name}"
     if not os.path.exists(import_path):
-        raise HTTPException(status_code=404, detail="Folderul de import nu a fost găsit.")
-    
-    # Rulăm importul de modele
-    bg_tasks.add_task(run_system_script, "scripts/import_model.sh", [folder_name])
-    return {"message": f"Importul modelului {folder_name} a fost inițiat în fundal."}
+        raise HTTPException(status_code=404, detail="Elementul specificat nu a fost găsit în import/.")
+    bg_tasks.add_task(_run_model_import_task, item_name)
+    return {"message": f"Importul pentru '{item_name}' a fost inițiat în fundal."}
+
+@router.get("/models/import/status")
+def get_import_status(admin: User = Depends(check_admin)):
+    import redis, json
+    r = redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
+    raw = r.get("model_import_progress")
+    if raw:
+        try:
+            return json.loads(raw.decode('utf-8') if isinstance(raw, bytes) else raw)
+        except Exception: pass
+    return {"active": False, "status": "idle"}
+
+def _pull_model_worker(model_name: str):
+    import redis, json
+    r = redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
+    progress_key = "model_pull_progress"
+    r.set(progress_key, json.dumps({
+        "active": True,
+        "model": model_name,
+        "status": "connecting",
+        "detail": f"Conectare la registru pentru '{model_name}'...",
+        "percent": 0
+    }), ex=7200)
+
+    try:
+        res = requests.post(f"{OLLAMA_URL}/api/pull", json={"name": model_name, "stream": True}, stream=True, timeout=7200)
+        if res.status_code != 200:
+            raise RuntimeError(f"Ollama a returnat status {res.status_code}: {res.text}")
+
+        for line in res.iter_lines():
+            if line:
+                try:
+                    data = json.loads(line.decode('utf-8'))
+                    status_str = data.get("status", "")
+                    total = data.get("total", 0)
+                    completed = data.get("completed", 0)
+                    pct = round((completed / total) * 100, 1) if total > 0 else 0
+
+                    r.set(progress_key, json.dumps({
+                        "active": True,
+                        "model": model_name,
+                        "status": "downloading",
+                        "detail": f"{status_str} ({pct}%)" if pct > 0 else status_str or "Descărcare...",
+                        "percent": pct
+                    }), ex=7200)
+
+                    if status_str == "success":
+                        r.set(progress_key, json.dumps({
+                            "active": False,
+                            "model": model_name,
+                            "status": "completed",
+                            "detail": f"Modelul '{model_name}' a fost descărcat cu succes!",
+                            "percent": 100
+                        }), ex=7200)
+                        return
+                except Exception: pass
+
+        r.set(progress_key, json.dumps({
+            "active": False,
+            "model": model_name,
+            "status": "completed",
+            "detail": f"Descărcare finalizată pentru '{model_name}'!",
+            "percent": 100
+        }), ex=7200)
+    except Exception as e:
+        print(f"[!] Eroare la pull model {model_name}: {e}")
+        r.set(progress_key, json.dumps({
+            "active": False,
+            "model": model_name,
+            "status": "error",
+            "detail": str(e),
+            "percent": 0
+        }), ex=7200)
+
+@router.post("/models/pull")
+def pull_model(payload: dict, bg_tasks: BackgroundTasks, admin: User = Depends(check_admin)):
+    model_name = (payload.get("name") or "").strip()
+    if not model_name:
+        raise HTTPException(status_code=400, detail="Specificați numele sau tag-ul modelului.")
+    bg_tasks.add_task(_pull_model_worker, model_name)
+    return {"message": f"Descărcarea modelului '{model_name}' a fost inițiată în fundal."}
+
+@router.get("/models/pull/status")
+def get_pull_status(admin: User = Depends(check_admin)):
+    import redis, json
+    r = redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
+    raw = r.get("model_pull_progress")
+    if raw:
+        try:
+            return json.loads(raw.decode('utf-8') if isinstance(raw, bytes) else raw)
+        except Exception: pass
+    return {"active": False, "status": "idle"}
 
 @router.post("/models/delete")
 def delete_ollama_model(model_name: str, admin: User = Depends(check_admin)):

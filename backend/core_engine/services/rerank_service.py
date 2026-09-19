@@ -6,10 +6,28 @@ class RerankService:
     _instance = None
 
     @classmethod
+    def reset_instance(cls):
+        """Resetează instanța singleton pentru hot-reloading la modificarea setărilor din Admin."""
+        print("[*] RerankService: Resetare instanță singleton pentru reîncărcare dinamică...")
+        cls._instance = None
+
+    @classmethod
     def get_instance(cls):
         if cls._instance is None:
-            device = os.getenv("RERANKER_DEVICE", "cpu")
-            model_name = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
+            try:
+                from ..core.config import get_llm_config
+                cfg = get_llm_config()
+                device = cfg.get("reranker_device") or os.getenv("RERANKER_DEVICE", "cpu")
+                model_name = cfg.get("reranker_model") or os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
+            except Exception:
+                device = os.getenv("RERANKER_DEVICE", "cpu")
+                model_name = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
+
+            # Verificare suport CUDA dacă s-a cerut GPU
+            if device == "cuda" and not torch.cuda.is_available():
+                print("[!] Avertisment: CUDA nu este disponibil în acest container. Fallback la CPU...")
+                device = "cpu"
+
             print(f"[*] Initializing Reranker ({model_name}) on {device}...")
             try:
                 # Force local HF hub cache path matching Docker environment

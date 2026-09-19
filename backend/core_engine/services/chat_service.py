@@ -147,14 +147,16 @@ class AgenticInvestigator:
         self.searched_queries = []
         self.working_memory = {}
         self.evidence_cache = {}
+        self._macro_doc_cache: Dict[str, List[int]] = {}
+        self._case_docs_repr: Optional[List[Tuple[int, str]]] = None
         self.cache_lock = threading.Lock()
-        self.search_lock = threading.Lock()
+        self.search_lock = threading.RLock()
         self.prefetch_events: Dict[str, threading.Event] = {}
         self.prefetch_thread: Optional[threading.Thread] = None
-        # Configurație de context flexibilă și dinamică (scalabilă de la 8K la 64K)
+        # Configurație de context flexibilă și dinamică (scalabilă de la 16K la 64K)
         cfg = UnifiedLLMClient.get_engine_config()
-        self.processing_ctx = int(cfg.get("processing_ctx") or cfg.get("narrative_ctx") or 8192)
-        # Prag de compactare stil OpenCode: 75% din contextul configurat (ex: 6.144 pt 8K, 24.576 pt 32K)
+        self.processing_ctx = max(int(cfg.get("processing_ctx") or cfg.get("narrative_ctx") or 8192), 16384)
+        # Prag de compactare stil OpenCode: 75% din contextul configurat (ex: 12.288 pt 16K, 24.576 pt 32K)
         self.compaction_threshold_tokens = int(self.processing_ctx * 0.75)
         self.max_evidence_chars = int((self.processing_ctx - 1500) * 3.5)
         self._load_history()
@@ -163,6 +165,60 @@ class AgenticInvestigator:
     @staticmethod
     def _make_cache_key(query: str, semantic_intent: str = "", doc_id: int = 0, page_start: int = 0, page_end: int = 0) -> str:
         return f"{doc_id}:{page_start}:{page_end}:{semantic_intent.strip().lower()}:{query.strip().lower()}"
+
+    def _rank_relevant_documents(self, query: str, top_k: int = 4) -> List[int]:
+        """Treapta 1: Macro-Audit Reranking.
+        Punctează profilul de audit al fiecărui document (nume fișier, tip document,
+        sumar executiv, atribute dinamice) folosind Cross-Encoder BGE-Reranker pe CPU.
+        Selectează top_k documente candidate fără zgomot, reducând drastic spațiul de căutare.
+        """
+        if not query or not query.strip():
+            return []
+
+        cache_key = query.strip().lower()
+        with self.cache_lock:
+            if cache_key in self._macro_doc_cache:
+                return self._macro_doc_cache[cache_key]
+
+        if self._case_docs_repr is None:
+            with SessionLocal() as db:
+                docs = db.query(Document).filter(Document.case_id == self.case_id).all()
+                self._case_docs_repr = []
+                for d in docs:
+                    meta = d.doc_metadata if isinstance(d.doc_metadata, dict) else {}
+                    dyn = meta.get("dynamic_attributes", {})
+                    dyn_str = " ".join(f"{k}: {v}" for k, v in dyn.items()) if isinstance(dyn, dict) else ""
+                    dtype = d.doc_type or ""
+                    summary = d.ai_summary or ""
+                    text = f"{d.filename} | {dtype} | {summary} | {dyn_str}"
+                    # Trunchiem la 400 caractere per document pentru viteză CPU maximă (1-2s pe 60 documente)
+                    self._case_docs_repr.append((d.id, text[:400]))
+
+        if not self._case_docs_repr:
+            return []
+
+        if len(self._case_docs_repr) <= top_k:
+            all_ids = [d_id for d_id, _ in self._case_docs_repr]
+            with self.cache_lock:
+                self._macro_doc_cache[cache_key] = all_ids
+            return all_ids
+
+        try:
+            from .rerank_service import RerankService
+            reranker = RerankService.get_instance()
+            texts = [t for _, t in self._case_docs_repr]
+            pairs = [[query, t] for t in texts]
+            with self.search_lock:
+                scores = reranker.model.predict(pairs, batch_size=32)
+            ranked = sorted(zip(scores, [d_id for d_id, _ in self._case_docs_repr]), key=lambda x: x[0], reverse=True)
+            top_ids = [d_id for s, d_id in ranked[:top_k]]
+            print(f"[*] [Macro-Audit Rerank] Top {top_k} documente pentru '{query}': {top_ids} (scor maxim: {ranked[0][0]:.2f})")
+            with self.cache_lock:
+                self._macro_doc_cache[cache_key] = top_ids
+            return top_ids
+        except Exception as e:
+            print(f"[!] Eroare la Macro-Audit Reranking: {e}")
+            return [d_id for d_id, _ in self._case_docs_repr[:top_k]]
 
     def _extract_unsearched_key_terms(self) -> list:
         """Identifică agnostic termenii cheie (coduri tehnice, entități, canale) din întrebare care nu au fost căutați."""
@@ -523,18 +579,30 @@ class AgenticInvestigator:
     def _do_search_text(self, query: str, semantic_intent: str = "", doc_id: int = 0, page_start: int = 0, page_end: int = 0) -> str:
         with SessionLocal() as db:
             all_docs = db.query(Document).filter(Document.case_id == self.case_id).all()
+            if not all_docs: return "No documents found in this case."
+
+            # Treapta 1: Determinare Documente Țintă (Chirurgical vs Macro-Audit Zoom vs Global)
+            is_hierarchical = False
             if doc_id and doc_id > 0:
                 target_doc_ids = [d.id for d in all_docs if d.id == doc_id]
+            elif len(all_docs) > 4:
+                # Căutare pe întreg dosarul: aplicăm Macro-Audit Rerank pentru a izola top 4 documente candidate
+                macro_top_ids = self._rank_relevant_documents(query, top_k=4)
+                if macro_top_ids:
+                    target_doc_ids = list(macro_top_ids)
+                    is_hierarchical = True
+                else:
+                    target_doc_ids = [d.id for d in all_docs]
             else:
                 target_doc_ids = [d.id for d in all_docs]
+
             if not target_doc_ids: return "No documents found in this case."
-            
+
             # Apply semantic intent preference (search in doc_type, filename OR dynamic_attributes)
             intent_doc_ids = set()
             if semantic_intent:
                 si_lower = semantic_intent.lower()
                 for d in all_docs:
-                    if d.id not in target_doc_ids: continue
                     matched = False
                     if d.doc_type and si_lower in d.doc_type.lower():
                         matched = True
@@ -549,95 +617,111 @@ class AgenticInvestigator:
                                     break
                     if matched:
                         intent_doc_ids.add(d.id)
-            
-            # Base filters for chunks (doc_id + optional page range zoom)
-            base_filters = [DocumentChunk.document_id.in_(target_doc_ids)]
-            if page_start > 0:
-                base_filters.append(DocumentChunk.page_number >= page_start)
-            if page_end > 0:
-                base_filters.append(DocumentChunk.page_number <= page_end)
+                        if is_hierarchical and d.id not in target_doc_ids:
+                            target_doc_ids.append(d.id)
 
-            # Extract date variants from both the query AND the user question
             t_search_start = time.time()
-            date_variants = get_date_variants(query)
-            if not date_variants and self.user_question:
-                date_variants = get_date_variants(self.user_question)
 
-            words = [w.strip() for w in re.findall(r'\b\w{2,}\b', query) if len(w) >= 2]
-            if not words and not date_variants:
-                return "No valid keywords or dates for text search."
+            def _retrieve_candidate_chunks(doc_ids_subset):
+                base_filters = [DocumentChunk.document_id.in_(doc_ids_subset)]
+                if page_start > 0:
+                    base_filters.append(DocumentChunk.page_number >= page_start)
+                if page_end > 0:
+                    base_filters.append(DocumentChunk.page_number <= page_end)
 
-            # 1. Date Exact Search
-            date_res = []
-            if date_variants:
-                date_conditions = [DocumentChunk.content.ilike(f"%{dv}%") for dv in date_variants]
-                date_res = db.query(DocumentChunk)\
-                    .filter(and_(*base_filters, or_(*date_conditions)))\
-                    .limit(30).all()
+                # Extract date variants from both the query AND the user question
+                dv_list = get_date_variants(query)
+                if not dv_list and self.user_question:
+                    dv_list = get_date_variants(self.user_question)
 
-            # 2. Semantic Search (Vector)
-            query_embedding = None
-            try:
-                from .embedding_service import EmbeddingService
-                query_embedding = EmbeddingService.get_embedding(query)
-            except Exception as e:
-                print(f"[!] Embedding Error in Hybrid Search: {e}")
+                w_list = [w.strip() for w in re.findall(r'\b\w{2,}\b', query) if len(w) >= 2]
+                if not w_list and not dv_list:
+                    return [], dv_list, w_list, [], [], [], []
 
-            vector_res = []
-            if query_embedding:
+                # 1. Date Exact Search
+                d_res = []
+                if dv_list:
+                    date_conditions = [DocumentChunk.content.ilike(f"%{dv}%") for dv in dv_list]
+                    d_res = db.query(DocumentChunk)\
+                        .filter(and_(*base_filters, or_(*date_conditions)))\
+                        .limit(30).all()
+
+                # 2. Semantic Search (Vector)
+                q_emb = None
                 try:
-                    vector_res = db.query(DocumentChunk)\
-                        .filter(and_(*base_filters))\
-                        .order_by(DocumentChunk.embedding.l2_distance(query_embedding))\
-                        .limit(50).all()
+                    from .embedding_service import EmbeddingService
+                    q_emb = EmbeddingService.get_embedding(query)
                 except Exception as e:
-                    db.rollback()
-                    print(f"[!] pgvector search error: {e}")
+                    print(f"[!] Embedding Error in Hybrid Search: {e}")
 
-            # 3. Lexical Search (Exact Keyword Match via ILIKE)
-            lexical_res = []
-            lex_words = [w for w in words if len(w) >= 3]
-            if lex_words:
-                conditions = [DocumentChunk.content.ilike(f"%{w}%") for w in lex_words]
-                lexical_res = db.query(DocumentChunk)\
-                    .filter(and_(*base_filters, or_(*conditions)))\
-                    .limit(100).all()
+                v_res = []
+                if q_emb:
+                    try:
+                        v_res = db.query(DocumentChunk)\
+                            .filter(and_(*base_filters))\
+                            .order_by(DocumentChunk.embedding.l2_distance(q_emb))\
+                            .limit(50).all()
+                    except Exception as e:
+                        db.rollback()
+                        print(f"[!] pgvector search error: {e}")
 
-            # 3a. Compound Token Exact Search (e.g. FACT-2023-0245, CTR-104, AGRO-CHIM)
-            compound_res = []
-            compound_tokens = re.findall(r'\b[A-Za-z0-9]+(?:[-_/][A-Za-z0-9]+)+\b', query)
-            if compound_tokens:
-                compound_conditions = [DocumentChunk.content.ilike(f"%{ct}%") for ct in compound_tokens]
-                compound_res = db.query(DocumentChunk)\
-                    .filter(and_(*base_filters, or_(*compound_conditions)))\
-                    .limit(50).all()
+                # 3. Lexical Search (Exact Keyword Match via ILIKE)
+                l_res = []
+                lex_words = [w for w in w_list if len(w) >= 3]
+                if lex_words:
+                    conditions = [DocumentChunk.content.ilike(f"%{w}%") for w in lex_words]
+                    l_res = db.query(DocumentChunk)\
+                        .filter(and_(*base_filters, or_(*conditions)))\
+                        .limit(100).all()
 
-            # 3b. Positional Search (End/Epilogue/Signatures vs Start/Preamble)
-            positional_res = []
-            q_full_lower = (query + " " + (self.user_question or "")).lower()
-            critical_keywords = ["final", "sfarsit", "sfârșit", "epilog", "concluzi", "ultim", "anexe", "semnatur", "sumă totală", "prejudiciu", "2013", "2014", "2015", "2016", "2017", "2018", "anexa nr"]
-            if any(k in q_full_lower for k in critical_keywords):
-                end_chunks = db.query(DocumentChunk)\
-                    .filter(and_(*base_filters))\
-                    .order_by(DocumentChunk.page_number.desc(), DocumentChunk.id.desc())\
-                    .limit(30).all()
-                positional_res.extend(reversed(end_chunks))
-            elif any(k in q_full_lower for k in ["debut", "inceput", "început", "preambul", "introducere", "articolul 1", "primele"]):
-                start_chunks = db.query(DocumentChunk)\
-                    .filter(and_(*base_filters))\
-                    .order_by(DocumentChunk.page_number.asc(), DocumentChunk.id.asc())\
-                    .limit(30).all()
-                positional_res.extend(start_chunks)
+                # 3a. Compound Token Exact Search (e.g. FACT-2023-0245, CTR-104, AGRO-CHIM)
+                c_res = []
+                c_tokens = re.findall(r'\b[A-Za-z0-9]+(?:[-_/][A-Za-z0-9]+)+\b', query)
+                if c_tokens:
+                    compound_conditions = [DocumentChunk.content.ilike(f"%{ct}%") for ct in c_tokens]
+                    c_res = db.query(DocumentChunk)\
+                        .filter(and_(*base_filters, or_(*compound_conditions)))\
+                        .limit(50).all()
 
-            # 4. Merge & Deduplicate (compound, date and positional prioritized)
-            seen_ids = set()
-            merged_results = []
-            for r in compound_res + date_res + positional_res + vector_res + lexical_res:
-                if r.id not in seen_ids:
-                    seen_ids.add(r.id)
-                    merged_results.append(r)
+                # 3b. Positional Search (End/Epilogue/Signatures vs Start/Preamble)
+                p_res = []
+                q_full = (query + " " + (self.user_question or "")).lower()
+                critical_kw = ["final", "sfarsit", "sfârșit", "epilog", "concluzi", "ultim", "anexe", "semnatur", "sumă totală", "prejudiciu", "2013", "2014", "2015", "2016", "2017", "2018", "anexa nr"]
+                if any(k in q_full for k in critical_kw):
+                    end_chunks = db.query(DocumentChunk)\
+                        .filter(and_(*base_filters))\
+                        .order_by(DocumentChunk.page_number.desc(), DocumentChunk.id.desc())\
+                        .limit(30).all()
+                    p_res.extend(reversed(end_chunks))
+                elif any(k in q_full for k in ["debut", "inceput", "început", "preambul", "introducere", "articolul 1", "primele"]):
+                    start_chunks = db.query(DocumentChunk)\
+                        .filter(and_(*base_filters))\
+                        .order_by(DocumentChunk.page_number.asc(), DocumentChunk.id.asc())\
+                        .limit(30).all()
+                    p_res.extend(start_chunks)
 
-            if not merged_results: return "No text fragments found."
+                # Merge & Deduplicate
+                seen = set()
+                merged = []
+                for r in c_res + d_res + p_res + v_res + l_res:
+                    if r.id not in seen:
+                        seen.add(r.id)
+                        merged.append(r)
+
+                return merged, dv_list, w_list, v_res, l_res, c_res, p_res
+
+            merged_results, date_variants, words, vector_res, lexical_res, compound_res, positional_res = _retrieve_candidate_chunks(target_doc_ids)
+
+            # FALLBACK ÎN TREPTE: Dacă filtrarea ierarhică nu a găsit fragmente, lărgim la întregul dosar!
+            if (not merged_results or len(merged_results) == 0) and is_hierarchical:
+                print(f"[*] [Hierarchical Zoom] 0 fragmente în doc_ids {target_doc_ids}. Fallback în trepte la scanarea întregului caz...")
+                target_doc_ids = [d.id for d in all_docs]
+                merged_results, date_variants, words, vector_res, lexical_res, compound_res, positional_res = _retrieve_candidate_chunks(target_doc_ids)
+
+            if not merged_results:
+                if not words and not date_variants:
+                    return "No valid keywords or dates for text search."
+                return "No text fragments found."
 
             # 5. Neural Reranking via SentenceTransformers (with Rule-based Fallback)
             if self._stop_check():
@@ -1577,28 +1661,98 @@ MAI CAUT ÎN CONTINUARE: (ce a rămas de lămurit din obiectiv, sau scrie exact 
         self.prefetch_thread = threading.Thread(target=_worker, name="SpeculativePrefetchWorker", daemon=True)
         self.prefetch_thread.start()
 
+    @staticmethod
+    def _sanitize_llm_response(text: str, target_header: str = None) -> str:
+        """Curăță riguros orice meta-gândire, monolog intern sau artefacte de reasoning
+        (XML <think> sau plain text 'Thinking Process:') din răspunsul LLM."""
+        if not text:
+            return ""
+
+        # 1. Curățare tag-uri XML standard de gândire (inclusiv tag unclosed dacă generarea a fost trunchiată)
+        cleaned = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+        if "<think>" in cleaned:
+            cleaned = cleaned.split("<think>")[0].strip()
+
+        # 2. Dacă a fost specificat un antet-țintă (ex: '[FACTS]'), orice text anterior este meta-gândire și se radiază
+        if target_header and target_header in cleaned:
+            idx = cleaned.find(target_header)
+            return cleaned[idx:].strip()
+
+        # 3. Detectare separatori comuni între gândire și răspunsul util
+        separators = [
+            "\n\n---\n\n",
+            "\n\n[FACTS]",
+            "\n\n[ANALYSIS]",
+            "\n\n[CONCLUSION]",
+            "\n\nConcluzie:",
+            "\n\nCONCLUZIE:",
+            "\n\nRezumat:",
+            "\n\nREZUMAT:",
+            "\n\nFinal Answer:",
+            "\n\nAnswer:"
+        ]
+        for sep in separators:
+            if sep in cleaned:
+                parts = cleaned.split(sep, 1)
+                first_part = parts[0]
+                if any(k in first_part for k in ["Thinking Process:", "Thought Process:", "Thinking:", "Thought:", "Analyze the Request", "Input:", "Constraints:", "Drafting"]):
+                    if sep.strip().startswith("["):
+                        return (sep.strip() + "\n" + parts[1]).strip()
+                    return parts[1].strip()
+
+        # 4. Detectare și curățare blocuri care încep direct cu 'Thinking Process:' sau variațiuni
+        think_patterns = [
+            r'^(?:Thinking Process|Thought Process|Reasoning Process|Thinking|Thought):\s*',
+            r'^\*\*Thinking Process:\*\*\s*',
+            r'^1\.\s+\*\*Analyze the Request:\*\*'
+        ]
+        for pat in think_patterns:
+            if re.search(pat, cleaned, re.IGNORECASE):
+                lines = cleaned.splitlines()
+                factual_lines = []
+                in_thought = True
+                for line in lines:
+                    stripped = line.strip()
+                    if in_thought:
+                        if (stripped.startswith("[") or stripped.startswith("###") or stripped.startswith("- ") or
+                            re.match(r'^(?:În urma|Conform|Din analiza|Factura|Contractul|Extrasele|S-a identificat|Nu s-au găsit|Avizul|Borderoul)\b', stripped, re.IGNORECASE)):
+                            if not re.search(r'\b(?:Analyze|Input|Task|Constraints|Step|Crucial|Drafting|Reference Mapping)\b', stripped):
+                                in_thought = False
+                                factual_lines.append(line)
+                    else:
+                        factual_lines.append(line)
+                if factual_lines:
+                    return "\n".join(factual_lines).strip()
+
+        return cleaned
+
     def _compact_evidence_if_needed(self, raw_evidence: str, target_title: str) -> str:
         """Compactare dinamică stil OpenCode când volumul de text depășește pragul flexibil de context (75%)."""
-        est_tokens = len(raw_evidence) // 3.5
+        est_tokens = len(raw_evidence) // 2.3
         if est_tokens <= self.compaction_threshold_tokens:
             return raw_evidence
 
         print(f"[*] Trigger Dynamic Context Compaction: {est_tokens:.0f} tokens > {self.compaction_threshold_tokens} threshold (processing_ctx={self.processing_ctx})")
+        # Asigurăm că dovezile brute trimise la compactor nu depășesc capacitatea promptului LLM
+        max_prompt_chars = int((self.processing_ctx - 1500) * 3.0)
+        safe_raw_evidence = raw_evidence[:max_prompt_chars]
+
         compaction_prompt = (
             f"Ești un Forensic Memory Compactor. Condensează următoarele fragmente de probe din dosar pentru obiectivul '{target_title}'.\n\n"
             "REGULI STRICTE DE CONDENSARE:\n"
+            f"0. Păstrează cu PRIORITATE ABSOLUTĂ orice probe, cifre sau declarații direct relevante pentru obiectivul: '{target_title}'.\n"
             "1. Păstrează OBLIGATORIU toate cifrele, cantitățile și unitățile de măsură (ex: 450 tone, 388,50 tone, 61,50 tone).\n"
             "2. Păstrează OBLIGATORIU toate codurile de documente și numerele (AVIZ, FACT, BORDEROU, tichete cântar, serii).\n"
             "3. Păstrează OBLIGATORIU valorile monetare, prețurile unitare și TVA (ex: 1.100 RON/to, 495.000 RON).\n"
             "4. Păstrează OBLIGATORIU declarațiile și citatele directe din discuții/conversații (ex: ce a spus șoferul Vasile, ce a instruit Mihai Stanciu despre custodie).\n"
             "5. Păstrează etichetele de referință [REF x] pentru fiecare probă.\n"
-            "6. Elimină orice text de umplutură, boilerplate notarial, antete goale sau linii redundante.\n\n"
-            f"DOVEZI BRUTE:\n{raw_evidence}"
+            "6. DIRECTIVĂ STRICTĂ: Răspunde DIRECT și EXCLUSIV cu faptele condensate în limba ROMÂNĂ. Este STRICT INTERZIS să generezi 'Thinking Process:', monologuri în engleză sau comentarii meta.\n\n"
+            f"DOVEZI BRUTE:\n{safe_raw_evidence}"
         )
         try:
             res = UnifiedLLMClient.chat_step(
                 messages=[
-                    {"role": "system", "content": "You are a Forensic Memory Compactor. Output high-density factual summary in ROMANIAN. Preserve all numbers, quotes, and citations."},
+                    {"role": "system", "content": "You are a Forensic Memory Compactor. Output high-density factual summary in ROMANIAN. Preserve all numbers, quotes, and citations. Do NOT output thinking process or english text."},
                     {"role": "user", "content": compaction_prompt}
                 ],
                 model=self.active_model,
@@ -1607,6 +1761,12 @@ MAI CAUT ÎN CONTINUARE: (ce a rămas de lămurit din obiectiv, sau scrie exact 
                 stop_check=self._stop_check
             )
             compacted = res.get("content", "").strip()
+            compacted = self._sanitize_llm_response(compacted)
+            # Dacă modelul tot a scuipat gândire în engleză, refuzăm compactarea contaminată și folosim dovezile brute
+            if any(k in compacted for k in ["Thinking Process:", "Thought Process:", "Analyze the Request", "Input Data", "Refining References"]):
+                print("[!] Compactorul a emis meta-gândire. Se anulează compactarea și se folosesc dovezile brute deduplicate.")
+                return raw_evidence[:self.max_evidence_chars]
+
             if compacted and len(compacted) > 100:
                 print(f"[+] Context Compaction reușită: redus de la {len(raw_evidence)} la {len(compacted)} caractere.")
                 return compacted
@@ -1615,10 +1775,150 @@ MAI CAUT ÎN CONTINUARE: (ce a rămas de lămurit din obiectiv, sau scrie exact 
 
         return raw_evidence[:self.max_evidence_chars]
 
+    def _deduplicate_and_cap_evidence(self, snippets: List[str], max_chunks: int = 6) -> str:
+        """Deduplică fragmentele de probe returnate pentru multiple chei de căutare și păstrează top N chunk-uri unice."""
+        seen_keys = set()
+        unique_chunks = []
+        graph_blocks = []
+
+        for snippet in snippets:
+            if not snippet or not snippet.strip():
+                continue
+
+            # Izolare context relațional Neo4j dacă este inclus în snippet
+            if "--- RELATIONAL GRAPH CONTEXT" in snippet:
+                parts = snippet.split("--- RELATIONAL GRAPH CONTEXT", 1)
+                text_part = parts[0]
+                graph_part = "--- RELATIONAL GRAPH CONTEXT" + parts[1]
+                graph_blocks.append(graph_part.strip())
+            else:
+                text_part = snippet
+
+            # Împărțire pe blocuri criminalistice [REF x - ...]
+            raw_blocks = re.split(r'(?=\[REF\s+\d+\s+-)', text_part)
+            for block in raw_blocks:
+                block = block.strip()
+                if not block:
+                    continue
+                if not block.startswith("[REF"):
+                    # Text fără antet sau fallback complet din scratchpad
+                    key = block[:150].strip()
+                    if key not in seen_keys:
+                        seen_keys.add(key)
+                        unique_chunks.append(block)
+                    continue
+
+                # Extragem eticheta documentului și pagina: [REF 1 - Contract.pdf | CONTRACT, Pagina 1]
+                header_match = re.match(r'\[REF\s+\d+\s+-\s+([^\]]+)\]', block)
+                if header_match:
+                    header_info = header_match.group(1).strip()
+                    dedup_key = header_info.lower()
+                else:
+                    dedup_key = block[:120].lower()
+
+                if dedup_key not in seen_keys:
+                    seen_keys.add(dedup_key)
+                    unique_chunks.append(block)
+
+        selected_chunks = unique_chunks[:max_chunks]
+
+        # Unificare conexiuni de graf fără linii duplicate
+        combined_graph = ""
+        if graph_blocks:
+            graph_lines = set()
+            clean_graph_lines = []
+            for gb in graph_blocks:
+                for line in gb.splitlines():
+                    line_s = line.strip()
+                    if line_s and line_s not in graph_lines:
+                        graph_lines.add(line_s)
+                        clean_graph_lines.append(line)
+            if clean_graph_lines:
+                combined_graph = "\n\n" + "\n".join(clean_graph_lines)
+
+        result = "\n\n".join(selected_chunks) + combined_graph
+        return result.strip()
+
+    def _extract_clues_from_working_memory(self) -> List[str]:
+        """Extrage agnostic indicii de legătură (coduri de acte, entități, sume) din faptele anterioare confirmate."""
+        if not self.working_memory:
+            return []
+        
+        all_facts = " ".join(str(v) for v in self.working_memory.values())
+        clues = []
+
+        # 1. Coduri de documente/tranzacții (ex: CTR-..., FACT-..., NOR-..., etc.)
+        doc_codes = re.findall(r'\b[A-Za-z]{2,8}[-_/]\d{2,4}(?:[-_/][A-Za-z0-9]+)?\b', all_facts)
+        for c in doc_codes:
+            if len(c) >= 5 and not c.upper().startswith("REF"):
+                clues.append(c)
+
+        # 2. Entități menționate după cuvinte relaționale (ex: firma X, societatea Y, către Z)
+        rel_pattern = r'(?:\bfirma\b|\bsocietatea\b|\bcompania\b|\boperatorul\b|\bprestatorul\b|\bbeneficiarul\b|\bcătre\b|\bcatre\b|\bde la\b)\s+([A-Z][A-Za-z0-9_.-]+(?:\s+[A-Z][A-Za-z0-9_.-]+)?)'
+        for m in re.finditer(rel_pattern, all_facts, re.IGNORECASE):
+            ent = m.group(1).strip()
+            if len(ent) >= 3 and ent.lower() not in ['sc', 'srl', 'sa', 'un', 'o', 'acest', 'aceasta', 'alta', 'altă']:
+                clues.append(ent)
+
+        # 3. Potrivire cu entități cunoscute din dosar (Master Entities)
+        try:
+            with SessionLocal() as db:
+                links = db.query(models.MasterEntity.official_name).join(
+                    models.DocumentEntityLink, models.DocumentEntityLink.entity_id == models.MasterEntity.id
+                ).join(
+                    models.Document, models.DocumentEntityLink.document_id == models.Document.id
+                ).filter(models.Document.case_id == self.case_id).distinct().all()
+                for (name,) in links:
+                    if not name:
+                        continue
+                    tokens = [
+                        t.strip() for t in re.split(r'[\s,&-]+', name)
+                        if len(t.strip()) >= 4 and t.upper() not in [
+                            'SRL', 'S.A.', 'SA', 'S.R.L.', 'SC', 'S.C.', 'GRUP',
+                            'LOGISTICS', 'MANAGEMENT', 'ROMANIA', 'EXPORT', 'IMPORT'
+                        ]
+                    ]
+                    for t in tokens:
+                        if re.search(r'\b' + re.escape(t) + r'\b', all_facts, re.IGNORECASE):
+                            if t.lower() not in ['banca', 'cont', 'factura', 'ordin', 'contract']:
+                                clues.append(t)
+        except Exception as e:
+            print(f"[!] Eroare la extragerea entităților din DB pentru working memory: {e}")
+
+        # 4. Sume monetare cheie (>= 1.000)
+        amounts = re.findall(r'\b(\d{1,3}(?:[.,]\d{3})+|\d{4,})\b', all_facts)
+        for a in amounts:
+            clean = a.replace('.', '').replace(',', '')
+            if clean.isdigit() and int(clean) >= 1000:
+                clues.append(a)
+
+        # Deduplicare și filtrare termeni deja căutați
+        unique_clues = []
+        seen = set()
+        for cl in clues:
+            clean_cl = cl.strip()
+            key_low = clean_cl.lower()
+            if key_low not in seen and len(clean_cl) >= 3:
+                seen.add(key_low)
+                if not any(key_low in sq.lower() for sq in self.searched_queries):
+                    unique_clues.append(clean_cl)
+
+        return unique_clues
+
     def _execute_sub_target(self, target: Dict[str, Any]) -> str:
         """Rezolvă un target individual într-un context izolat și curat (Context-Flush)."""
         evidence_snippets = []
-        keys_to_search = target.get("keys", []) or []
+        keys_to_search = list(target.get("keys", []) or [])
+
+        # Agnostic Working Memory Clue Propagation:
+        # Adăugăm indiciile ne-căutate apărute din faptele anterioare (firme noi, coduri, sume)
+        if self.working_memory:
+            discovered_clues = self._extract_clues_from_working_memory()
+            if discovered_clues:
+                print(f"[*] [Agnostic Clue Propagation] Indicii identificate din working memory pentru Ținta {target.get('id')}: {discovered_clues}")
+                for clue in discovered_clues[:2]:
+                    if clue.lower() not in [k.lower() for k in keys_to_search]:
+                        keys_to_search.append(clue)
         for k in keys_to_search:
             if self._stop_check():
                 raise ChatStoppedError("Stop request received during sub-target.")
@@ -1630,11 +1930,22 @@ MAI CAUT ÎN CONTINUARE: (ce a rămas de lămurit din obiectiv, sau scrie exact 
         # Dacă nu s-au găsit fragmente relevante prin chei, încercăm cu titlul targetului
         if not evidence_snippets:
             obs = self.tool_search_text(target["title"])
-            if obs and "No text fragments found" not in obs:
+            if obs and "No text fragments found" not in obs and "No valid keywords" not in obs:
                 evidence_snippets.append(obs)
                 self.searched_queries.append(target["title"])
 
-        combined_evidence = "\n\n".join(evidence_snippets)
+        # FALLBACK SCRATCHPAD ÎN TREPTE: Dacă nu s-au găsit fragmente, identificăm cel mai probabil document și declanșăm Rolling Scratchpad!
+        if not evidence_snippets:
+            top_doc_candidate = self._rank_relevant_documents(target["title"], top_k=1)
+            if top_doc_candidate:
+                best_doc_id = top_doc_candidate[0]
+                print(f"[*] [Fallback Scratchpad] Se declanșează Rolling Scratchpad pe documentul ID {best_doc_id} pentru '{target['title']}'...")
+                full_doc_obs = self.tool_fetch_full_document(best_doc_id, focus_terms=target["title"])
+                if full_doc_obs and "not found" not in full_doc_obs and "No text fragments" not in full_doc_obs:
+                    evidence_snippets.append(full_doc_obs)
+
+        # Deduplicare și plafonare la top 6 chunk-uri unice pentru protecție context
+        combined_evidence = self._deduplicate_and_cap_evidence(evidence_snippets, max_chunks=6)
         if not combined_evidence:
             combined_evidence = "Nu s-au identificat fragmente relevante în dosar pentru acest criteriu."
         else:
@@ -1655,12 +1966,14 @@ MAI CAUT ÎN CONTINUARE: (ce a rămas de lămurit din obiectiv, sau scrie exact 
             "Extrage cifre exacte, cantități, diferențe și citează obligatoriu referințele [REF x]. "
             "Efectuează calcule matematice directe dacă obiectivul cere o diferență sau o valoare. "
             "Dacă dovezile conțin discuții sau instrucțiuni despre nereguli, diferențe sau aranjamente (ex: pe WhatsApp), expune-le explicit. "
-            "Dacă dovezile nu conțin nicio mențiune sau document despre acest obiectiv, specifică explicit 'Nu s-au găsit dovezi'."
+            "Dacă dovezile nu conțin nicio mențiune sau document despre acest obiectiv, specifică explicit 'Nu s-au găsit dovezi'.\n"
+            "DIRECTIVĂ CRITICĂ: Răspunde DIRECT cu concluzia factuală în limba ROMÂNĂ (2-4 propoziții). "
+            "Este STRICT INTERZIS să generezi 'Thinking Process:', monologuri în engleză sau introduceri meta."
         )
 
         step_res = UnifiedLLMClient.chat_step(
             messages=[
-                {"role": "system", "content": "You are a Forensic Evidence Auditor. Answer strictly using the provided citations in ROMANIAN. Be concise, rigorous, and direct (2-4 sentences)."},
+                {"role": "system", "content": "You are a Forensic Evidence Auditor. Answer strictly using the provided citations in ROMANIAN. Be concise, rigorous, and direct (2-4 sentences). Do NOT output thinking process or english text."},
                 {"role": "user", "content": prompt}
             ],
             model=self.active_model,
@@ -1668,7 +1981,9 @@ MAI CAUT ÎN CONTINUARE: (ce a rămas de lămurit din obiectiv, sau scrie exact 
             num_ctx=self.processing_ctx,
             stop_check=self._stop_check
         )
-        return step_res.get("content", "").strip()
+        raw_res = step_res.get("content", "").strip()
+        clean_res = self._sanitize_llm_response(raw_res)
+        return clean_res or raw_res
 
     def _synthesize_final_report(self, plan: List[Dict[str, Any]]) -> str:
         """Generează raportul final unificat din faptele verificate per target."""
@@ -1680,9 +1995,12 @@ MAI CAUT ÎN CONTINUARE: (ce a rămas de lămurit din obiectiv, sau scrie exact 
         final_prompt = (
             f"ÎNTREBAREA INVESTIGATĂ:\n{self.user_question}\n\n"
             f"CONCLUZII ȘI FAPTE VERIFICATE PE OBIECTIVE:\n{facts_summary}\n\n"
-            "Redactează raportul final unificat în limba ROMÂNĂ conform formatului criminalistic standard:\n"
+            "DIRECTIVĂ STRICTĂ DE FORMAT:\n"
+            "Răspunde DIRECT și EXCLUSIV în limba ROMÂNĂ, redactând raportul criminalistic complet.\n"
+            "Începe răspunsul TĂU STRICT cu primul caracter '[' al secțiunii [FACTS]. Este STRICT INTERZIS să generezi 'Thinking Process:', introduceri meta sau text în limba engleză.\n\n"
+            "Structura OBLIGATORIE a raportului:\n"
             "[FACTS]\n"
-            "- Listă detaliată a tuturor faptelor confirmate, cantităților și participanților, citând referințele [x]\n"
+            "- Listă detaliată a tuturor faptelor confirmate, cantităților și participanților, citând referințele [REF x]\n"
             "[ANALYSIS]\n"
             "- Conexiuni logice între documente, contradicții identificate (ex: discrepanțe între acte formale și discuții informale)\n"
             "[CONCLUSION]\n"
@@ -1692,17 +2010,21 @@ MAI CAUT ÎN CONTINUARE: (ce a rămas de lămurit din obiectiv, sau scrie exact 
             "[CONFIDENCE]: HIGH"
         )
 
+        synthesis_ctx = max(self.processing_ctx, 16384)
+
         final_res = UnifiedLLMClient.chat_step(
             messages=[
-                {"role": "system", "content": "You are a Master Forensic Auditor. Synthesize verified evidence into a professional forensic report in ROMANIAN."},
+                {"role": "system", "content": "You are a Master Forensic Auditor. Synthesize verified evidence into a professional forensic report in ROMANIAN. Output starts immediately with [FACTS]."},
                 {"role": "user", "content": final_prompt}
             ],
             model=self.active_model,
             temperature=0.0,
-            num_ctx=self.processing_ctx,
+            num_ctx=synthesis_ctx,
             stop_check=self._stop_check
         )
-        return final_res.get("content", "").strip()
+        raw_final = final_res.get("content", "").strip()
+        clean_final = self._sanitize_llm_response(raw_final, target_header="[FACTS]")
+        return clean_final or raw_final
 
     def run(self):
         yield json.dumps({"type": "status", "data": "Forensic Agent is thinking..."})
