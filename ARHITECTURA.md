@@ -379,11 +379,81 @@
         - Worker-ul speculativ de prefetch rulează în fundal pe CPU în timp ce LLM-ul gândește pe GPU, producând cache hit-uri instantanee (0 ms) pentru toate țintele ulterioare.
     - *3. Stage 3: Rolling Scratchpad Fallback:*
         - Dacă căutarea textuală nu returnează niciun fragment relevant, sistemul nu capitulează: apelează `tool_fetch_full_document(best_doc_id)` și parcurge documentul complet pagină cu pagină conform protocolului Rolling Scratchpad.
-    - *4. Optimizare Volum Chunk-uri (În curs de finisare):*
-        - Limitarea și deduplicarea fragmentelor per sub-target la top 6-8 chunk-uri unice pentru a menține volumul sub 8.000 caractere (~2.000 tokeni), prevenind compactarea distructivă și blocajele de sampler în `llama-server`.
+    - *4. Optimizare Volum Chunk-uri (Deduplicare & Capping):*
+        - Limitarea și deduplicarea fragmentelor per sub-target la top 6 chunk-uri unice pentru a menține volumul de dovezi sub 8.000 caractere (~2.000 tokeni), prevenind compactarea distructivă și blocajele de sampler în `llama-server`.
+    - *5. Agnostic Working Memory Clue Propagation (Inter-Target Chaining):*
+        - Rezolvă problema investigațiilor oarbe în etape secvențiale: când o țintă anterioară descoperă entități sau coduri necunoscute la Pasul 0 (ex: mențiuni de firme partenere, coduri de facturi/contracte, sume specifice), metoda `_extract_clues_from_working_memory` le identifică 100% agnostic (folosind regex structural + potrivire cu nodurile `MasterEntity` ale dosarului).
+        - Clues-urile ne-căutate sunt injectate dinamic în cheile de căutare ale sub-targeturilor următoare, permițând Cross-Encoder-ului să găsească automat documentele adiacente fără ca utilizatorul să trebuiască să le numească explicit în întrebarea inițială.
+
+
+### Etapa 45: 2-Stage Asynchronous Ingestion Pipeline (CPU Extractor || GPU Auditor Concurrency) - IMPLEMENTAT (Septembrie 2026)
+- **Problemă rezolvată (VRAM Thrashing & Timpi morți la procesarea calupurilor de documente):**
+    - În versiunile anterioare, worker-ul procesa documentele strict secvențial: descărca LLM-ul din GPU VRAM (`_unload_ollama()`), rula Docling OCR și vectorizarea pe CPU, apoi reîncărca LLM-ul în VRAM pentru Deep Forensic Audit.
+    - Când se încărcau mai multe documente, CPU-ul stătea blocat în idle 40–60 de secunde cât timp LLM-ul audita pe GPU documentul curent, iar la fiecare document nou se pierdeau 10–15 secunde reîncărcând modelul în VRAM.
+- **Arhitectura actualizată (`backend/worker/tasks.py`):**
+    - *1. Decuplare Totală Hardware (CPU vs GPU):*
+        - S-a constatat că Docling OCR și `BAAI/bge-m3` (embeddings) rulează 100% pe CPU și consumă 0 MB VRAM. Nu există nicio coliziune de memorie cu Ollama.
+        - `_unload_ollama()` a fost eliminat, permițând modelului de audit (`granite4.2:8b`) să rămână cald în VRAM permanent.
+    - *2. Stage 1: CPU Ingestion Worker (`_cpu_ingestion_loop`):*
+        - Preia documentele din starea `QUEUED`, efectuează Docling OCR și indexarea semantică a chunk-urilor în `pgvector` pe CPU.
+        - La finalizare, marchează documentul ca `AI_PENDING` (vizibil în UI ca „În Coadă AI”).
+    - *3. Stage 2: GPU Forensic Auditor (`_gpu_audit_loop`):*
+        - Preia documentele `AI_PENDING`, ține modelul LLM încărcat și execută `DeepForensicAuditor` (cele 8 etape criminalistice).
+        - Rulează complet concurent: în timp ce GPU-ul auditează Documentul 1, CPU-ul termină deja OCR-ul și vectorizarea pentru Documentele 2 și 3.
+        - Timpul mort dintre documente scade la **0 ms**.
+
+### Etapa 46: Dynamic Neural Reranker Control & Hardware Target Switching (Admin UI + Hot-Reload) - IMPLEMENTAT (Septembrie 2026)
+- **Problemă rezolvată:**
+    - Reranker-ul neuronal Cross-Encoder (`BAAI/bge-reranker-v2-m3`) rula rigid pe CPU cu consum ridicat de procesor (~250% CPU timp de 10-15s per căutare) sau necesita restart manual de container pentru a fi trecut pe CUDA.
+    - Lipsa controlului în panoul de administrare asupra modelului de reranking și a dispozitivului de execuție.
+- **Arhitectura actualizată (`backend/core_engine/api/system.py`, `services/rerank_service.py`, `frontend/src/app/dashboard/llm/page.tsx`):**
+    - *1. Backend Hot-Reloading (`RerankService.reset_instance()`):*
+        - La salvarea setărilor din `/llm/config`, backend-ul resetează instanța singleton de reranker, încărcând dinamic noul model sau dispozitiv fără a întrerupe procesele active și fără a necesita restartul containerului.
+        - Detecție automată CUDA cu fallback silențios pe CPU dacă GPU-ul este indisponibil.
+    - *2. Admin Interface Card:*
+        - Adăugat card dedicat „Neural Reranker (Cross-Encoder)” în `/dashboard/llm`, permițând selectarea dispozitivului (`CPU` - 0 VRAM vs `CUDA/GPU` - ~1.1 GB VRAM pentru latență de ~25ms) și alegerea modelului (`BAAI/bge-reranker-v2-m3`, `large`, `base` sau custom).
+
+### Etapa 47: Anti-Runaway Reasoning Sanitization & Context Headroom Hardening - IMPLEMENTAT (Septembrie 2026)
+- **Problemă rezolvată (Eșecul Qwen la sinteza criminalistică Cazul 12):**
+    - În timpul investigațiilor atomice multi-țintă, funcția de compactare a contextului (`_compact_evidence_if_needed`) a determinat modelul Qwen să emită raționamentul intern în text brut (`Thinking Process:\n1. Analyze the Request...`) în loc de tag-uri XML `<think>`.
+    - Acest monolog a contaminat `working_memory`, iar la etapa de sinteză finală (`_synthesize_final_report`), promptul conținea deja această structură. Qwen a imitat formatul, a generat peste 5.500 de tokeni de meta-gândire în engleză și a izbit frontal limita de context de 8.192 tokeni (`truncated = 1`), eșuând să livreze raportul final în limba română.
+- **Arhitectura actualizată (`backend/core_engine/services/chat_service.py`):**
+    - *1. Sanitizator Universal (`_sanitize_llm_response`):*
+        - Curăță agresiv tag-urile `<think>...</think>` (inclusiv tag-uri neînchise în caz de trunchiere).
+        - Detectează și elimină prefixele parazite de meta-gândire (`Thinking Process:`, `Thought Process:`, `Analyze the Request:`).
+        - Dacă este specificat un antet-țintă (ex: `target_header="[FACTS]"`), elimină chirurgical orice text sau raționament anterior acestuia.
+        - Curăță separatorii comuni (`\n\n---\n\n`, `Concluzie:`, `Final Answer:`).
+    - *2. Ancorare Strictă în Prompt (Prefix Enforcement):*
+        - În promptul de sinteză finală și în cel de sub-obiective s-a impus directiva critică: „Răspunde DIRECT în limba ROMÂNĂ. Începe răspunsul TĂU STRICT cu primul caracter `[` al secțiunii `[FACTS]`. Este STRICT INTERZIS să generezi 'Thinking Process:', monologuri în engleză sau introduceri meta.”
+    - *3. Guardrail în Compactorul de Context:*
+        - Dacă compactorul emite meta-gândire contaminată, rezultatul este respins automat și se aplică trunchiere sigură pe dovezile brute deduplicate, protejând `working_memory`.
+    - *4. Extindere Context Window la 16.384 Tokeni:*
+        - `processing_ctx` a fost ridicat de la 8.192 la 16.384 tokeni (verificat funcțional în VRAM cu 6.5 GB ocupați din 8.2 GB pe RTX 4060).
+        - Marja de generare liberă a crescut de la ~2.000 la peste 10.000 de tokeni, eliminând complet riscul de trunchiere.
+
+### Etapa 48: Online Model Ingestion, Smart Archive Extraction & Continuous SSE Stream Resilience - IMPLEMENTAT (Septembrie 2026)
+- **Problemă rezolvată:**
+    - Procesul de adăugare a modelelor era manual și fragmentat; arhivele `.zip`/`.tar.gz` descărcate necesitau dezarhivare manuală în terminal și comenzi docker care eșuau din backend din lipsa binarului de docker.
+    - Secțiunea de import offline era înghesuită în sidebar-ul de 200px, generând overflow și o experiență de utilizare degradată.
+    - În timpul raționamentelor lungi ale LLM-ului (ex: 6+ minute la planificarea Qwen), conexiunea HTTP/SSE directă făcea timeout în browser (limita de 180s fără activitate), forțând UI-ul să cadă pe un fallback static galben cu mesaj redundant („Procesul rulează chiar dacă schimbi pagina...”) și pierzând consola de streaming în timp real.
+- **Arhitectura actualizată (`backend/core_engine/api/system.py`, `backend/core_engine/api/cases.py`, `frontend/src/app/dashboard/llm/page.tsx`, `frontend/src/app/cases/[id]/page.tsx`):**
+    - *1. Online Model Pull & Smart Archive Decompression (`system.py`):*
+        - Endpoint `POST /system/models/pull` pentru descărcare directă din registrul Ollama sau HuggingFace (`hf.co/...`), cu streaming nativ de progres în Redis (`POST /api/pull` Ollama) și polling frontend la 1.5s.
+        - Endpoint `POST /system/models/import` îmbunătățit cu auto-dezarhivare automată: arhivele `.zip`, `.tar.gz`, `.tgz` sunt extrase într-un director temporar securizat, se scanează recursiv fișierele `.gguf` și se apelează nativ API-ul Ollama (`POST /api/create` cu directiva `from: /root/.ollama/...`), eliminând dependența de docker CLI.
+    - *2. Refactorizare Admin UI (`/dashboard/llm/page.tsx`):*
+        - Eliminat modulul de import din sidebar-ul îngust; adăugat un card generos cu 2 coloane în corpul principal al paginii (Descărcare Online cu bară de progres live + Fișiere Locale cu detecție tip arhivă/GGUF și badge-uri de stare).
+    - *3. Keep-Alive Heartbeat pe Stream-ul de Investigație (`cases.py`):*
+        - În `stream()` din `cases.py`, generatorul utilizează `chunk_queue.get(timeout=5.0)`. Dacă în 5 secunde nu sunt emise date (LLM-ul este în plin raționament sau reranking), se emite un pachet ușor `{"type": "ping"}`.
+        - Browserul, proxy-ul și uvicorn mențin conexiunea SSE deschisă nelimitat, prevenind deconectările intempestive.
+    - *5. Explicit Document & Entity Anchoring (`chat_service.py`):*
+        - La interogări în dosare multi-document eterogene, sistemul analizează `user_question` și detectează dacă s-a menționat un fișier specific (ex: `Romgaz_Situatii_Financiare_IFRS_68pag.pdf`) sau o entitate unică.
+        - Blochează `target_doc_ids` exclusiv pe documentul indicat, împiedicând filtrul de Macro-Audit Reranking să elimine fișierul țintă sau să aducă fragmente parazite din alte companii din dosar.
+    - *6. Header Confidence Level Badge (`page.tsx`):*
+        - Parserul extrage robust nivelul de certitudine (`[CONFIDENCE]: HIGH/MEDIUM/LOW`) indiferent de poziționarea pe rând.
+        - Afișează un badge proeminent în antetul raportului (verde smarald pulsant pentru HIGH, galben pentru MEDIUM, roșu pentru LOW), oferind inspectorului vizibilitate imediată asupra gradului de încredere probatorie.
 
 ---
-*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 44 (Hierarchical 2-Stage Reranking & Fallback Scratchpad).*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 46 (Dynamic Neural Reranker Control), Etapa 47 (Anti-Runaway Reasoning Sanitization) și Etapa 48 (Online Model Ingestion & Continuous SSE Stream Resilience).*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:
