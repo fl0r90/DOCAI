@@ -20,3 +20,9 @@
 2026-09-18 19:00:42 - [INFO] - [94mAction: LOGIN_SUCCESS | User: 1 | Case: None | Details: None[0m
 2026-09-18 19:01:55 - [INFO] - [94mAction: LOGIN_SUCCESS | User: 1 | Case: None | Details: None[0m
 2026-09-18 19:12:08 - [INFO] - [94mAction: LOGIN_SUCCESS | User: 1 | Case: None | Details: None[0m
+2026-09-19 15:16:23 - [INFO] - [94mAction: LOGIN_SUCCESS | User: 2 | Case: None | Details: None[0m
+2026-09-19 15:16:34 - [INFO] - [94mAction: LOGIN_SUCCESS | User: 1 | Case: None | Details: None[0m
+2026-09-19 15:43:21 - [INFO] - [94mAction: DOCUMENT_UPLOADED | User: 2 | Case: 12 | Details: {"filename": "RAPORT_LIVRABIL_NOR-2023-0112_Studiu_Piata_Optimizare_Logistica.pdf"}[0m
+2026-09-19 15:43:21 - [INFO] - [94mAction: DOCUMENT_UPLOADED | User: 2 | Case: 12 | Details: {"filename": "NOTIFICARE_CONFORMARE_ANAF_DGRFP_Antifrauda_2024.pdf"}[0m
+2026-09-19 15:43:21 - [INFO] - [94mAction: DOCUMENT_UPLOADED | User: 2 | Case: 12 | Details: {"filename": "CERTIFICAT_ONRC_Nordic_Consulting_Management_SRL.pdf"}[0m
+2026-09-19 15:43:21 - [INFO] - [94mAction: DOCUMENT_UPLOADED | User: 2 | Case: 12 | Details: {"filename": "BULETIN_ANALIZA_CALITATIVA_LABORATOR_Siloz_Braila_2024-418.pdf"}[0m

@@ -583,11 +583,37 @@ class AgenticInvestigator:
 
             # Treapta 1: Determinare Documente Țintă (Chirurgical vs Macro-Audit Zoom vs Global)
             is_hierarchical = False
-            if doc_id and doc_id > 0:
+
+            # 0. Verificare dacă întrebarea utilizatorului indică EXPLICIT un document specific sau o entitate unică din dosar
+            explicit_doc_matches = []
+            uq_lower = (self.user_question or "").lower()
+            for d in all_docs:
+                fname_full = (d.filename or "").lower()
+                fname_clean = os.path.splitext(fname_full)[0]
+                if fname_full and (fname_full in uq_lower or (len(fname_clean) >= 4 and fname_clean in uq_lower)):
+                    explicit_doc_matches.append(d.id)
+                elif fname_clean:
+                    # Căutăm tokeni distinctivi de >= 5 caractere (ex: "romgaz")
+                    tokens = [part for part in re.split(r'[-_.\s]+', fname_clean) if len(part) >= 5]
+                    matching_tokens = [p for p in tokens if p in uq_lower]
+                    if matching_tokens:
+                        # Asigurăm că tokenul este specific acestui document (nu apare în majoritatea celorlalte)
+                        is_unique = not any(
+                            any(p in (other.filename or "").lower() for p in matching_tokens)
+                            for other in all_docs if other.id != d.id
+                        )
+                        if is_unique and d.id not in explicit_doc_matches:
+                            explicit_doc_matches.append(d.id)
+
+            if explicit_doc_matches:
+                target_doc_ids = explicit_doc_matches
+                is_hierarchical = True
+                print(f"[*] [Explicit Document Anchor] S-a identificat documentul țintă din întrebare: ID(s) {target_doc_ids}")
+            elif doc_id and doc_id > 0:
                 target_doc_ids = [d.id for d in all_docs if d.id == doc_id]
             elif len(all_docs) > 4:
-                # Căutare pe întreg dosarul: aplicăm Macro-Audit Rerank pentru a izola top 4 documente candidate
-                macro_top_ids = self._rank_relevant_documents(query, top_k=4)
+                # Căutare pe întreg dosarul: aplicăm Macro-Audit Rerank pentru a izola top 6 documente candidate
+                macro_top_ids = self._rank_relevant_documents(query, top_k=6)
                 if macro_top_ids:
                     target_doc_ids = list(macro_top_ids)
                     is_hierarchical = True
