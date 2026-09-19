@@ -455,9 +455,14 @@
         - În `UnifiedLLMClient.chat_step()`, s-a adăugat suport universal pentru parametrul `format: Optional[Union[str, dict]] = None`. Pentru Ollama `/api/chat`, trimite direct directiva nativă `format: "json"` (care activează gramatici GBNF forțate în engine-ul de inferență). Pentru LM Studio, vLLM și Ollama OpenAI-compatibil, injectează `response_format: {"type": "json_object"}`.
         - În `AgenticInvestigator._generate_investigation_plan()`, prompt-ul de decompunere a fost rescris 100% în limba română cu regulă strictă de păstrare a termenilor din întrebare (`18 camioane`, bănci, contracte).
         - S-a eliminat complet riscul de „derapaj în engleză” (unde Qwen traducea interogarea în engleză și genera chei de căutare inexistente în OCR precum `18 trucks`), iar planul de investigație este generat instantaneu și parsat cu succes la pasul 1.
+    - *8. SOTA Forensic Planning Mega-Prompt & Full Prompt Native Romanian Alignment (`chat_service.py`):*
+        - Implementat prompt de planificare de nivel 4 cu matrice de discriminare pe priorități (Prioritate 0: coduri, numere de lot, sume exacte, cantități; Prioritate 1: entități/persoane; Prioritate 2: termeni operativi; Filtru activ de zgomot: elimină cuvintele generice gen „contract”, „document”, „fraudă”, „preț”).
+        - Integrat un exemplu structural pur generic (`TRX-909`, `250.000 EUR`, `Compania Alpha`, `Popescu Ion`), validat prin testare live pe container cu zero scurgeri (leakage) și zero halucinații.
+        - Eliminat ultimele instanțe de denumiri specifice („șoferul Vasile”, „Mihai Stanciu”) din `compaction_prompt`, respectând 100% mandatul de agnosticism total.
+        - Toate mesajele de sistem (`system prompts`) din pașii de execuție sub-ținte și sinteză finală (`_execute_sub_target`, `_synthesize_final_report`, `_compact_evidence_if_needed`) au fost convertite în limba română, eradicând complet bias-ul limbii engleze la modelele open-weights.
 
 ---
-*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 46 (Dynamic Neural Reranker Control), Etapa 47 (Anti-Runaway Reasoning Sanitization) și Etapa 48 (Online Model Ingestion, Keep-Alive SSE & Enforced JSON Investigation Planning).*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 46 (Dynamic Neural Reranker Control), Etapa 47 (Anti-Runaway Reasoning Sanitization) și Etapa 48 (Online Model Ingestion, Keep-Alive SSE, SOTA Forensic Mega-Prompt & Native Romanian Alignment).*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:

@@ -1581,17 +1581,33 @@ MAI CAUT ÎN CONTINUARE: (ce a rămas de lămurit din obiectiv, sau scrie exact 
 
     def _generate_investigation_plan(self) -> List[Dict[str, Any]]:
         """Decompune semantic întrebarea utilizatorului în 1-4 obiective atomice folosind LLM cu fallback determinist."""
-        plan_prompt = (
-            "Ești un Senior Forensic Data Auditor. Descompune investigația utilizatorului în 1 până la 4 obiective atomice de verificare distincte.\n"
-            "Pentru fiecare obiectiv, identifică:\n"
-            "- id: număr întreg secvențial (1, 2, ...)\n"
-            "- title: descriere scurtă a ceea ce trebuie verificat (în limba română)\n"
-            "- keys: 1 până la 3 termeni sau identificatori EXACȚI din întrebare (nume de persoane, firme, bănci, cantități, sume, coduri sau canale operative, ex: '18 camioane', 'Banca Transilvania').\n"
-            "REGULĂ CRUCIALĂ: Păstrează toți termenii și cheile de căutare EXACT în limba română din întrebare (NU traduce în engleză!).\n\n"
-            "Răspunde STRICT cu un obiect JSON valid conform acestei scheme:\n"
-            "{\"targets\": [{\"id\": 1, \"title\": \"...\", \"keys\": [\"...\"]}]}\n\n"
-            f"ÎNTREBARE UTILIZATOR: {self.user_question}"
-        )
+        plan_prompt = f"""Ești Senior Forensic Evidence Strategist și Arhitect de Investigație Judiciară.
+Misiunea ta este să descompui o interogare complexă într-un plan tactic format din 1 până la maximum 4 obiective atomice de verificare.
+
+═══ MATRICEA DE EXTRAGERE A CHEILOR DE CĂUTARE (Câmpul 'keys') ═══
+Cheile de căutare sunt trimise direct în motorul de căutare hibrid (BM25 Lexical + Cross-Encoder Reranker).
+Pentru ca motorul să găsească exact paragrafele relevante în documentele scanate OCR, respectă STRICT următoarea ierarhie:
+1. PRIORITATE ZERO (Discriminare Maximă): Coduri alfanumerice, identificatori de lot/transport, sume exacte cu monedă, cantități cu unități de măsură (ex: '18 unități', '142.500 RON', '45 tone').
+2. PRIORITATE UNU (Entități Specifice): Nume proprii complete de persoane, denumiri de companii, bănci, instituții sau canale operative (ex: 'Banca Centrală', 'WhatsApp').
+3. PRIORITATE DOI (Termeni Tehnici/Operativi): Concepte operaționale specifice cuprinse în întrebare (ex: 'buletin de cântar', 'linie de credit', 'artificiu scriptic').
+4. FILTRU DE ZGOMOT (INTERZIS CATEGORIC): Nu include cuvinte generice cu frecvență ridicată care poluează căutarea: 'contract', 'document', 'factură', 'firmă', 'societate', 'verificare', 'fraudă', 'preț', 'marfă'.
+5. FORMAT CHEI: Fiecare cheie trebuie să aibă între 1 și 4 cuvinte, extrasă VERBATIM (cuvânt cu cuvânt) din textul întrebării.
+
+═══ REGULI LINGVISTICE ȘI FORMALE ═══
+- Păstrează limba originală a întrebării (ROMÂNĂ). Este STRICT INTERZISĂ traducerea termenilor în limba engleză.
+- Extrage cheile EXCLUSIV din întrebarea utilizatorului, NICIODATĂ din exemple.
+- Răspunde EXCLUSIV cu un bloc JSON valid conform schemei.
+
+═══ EXEMPLU STRUCTURAL (DATE DEMONSTRATIVE GENERICE) ═══
+Întrebare: 'Verifică dacă tranzacția TRX-909 de 250.000 EUR către Compania Alpha a fost autorizată de Popescu Ion și ce clauze din Anexa 3 au fost încălcate.'
+Răspuns JSON:
+{{"targets": [{{"id": 1, "title": "Verificare autorizare tranzacție TRX-909 de 250.000 EUR", "keys": ["TRX-909", "250.000 EUR", "Compania Alpha", "Popescu Ion"]}}, {{"id": 2, "title": "Identificare clauze încălcate din Anexa 3", "keys": ["Anexa 3", "clauze încălcate"]}}]}}
+
+═══ SCHEMĂ JSON OBLIGATORIE ═══
+{{"targets": [{{"id": 1, "title": "...", "keys": ["...", "..."]}}]}}
+
+═══ ÎNTREBARE UTILIZATOR PENTRU ANALIZĂ ═══
+{self.user_question}"""
         try:
             res = UnifiedLLMClient.chat_step(
                 messages=[
@@ -1766,13 +1782,13 @@ MAI CAUT ÎN CONTINUARE: (ce a rămas de lămurit din obiectiv, sau scrie exact 
         safe_raw_evidence = raw_evidence[:max_prompt_chars]
 
         compaction_prompt = (
-            f"Ești un Forensic Memory Compactor. Condensează următoarele fragmente de probe din dosar pentru obiectivul '{target_title}'.\n\n"
+            f"Ești un Compactor de Memorie Judiciară. Condensează următoarele fragmente de probe din dosar pentru obiectivul '{target_title}'.\n\n"
             "REGULI STRICTE DE CONDENSARE:\n"
             f"0. Păstrează cu PRIORITATE ABSOLUTĂ orice probe, cifre sau declarații direct relevante pentru obiectivul: '{target_title}'.\n"
-            "1. Păstrează OBLIGATORIU toate cifrele, cantitățile și unitățile de măsură (ex: 450 tone, 388,50 tone, 61,50 tone).\n"
-            "2. Păstrează OBLIGATORIU toate codurile de documente și numerele (AVIZ, FACT, BORDEROU, tichete cântar, serii).\n"
-            "3. Păstrează OBLIGATORIU valorile monetare, prețurile unitare și TVA (ex: 1.100 RON/to, 495.000 RON).\n"
-            "4. Păstrează OBLIGATORIU declarațiile și citatele directe din discuții/conversații (ex: ce a spus șoferul Vasile, ce a instruit Mihai Stanciu despre custodie).\n"
+            "1. Păstrează OBLIGATORIU toate cifrele, cantitățile și unitățile de măsură (ex: tone, bucăți, procente, diferențe).\n"
+            "2. Păstrează OBLIGATORIU toate codurile de documente și numerele (avize, facturi, borderouri, tichete cântar, serii).\n"
+            "3. Păstrează OBLIGATORIU valorile monetare, prețurile unitare și taxele aplicate.\n"
+            "4. Păstrează OBLIGATORIU declarațiile și citatele directe din discuții/conversații (ce au afirmat persoanele implicate sau ce instrucțiuni operative s-au transmis).\n"
             "5. Păstrează etichetele de referință [REF x] pentru fiecare probă.\n"
             "6. DIRECTIVĂ STRICTĂ: Răspunde DIRECT și EXCLUSIV cu faptele condensate în limba ROMÂNĂ. Este STRICT INTERZIS să generezi 'Thinking Process:', monologuri în engleză sau comentarii meta.\n\n"
             f"DOVEZI BRUTE:\n{safe_raw_evidence}"
@@ -1780,7 +1796,7 @@ MAI CAUT ÎN CONTINUARE: (ce a rămas de lămurit din obiectiv, sau scrie exact 
         try:
             res = UnifiedLLMClient.chat_step(
                 messages=[
-                    {"role": "system", "content": "You are a Forensic Memory Compactor. Output high-density factual summary in ROMANIAN. Preserve all numbers, quotes, and citations. Do NOT output thinking process or english text."},
+                    {"role": "system", "content": "Ești un Compactor de Memorie Judiciară. Generează un rezumat factual de înaltă densitate exclusiv în limba ROMÂNĂ. Păstrează toate cifrele, citatele și referințele. Nu include procese de gândire sau text în engleză."},
                     {"role": "user", "content": compaction_prompt}
                 ],
                 model=self.active_model,
@@ -2001,7 +2017,7 @@ MAI CAUT ÎN CONTINUARE: (ce a rămas de lămurit din obiectiv, sau scrie exact 
 
         step_res = UnifiedLLMClient.chat_step(
             messages=[
-                {"role": "system", "content": "You are a Forensic Evidence Auditor. Answer strictly using the provided citations in ROMANIAN. Be concise, rigorous, and direct (2-4 sentences). Do NOT output thinking process or english text."},
+                {"role": "system", "content": "Ești un Auditor Investigativ de Elită. Răspunde strict pe baza probelor furnizate, exclusiv în limba ROMÂNĂ. Fii concis, riguros și direct (2-4 fraze). Nu include procese de gândire sau text în engleză."},
                 {"role": "user", "content": prompt}
             ],
             model=self.active_model,
@@ -2042,7 +2058,7 @@ MAI CAUT ÎN CONTINUARE: (ce a rămas de lămurit din obiectiv, sau scrie exact 
 
         final_res = UnifiedLLMClient.chat_step(
             messages=[
-                {"role": "system", "content": "You are a Master Forensic Auditor. Synthesize verified evidence into a professional forensic report in ROMANIAN. Output starts immediately with [FACTS]."},
+                {"role": "system", "content": "Ești un Maestru Auditor Criminalist. Sintetizează probele verificate într-un raport criminalistic profesional exclusiv în limba ROMÂNĂ. Începe răspunsul direct cu secțiunea [FACTS]."},
                 {"role": "user", "content": final_prompt}
             ],
             model=self.active_model,
