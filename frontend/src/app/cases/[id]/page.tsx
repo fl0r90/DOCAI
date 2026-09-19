@@ -119,14 +119,14 @@ export default function CaseDetail() {
     
     let currentSection = "INTRO";
     content.split('\n').forEach(line => {
-      // Regex permisiv ce acceptă markdown headings (#, ##, ###), bold (**), paranteze și două puncte
-      const match = line.match(/^\s*(?:#{1,6}\s*)?(\*\*)?\[(FACTS|ANALYSIS|CONCLUSION|MISSING EVIDENCE|CONFIDENCE)\](\*\*)?:?/i);
+      // Regex permisiv ce acceptă markdown headings (#, ##, ###), bold (**), paranteze, două puncte și text inline
+      const match = line.match(/^\s*(?:#{1,6}\s*)?(\*\*)?\[?(FACTS|ANALYSIS|CONCLUSION|MISSING EVIDENCE|CONFIDENCE)\]?(\*\*)?:?\s*(.*)/i);
       if (match) {
         currentSection = match[2].toUpperCase();
-        sections[currentSection] = "";
+        sections[currentSection] = match[4] ? match[4].trim() : "";
       } else if (currentSection) {
         if (!sections[currentSection]) sections[currentSection] = "";
-        sections[currentSection] += line + '\n';
+        sections[currentSection] += (sections[currentSection] ? '\n' : '') + line;
       }
     });
 
@@ -135,8 +135,43 @@ export default function CaseDetail() {
       return renderContentWithCitations(content, citations);
     }
 
+    // Extragere robustă a nivelului de încredere (HIGH, MEDIUM, LOW)
+    const rawConfidence = (
+      sections['CONFIDENCE'] || 
+      (content.match(/CONFIDENCE[:\s]+(HIGH|MEDIUM|LOW)/i)?.[1]) || 
+      ''
+    ).toUpperCase().trim();
+    const isHigh = rawConfidence.includes('HIGH');
+    const isMedium = rawConfidence.includes('MEDIUM');
+    const isLow = rawConfidence.includes('LOW');
+    const hasConfidence = isHigh || isMedium || isLow;
+
     return (
       <div className="space-y-4 forensic-report text-slate-800 dark:text-slate-200">
+        {/* Antet Raport cu Badge de Încredere (Varianta A) */}
+        <div className="flex items-center justify-between border-b border-slate-200 dark:border-white/10 pb-2.5 mb-2">
+          <div className="flex items-center gap-2">
+            <Shield className="w-4 h-4 text-blue-500" />
+            <span className="text-[11px] font-black uppercase tracking-wider text-slate-700 dark:text-slate-300">
+              Raport Forensic Audit
+            </span>
+          </div>
+          {hasConfidence && (
+            <div className={`flex items-center gap-1.5 px-3 py-1 rounded-full border text-[10px] font-black uppercase tracking-widest shadow-sm ${
+              isHigh ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30' :
+              isMedium ? 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/30' :
+              'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/30'
+            }`}>
+              <span className={`w-2 h-2 rounded-full ${
+                isHigh ? 'bg-emerald-500 animate-pulse' :
+                isMedium ? 'bg-amber-500' :
+                'bg-red-500'
+              }`} />
+              Încredere: {isHigh ? 'Ridicată (HIGH)' : isMedium ? 'Medie (MEDIUM)' : 'Scăzută (LOW)'}
+            </div>
+          )}
+        </div>
+
         {sections['INTRO'] && sections['INTRO'].trim() && (
           <div className="text-xs font-semibold text-slate-600 dark:text-slate-400 border-b border-slate-200 dark:border-white/10 pb-3 mb-2 whitespace-pre-wrap">
             {renderContentWithCitations(sections['INTRO'].trim(), citations)}
@@ -178,18 +213,6 @@ export default function CaseDetail() {
             </h4>
             <div className="text-xs font-medium text-amber-700 dark:text-amber-500/80 leading-relaxed whitespace-pre-wrap">
               {sections['MISSING EVIDENCE'].trim()}
-            </div>
-          </div>
-        )}
-
-        {sections['CONFIDENCE'] && (
-          <div className="flex justify-end">
-            <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full border text-[10px] font-black uppercase tracking-widest shadow-sm ${
-              sections['CONFIDENCE'].includes('HIGH') ? 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20' :
-              sections['CONFIDENCE'].includes('MEDIUM') ? 'bg-amber-500/10 text-amber-600 border-amber-500/20' :
-              'bg-red-500/10 text-red-600 border-red-500/20'
-            }`}>
-              <Shield className="w-3 h-3" /> Nivel Încredere: {sections['CONFIDENCE'].trim()}
             </div>
           </div>
         )}
