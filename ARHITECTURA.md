@@ -451,9 +451,13 @@
     - *6. Header Confidence Level Badge (`page.tsx`):*
         - Parserul extrage robust nivelul de certitudine (`[CONFIDENCE]: HIGH/MEDIUM/LOW`) indiferent de poziționarea pe rând.
         - Afișează un badge proeminent în antetul raportului (verde smarald pulsant pentru HIGH, galben pentru MEDIUM, roșu pentru LOW), oferind inspectorului vizibilitate imediată asupra gradului de încredere probatorie.
+    - *7. Enforced JSON Format & Romanian-Native Investigation Planning (`llm_client.py`, `chat_service.py`):*
+        - În `UnifiedLLMClient.chat_step()`, s-a adăugat suport universal pentru parametrul `format: Optional[Union[str, dict]] = None`. Pentru Ollama `/api/chat`, trimite direct directiva nativă `format: "json"` (care activează gramatici GBNF forțate în engine-ul de inferență). Pentru LM Studio, vLLM și Ollama OpenAI-compatibil, injectează `response_format: {"type": "json_object"}`.
+        - În `AgenticInvestigator._generate_investigation_plan()`, prompt-ul de decompunere a fost rescris 100% în limba română cu regulă strictă de păstrare a termenilor din întrebare (`18 camioane`, bănci, contracte).
+        - S-a eliminat complet riscul de „derapaj în engleză” (unde Qwen traducea interogarea în engleză și genera chei de căutare inexistente în OCR precum `18 trucks`), iar planul de investigație este generat instantaneu și parsat cu succes la pasul 1.
 
 ---
-*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 46 (Dynamic Neural Reranker Control), Etapa 47 (Anti-Runaway Reasoning Sanitization) și Etapa 48 (Online Model Ingestion & Continuous SSE Stream Resilience).*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 46 (Dynamic Neural Reranker Control), Etapa 47 (Anti-Runaway Reasoning Sanitization) și Etapa 48 (Online Model Ingestion, Keep-Alive SSE & Enforced JSON Investigation Planning).*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:

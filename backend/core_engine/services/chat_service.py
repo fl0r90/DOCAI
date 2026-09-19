@@ -1582,25 +1582,27 @@ MAI CAUT ÎN CONTINUARE: (ce a rămas de lămurit din obiectiv, sau scrie exact 
     def _generate_investigation_plan(self) -> List[Dict[str, Any]]:
         """Decompune semantic întrebarea utilizatorului în 1-4 obiective atomice folosind LLM cu fallback determinist."""
         plan_prompt = (
-            "You are a Senior Forensic Data Auditor. Decompose the user inquiry into 1 to 4 distinct atomic verification targets.\n"
-            "For each target, identify:\n"
-            "- id: sequential integer (1, 2, ...)\n"
-            "- title: short description of what must be verified\n"
-            "- keys: 1 to 3 specific exact identifiers (document/invoice codes, person names, technical terms, channels like WhatsApp)\n\n"
-            "Output ONLY valid JSON matching this schema:\n"
+            "Ești un Senior Forensic Data Auditor. Descompune investigația utilizatorului în 1 până la 4 obiective atomice de verificare distincte.\n"
+            "Pentru fiecare obiectiv, identifică:\n"
+            "- id: număr întreg secvențial (1, 2, ...)\n"
+            "- title: descriere scurtă a ceea ce trebuie verificat (în limba română)\n"
+            "- keys: 1 până la 3 termeni sau identificatori EXACȚI din întrebare (nume de persoane, firme, bănci, cantități, sume, coduri sau canale operative, ex: '18 camioane', 'Banca Transilvania').\n"
+            "REGULĂ CRUCIALĂ: Păstrează toți termenii și cheile de căutare EXACT în limba română din întrebare (NU traduce în engleză!).\n\n"
+            "Răspunde STRICT cu un obiect JSON valid conform acestei scheme:\n"
             "{\"targets\": [{\"id\": 1, \"title\": \"...\", \"keys\": [\"...\"]}]}\n\n"
-            f"USER INQUIRY: {self.user_question}"
+            f"ÎNTREBARE UTILIZATOR: {self.user_question}"
         )
         try:
             res = UnifiedLLMClient.chat_step(
                 messages=[
-                    {"role": "system", "content": "You are a Forensic Planning Engine. Output strictly valid JSON."},
+                    {"role": "system", "content": "Ești un Forensic Planning Engine. Răspunde strict în format JSON conform cerințelor."},
                     {"role": "user", "content": plan_prompt}
                 ],
                 model=self.active_model,
                 temperature=0.0,
                 num_ctx=self.processing_ctx,
-                stop_check=self._stop_check
+                stop_check=self._stop_check,
+                format="json"
             )
             content = res.get("content", "").strip()
             json_match = re.search(r'\{.*\}', content, re.DOTALL)

@@ -410,7 +410,8 @@ class UnifiedLLMClient:
                                  messages: List[Dict[str, Any]], tools: List[Dict[str, Any]] = None,
                                  temperature: float = 0.0, num_ctx: int = 32768,
                                  stop_check: Optional[Callable[[], bool]] = None,
-                                 fallback_reason: Optional[str] = None) -> Dict[str, Any]:
+                                 fallback_reason: Optional[str] = None,
+                                 format: Optional[Union[str, dict]] = None) -> Dict[str, Any]:
         """Pas de chat prin endpoint-ul Ollama compatibil OpenAI (/v1/chat/completions).
 
         Alternativă la /api/chat pentru cazurile în care parserul nativ respinge
@@ -452,6 +453,11 @@ class UnifiedLLMClient:
         if tools:
             payload["tools"] = cls._to_openai_tools(tools)
             payload["tool_choice"] = "auto"
+        if format:
+            if format == "json":
+                payload["response_format"] = {"type": "json_object"}
+            elif isinstance(format, dict):
+                payload["response_format"] = format
 
         print(f"[OLLAMA_OPENAI] POST {url} | model={active_model}, messages={len(openai_messages)}, tools={bool(tools)}")
         if fallback_reason:
@@ -505,7 +511,8 @@ class UnifiedLLMClient:
     @classmethod
     def chat_step(cls, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]] = None,
                   model: Optional[str] = None, temperature: float = 0.0, num_ctx: int = 32768,
-                  stop_check: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
+                  stop_check: Optional[Callable[[], bool]] = None,
+                  format: Optional[Union[str, dict]] = None) -> Dict[str, Any]:
         """Efectuează un pas sincron de chat/raționament cu suport complet pentru tool-use.
 
         `stop_check`: opțional, apelabil fără argumente; dacă returnează True în timpul
@@ -563,6 +570,11 @@ class UnifiedLLMClient:
                 "temperature": float(temperature),
                 "stream": False,  # LM Studio / OpenAI-compatible endpoints expect stream=false for sync calls
             }
+            if format:
+                if format == "json":
+                    payload["response_format"] = {"type": "json_object"}
+                elif isinstance(format, dict):
+                    payload["response_format"] = format
             # LM Studio may not support tools; omit if empty or invalid
             if tools:
                 try:
@@ -632,6 +644,11 @@ class UnifiedLLMClient:
             }
             if tools:
                 payload["tools"] = cls._to_openai_tools(tools)
+            if format:
+                if format == "json":
+                    payload["response_format"] = {"type": "json_object"}
+                elif isinstance(format, dict):
+                    payload["response_format"] = format
             resp = requests.post(url, json=payload, headers=headers, timeout=300)
             resp.raise_for_status()
             data = resp.json()
@@ -650,6 +667,7 @@ class UnifiedLLMClient:
                 return cls._chat_step_ollama_openai(
                     ollama_url=ollama_url, active_model=active_model, messages=messages,
                     tools=tools, temperature=temperature, num_ctx=num_ctx, stop_check=stop_check,
+                    format=format,
                 )
 
             url = f"{ollama_url}/api/chat"
@@ -675,6 +693,8 @@ class UnifiedLLMClient:
                     "num_ctx": num_ctx
                 }
             }
+            if format:
+                payload["format"] = format
             if tools:
                 payload["tools"] = tools
                 payload["tool_choice"] = "auto"
@@ -717,6 +737,7 @@ class UnifiedLLMClient:
                         ollama_url=ollama_url, active_model=active_model, messages=messages,
                         tools=tools, temperature=temperature, num_ctx=num_ctx, stop_check=stop_check,
                         fallback_reason=f"native /api/chat HTTP 400: {err_body}",
+                        format=format,
                     )
                 resp.raise_for_status()
             except requests.exceptions.RequestException as rex:
