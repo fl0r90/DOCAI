@@ -65,6 +65,13 @@ export default function CaseDetail() {
     isOpen: boolean;
     citations: any[];
   }>({ isOpen: false, citations: [] });
+  const [activeTraceDrawer, setActiveTraceDrawer] = useState<{
+    isOpen: boolean;
+    title: string;
+    logs: any[];
+    thought: string | null;
+    activeTab: 'trace' | 'thought';
+  }>({ isOpen: false, title: '', logs: [], thought: null, activeTab: 'trace' });
   const [docContentData, setDocContentData] = useState<{
     docId: number | string | null;
     rawText: string;
@@ -1184,36 +1191,60 @@ export default function CaseDetail() {
         <div className="flex-1 flex flex-col bg-slate-50 dark:bg-slate-950 transition-colors duration-300">
           <div className="flex-1 overflow-y-auto p-8 space-y-6 custom-scrollbar">
             {messages.map((msg, idx) => {
-              let msgThought = msg.thought;
-              if (!msgThought && msg.sql) {
+              let msgThought: string | null = msg.thought || null;
+              let traceLogs: any[] = [];
+              if (msg.sql) {
                 try {
-                  const logs = JSON.parse(msg.sql);
-                  const thoughtLog = logs.find((l: any) => l.type === 'observation' && l.data && l.data.startsWith('Thinking:'));
-                  if (thoughtLog) {
-                    msgThought = thoughtLog.data.replace('Thinking:', '').trim();
+                  if (msg.sql.trim().startsWith('[') && msg.sql.trim().endsWith(']')) {
+                    traceLogs = JSON.parse(msg.sql);
+                  } else {
+                    traceLogs = msg.sql.split('\n').filter(Boolean).map((line: string) => ({ type: 'status', data: line }));
                   }
-                } catch (e) {}
+                  if (!msgThought) {
+                    const thoughtLog = traceLogs.find((l: any) => l.type === 'observation' && l.data && l.data.startsWith('Thinking:'));
+                    if (thoughtLog) {
+                      msgThought = thoughtLog.data.replace('Thinking:', '').trim();
+                    }
+                  }
+                } catch (e) {
+                  traceLogs = [{ type: 'status', data: msg.sql }];
+                }
               }
+              const hasTraceOrThought = msg.role === 'assistant' && (traceLogs.length > 0 || !!msgThought);
+              const toolCallsCount = traceLogs.filter((l: any) => l.type === 'tool_call').length;
+
               return (
                 <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} group/msg relative`}>
                   <div className={`max-w-[85%] rounded-3xl p-5 ${msg.role === 'user' ? 'bg-blue-600 text-white shadow-xl shadow-blue-500/20' : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/5 shadow-md dark:shadow-xl'} relative`}>
                     <button onClick={() => handleDeleteMessage(msg.id)} className="absolute -top-2 -right-2 p-1.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-white/10 rounded-full opacity-0 group-hover/msg:opacity-100 transition-opacity hover:text-red-500 shadow-xl"><Trash2 className="w-3 h-3" /></button>
-                    <p className={`text-[10px] font-black uppercase tracking-widest mb-2 ${msg.role === 'user' ? 'text-blue-100' : 'text-slate-400 dark:text-slate-500'}`}>{msg.role === 'user' ? (user?.username || 'Investigator') : activeModel}</p>
                     
-                    {/* Thought Process (pentru mesaje asistent) */}
-                    {msgThought && (
-                      <details className="mb-4 bg-slate-50 dark:bg-slate-950/50 rounded-xl border border-slate-100 dark:border-white/5 overflow-hidden group/thought">
-                        <summary className="px-4 py-2 text-[10px] font-bold text-slate-500 cursor-pointer hover:text-blue-500 flex items-center gap-2 list-none uppercase tracking-tighter">
-                          <Brain className="w-3 h-3" /> Raționament Intern <ChevronDown className="w-3 h-3 group-open/thought:rotate-180 transition-transform" />
-                        </summary>
-                        <div className="px-4 pb-4 text-[11px] text-slate-500 dark:text-slate-400 font-medium italic leading-relaxed whitespace-pre-wrap border-t border-slate-100 dark:border-white/5 pt-3">
-                          {msgThought}
-                        </div>
-                      </details>
-                    )}
-
-                  {/* Jurnal Investigare (dacă există logs în msg.sql) */}
-                  {msg.role === 'assistant' && msg.sql && renderTraceLogs(msg.sql)}
+                    <div className="flex items-center justify-between mb-3 gap-2">
+                      <p className={`text-[10px] font-black uppercase tracking-widest ${msg.role === 'user' ? 'text-blue-100' : 'text-slate-400 dark:text-slate-500'}`}>
+                        {msg.role === 'user' ? (user?.username || 'Investigator') : activeModel}
+                      </p>
+                      {hasTraceOrThought && (
+                        <button
+                          type="button"
+                          onClick={() => setActiveTraceDrawer({
+                            isOpen: true,
+                            title: `Consolă LLM • Răspuns #${idx + 1}`,
+                            logs: traceLogs,
+                            thought: msgThought,
+                            activeTab: traceLogs.length > 0 ? 'trace' : 'thought'
+                          })}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800/80 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 text-[10px] font-bold transition-all cursor-pointer shadow-2xs hover:scale-102"
+                          title="Deschide sertarul cu execuția LLM și raționamentul intern"
+                        >
+                          <Brain className="w-3 h-3 text-blue-500" />
+                          <span>Consolă AI</span>
+                          {toolCallsCount > 0 && (
+                            <span className="px-1.5 py-0.2 rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400 text-[9px] font-black">
+                              {toolCallsCount} tools
+                            </span>
+                          )}
+                        </button>
+                      )}
+                    </div>
 
                   <p className={`text-sm font-medium leading-relaxed whitespace-pre-wrap ${msg.role === 'user' ? 'text-white' : 'text-slate-800 dark:text-slate-200'}`}>
                     {msg.role === 'user' ? msg.content : renderForensicContent(msg.content, msg.citations)}
@@ -1329,80 +1360,53 @@ export default function CaseDetail() {
                   <div className="absolute top-0 left-0 w-full h-1 bg-blue-500/10 overflow-hidden">
                      <div className="h-full bg-blue-500 animate-progress" style={{ width: '40%' }}></div>
                   </div>
-                  <div className="flex justify-between items-start mb-3">
+                  <div className="flex justify-between items-center mb-3 gap-2 flex-wrap">
                     <p className="text-[10px] font-black text-blue-500 uppercase tracking-widest flex items-center gap-2">
-                      <Loader2 className="w-3 h-3 animate-spin" /> Investigare în curs...
+                      <Loader2 className="w-3 h-3 animate-spin" /> {activeModel} (Investigație în timp real...)
                     </p>
-                    <button 
-                      onClick={async () => {
-                        try {
-                          await api.post(`/cases/${caseId}/chat/stop`);
-                        } catch (e) {
-                          console.error("Failed to stop chat:", e);
-                        }
-                        setIsChatLoading(false);
-                        setStreamingMessage(null);
-                        setBackgroundChatStatus(null);
-                        api.get(`/cases/${caseId}/chat`).then(cRes => setMessages(cRes.data));
-                      }}
-                      className="px-2 py-1 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 rounded-lg text-[9px] font-black text-red-500 uppercase transition-all flex items-center gap-1"
-                    >
-                      <Square className="w-2 h-2 fill-current" /> Stop
-                    </button>
+                    <div className="flex items-center gap-2">
+                      {((streamingMessage.traceLogs && streamingMessage.traceLogs.length > 0) || streamingMessage.thought) && (
+                        <button
+                          type="button"
+                          onClick={() => setActiveTraceDrawer({
+                            isOpen: true,
+                            title: 'Consolă Live • Investigație în Curs',
+                            logs: streamingMessage.traceLogs || [],
+                            thought: streamingMessage.thought || null,
+                            activeTab: (streamingMessage.traceLogs && streamingMessage.traceLogs.length > 0) ? 'trace' : 'thought'
+                          })}
+                          className="px-2.5 py-1 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/20 rounded-lg text-[10px] font-black text-blue-600 dark:text-blue-400 uppercase tracking-wider transition-all flex items-center gap-1.5 cursor-pointer shadow-2xs hover:scale-102"
+                        >
+                          <Brain className="w-3.5 h-3.5 text-blue-500 animate-pulse" />
+                          <span>Consolă Live ({streamingMessage.traceLogs?.filter((l: any) => l.type === 'tool_call').length || 0} tools)</span>
+                        </button>
+                      )}
+                      <button 
+                        onClick={async () => {
+                          try {
+                            await api.post(`/cases/${caseId}/chat/stop`);
+                          } catch (e) {
+                            console.error("Failed to stop chat:", e);
+                          }
+                          setIsChatLoading(false);
+                          setStreamingMessage(null);
+                          setBackgroundChatStatus(null);
+                          api.get(`/cases/${caseId}/chat`).then(cRes => setMessages(cRes.data));
+                        }}
+                        className="px-2 py-1 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 rounded-lg text-[9px] font-black text-red-500 uppercase transition-all flex items-center gap-1 cursor-pointer"
+                      >
+                        <Square className="w-2 h-2 fill-current" /> Stop
+                      </button>
+                    </div>
                   </div>
-                  
-                  {/* Jurnal Investigare Live */}
-                  {streamingMessage.traceLogs && streamingMessage.traceLogs.length > 0 && (
-                    <details open className="mb-4 bg-slate-100/50 dark:bg-slate-950/50 rounded-xl border border-slate-200 dark:border-white/5 overflow-hidden group/trace">
-                      <summary className="px-4 py-2.5 text-[10px] font-bold text-slate-500 dark:text-slate-400 cursor-pointer hover:text-blue-500 dark:hover:text-blue-400 flex items-center gap-2 list-none uppercase tracking-tighter">
-                        <ScrollText className="w-3.5 h-3.5" /> Jurnal Investigare Live ({streamingMessage.traceLogs.filter(l => l.type === 'tool_call').length} Tool Calls) <ChevronDown className="w-3 h-3 group-open/trace:rotate-180 transition-transform" />
-                      </summary>
-                      <div className="px-4 pb-4 text-[11px] text-slate-600 dark:text-slate-400 font-medium leading-relaxed border-t border-slate-200 dark:border-white/5 pt-3 space-y-3">
-                        {streamingMessage.traceLogs.map((log: any, i: number) => {
-                          if (log.type === 'status' || log.type === 'step') {
-                            return (
-                              <div key={i} className="flex items-center gap-2 text-[10px] text-slate-400 dark:text-slate-500 font-bold uppercase tracking-tight animate-pulse">
-                                <div className="w-1.5 h-1.5 rounded-full bg-blue-500/50 animate-pulse" /> {log.data}
-                              </div>
-                            );
-                          }
-                          if (log.type === 'tool_call') {
-                            return (
-                              <div key={i} className="p-3 bg-blue-500/5 dark:bg-blue-500/10 border border-blue-500/10 dark:border-blue-500/20 rounded-xl">
-                                <div className="text-[9px] font-black text-blue-600 dark:text-blue-400 uppercase mb-2 flex items-center gap-1">
-                                  <Search className="w-3 h-3" /> Executare Tool: {log.tool}
-                                </div>
-                                <pre className="text-[10px] font-mono text-slate-700 dark:text-slate-300 whitespace-pre-wrap break-all bg-slate-200/50 dark:bg-slate-950/80 p-2.5 rounded-lg border border-slate-300/30 dark:border-white/5 overflow-x-auto">
-                                  {typeof log.params === 'object' ? JSON.stringify(log.params, null, 2) : log.params}
-                                </pre>
-                              </div>
-                            );
-                          }
-                          if (log.type === 'observation') {
-                            return (
-                              <div key={i} className="p-3 bg-emerald-500/5 dark:bg-emerald-500/10 border border-emerald-500/10 dark:border-emerald-500/20 rounded-xl">
-                                <div className="text-[9px] font-black text-emerald-600 dark:text-emerald-500 uppercase mb-2 flex items-center gap-1">
-                                  <FileText className="w-3 h-3" /> Rezultat / Observație
-                                </div>
-                                <div className="text-[10px] text-slate-600 dark:text-slate-300 max-h-60 overflow-y-auto whitespace-pre-wrap font-mono bg-slate-200/50 dark:bg-slate-950/80 p-2.5 rounded-lg border border-slate-300/30 dark:border-white/5 custom-scrollbar">
-                                  {log.data}
-                                </div>
-                              </div>
-                            );
-                          }
-                          return null;
-                        })}
-                      </div>
-                    </details>
-                  )}
 
-                  {/* Gândirea Live */}
-                  {streamingMessage.thought && (
-                    <div className="mb-4 p-4 bg-slate-50 dark:bg-slate-950/50 rounded-xl border border-slate-100 dark:border-white/5">
-                      <p className="text-[9px] font-black text-slate-400 uppercase mb-2 flex items-center gap-1"><Brain className="w-3 h-3" /> Raționament...</p>
-                      <p className="text-[11px] text-slate-500 dark:text-slate-400 font-medium italic leading-relaxed whitespace-pre-wrap animate-pulse">
-                        {streamingMessage.thought}
-                      </p>
+                  {/* Indicator de activitate live (curat, o singură linie) când nu a apărut încă raportul */}
+                  {!streamingMessage.content && (
+                    <div className="flex items-center gap-2.5 py-3 text-xs font-semibold text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-950/60 px-4 rounded-xl border border-slate-200/60 dark:border-white/5 my-2">
+                      <div className="w-2 h-2 rounded-full bg-blue-500 animate-ping" />
+                      <span className="truncate">
+                        {streamingMessage.traceLogs?.slice(-1)[0]?.data || streamingMessage.thought?.slice(0, 90) || "Agentul analizează probele și efectuează verificări..."}
+                      </span>
                     </div>
                   )}
 
@@ -1410,14 +1414,6 @@ export default function CaseDetail() {
                   {streamingMessage.content && (
                     <div className="text-sm font-medium leading-relaxed whitespace-pre-wrap text-slate-800 dark:text-slate-200">
                       {renderForensicContent(streamingMessage.content, streamingMessage.observations || [])}
-                    </div>
-                  )}
-                  
-                  {!streamingMessage.content && !streamingMessage.thought && (
-                    <div className="flex gap-1 items-center py-2">
-                      <div className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-bounce" style={{ animationDelay: '0s' }} />
-                      <div className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-bounce" style={{ animationDelay: '0.2s' }} />
-                      <div className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-bounce" style={{ animationDelay: '0.4s' }} />
                     </div>
                   )}
                 </div>
@@ -1519,6 +1515,135 @@ export default function CaseDetail() {
                     </div>
                   </div>
                 ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* TRACE & REASONING DRAWER (CONSOLĂ OPERATIVĂ LLM) */}
+        {activeTraceDrawer.isOpen && (
+          <div className="fixed inset-0 z-[55] flex justify-end">
+            {/* Backdrop */}
+            <div 
+              className="absolute inset-0 bg-black/40 backdrop-blur-xs transition-opacity animate-in fade-in duration-200"
+              onClick={() => setActiveTraceDrawer(prev => ({ ...prev, isOpen: false }))}
+            />
+            {/* Drawer Content */}
+            <div className="relative top-20 bottom-0 w-[580px] max-w-[92vw] bg-white dark:bg-slate-900 border-l border-slate-200 dark:border-white/10 flex flex-col shadow-2xl z-10 animate-in slide-in-from-right duration-250">
+              {/* Drawer Header */}
+              <div className="p-4 px-5 border-b border-slate-200 dark:border-white/10 flex items-center justify-between bg-slate-50 dark:bg-slate-950 shrink-0">
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-xl bg-purple-500/10 text-purple-600 dark:text-purple-400 flex items-center justify-center">
+                    <Brain className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-black text-slate-900 dark:text-white flex items-center gap-2">
+                      Consolă Operativă LLM
+                    </h3>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate max-w-[320px]">
+                      {activeTraceDrawer.title || 'Jurnal de execuție și raționament intern'}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveTraceDrawer(prev => ({ ...prev, isOpen: false }))}
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-white hover:bg-slate-200 dark:hover:bg-slate-800 transition-all cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Drawer Tabs Bar */}
+              <div className="flex items-center gap-2 px-5 pt-3 border-b border-slate-200 dark:border-white/10 bg-slate-50/50 dark:bg-slate-950/50 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setActiveTraceDrawer(prev => ({ ...prev, activeTab: 'trace' }))}
+                  className={`flex items-center gap-1.5 px-3 py-2 text-xs font-bold border-b-2 transition-all cursor-pointer ${
+                    activeTraceDrawer.activeTab === 'trace'
+                      ? 'border-blue-500 text-blue-600 dark:text-blue-400'
+                      : 'border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
+                  }`}
+                >
+                  <ScrollText className="w-3.5 h-3.5" />
+                  <span>Jurnal Execuție ({activeTraceDrawer.logs.length})</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveTraceDrawer(prev => ({ ...prev, activeTab: 'thought' }))}
+                  className={`flex items-center gap-1.5 px-3 py-2 text-xs font-bold border-b-2 transition-all cursor-pointer ${
+                    activeTraceDrawer.activeTab === 'thought'
+                      ? 'border-purple-500 text-purple-600 dark:text-purple-400'
+                      : 'border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
+                  }`}
+                >
+                  <Brain className="w-3.5 h-3.5" />
+                  <span>Raționament Intern ({activeTraceDrawer.thought ? 'Disponibil' : 'N/A'})</span>
+                </button>
+              </div>
+
+              {/* Drawer Content Body */}
+              <div className="flex-1 overflow-y-auto p-5 space-y-3 custom-scrollbar">
+                {activeTraceDrawer.activeTab === 'trace' ? (
+                  activeTraceDrawer.logs.length === 0 ? (
+                    <div className="py-12 text-center text-xs text-slate-400 italic">
+                      Niciun eveniment sau apel de tool înregistrat în acest pas.
+                    </div>
+                  ) : (
+                    activeTraceDrawer.logs.map((log: any, i: number) => {
+                      if (log.type === 'status' || log.type === 'step') {
+                        return (
+                          <div key={i} className="flex items-center gap-2.5 p-2.5 bg-slate-50 dark:bg-slate-800/40 rounded-xl text-[11px] text-slate-600 dark:text-slate-300 font-semibold border border-slate-200/60 dark:border-white/5">
+                            <div className="w-2 h-2 rounded-full bg-blue-500 shrink-0" />
+                            <span>{log.data}</span>
+                          </div>
+                        );
+                      }
+                      if (log.type === 'tool_call') {
+                        return (
+                          <div key={i} className="p-3.5 bg-blue-500/5 dark:bg-blue-500/10 border border-blue-500/20 rounded-2xl space-y-2">
+                            <div className="text-[10px] font-black text-blue-600 dark:text-blue-400 uppercase tracking-wider flex items-center gap-1.5">
+                              <Search className="w-3.5 h-3.5" /> Apel Tool: {log.tool}
+                            </div>
+                            <pre className="text-[10px] font-mono text-slate-700 dark:text-slate-300 whitespace-pre-wrap break-all bg-white dark:bg-slate-950 p-3 rounded-xl border border-slate-200 dark:border-white/5 overflow-x-auto">
+                              {typeof log.params === 'object' ? JSON.stringify(log.params, null, 2) : log.params}
+                            </pre>
+                          </div>
+                        );
+                      }
+                      if (log.type === 'observation') {
+                        return (
+                          <div key={i} className="p-3.5 bg-emerald-500/5 dark:bg-emerald-500/10 border border-emerald-500/20 rounded-2xl space-y-2">
+                            <div className="text-[10px] font-black text-emerald-600 dark:text-emerald-400 uppercase tracking-wider flex items-center gap-1.5">
+                              <FileText className="w-3.5 h-3.5" /> Rezultat Observat
+                            </div>
+                            <div className="text-[11px] text-slate-700 dark:text-slate-300 max-h-72 overflow-y-auto whitespace-pre-wrap font-mono bg-white dark:bg-slate-950 p-3 rounded-xl border border-slate-200 dark:border-white/5 custom-scrollbar leading-relaxed">
+                              {log.data}
+                            </div>
+                          </div>
+                        );
+                      }
+                      return null;
+                    })
+                  )
+                ) : (
+                  <div>
+                    {activeTraceDrawer.thought ? (
+                      <div className="p-4 bg-slate-50 dark:bg-slate-800/40 rounded-2xl border border-slate-200 dark:border-white/5 space-y-2">
+                        <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-wider text-purple-600 dark:text-purple-400">
+                          <Brain className="w-3.5 h-3.5" /> Monolog Intern al Modelului
+                        </div>
+                        <div className="text-xs font-mono italic text-slate-700 dark:text-slate-300 leading-relaxed whitespace-pre-wrap pt-2 border-t border-slate-200/60 dark:border-white/5">
+                          {activeTraceDrawer.thought}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="py-12 text-center text-xs text-slate-400 italic">
+                        Acest model a răspuns direct fără a emite jetoane de gândire internă (&lt;think&gt;).
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           </div>
