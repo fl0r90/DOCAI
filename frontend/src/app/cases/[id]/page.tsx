@@ -445,7 +445,7 @@ export default function CaseDetail() {
       setActiveModel(mRes.data.active_model);
 
       // Verificăm progresul pentru documentele active (toate stările de procesare)
-      const activeStatuses = ['PROCESSING', 'QUEUED', 'AI_EXTRACTING', 'DOCLING_OCR', 'RAG_INGESTING', 'AI_PENDING'];
+      const activeStatuses = ['PROCESSING', 'QUEUED', 'AI_EXTRACTING', 'DOCLING_OCR', 'RAG_INGESTING', 'AI_PENDING', 'AI_AUDITING'];
       dRes.data.forEach((doc: any) => {
         if (activeStatuses.includes(doc.status)) {
           fetchProgress(doc.id);
@@ -1084,6 +1084,7 @@ export default function CaseDetail() {
                         doc.status === 'PARTIAL_COMPLETED' ? 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20' :
                         doc.status === 'FAILED' ? 'bg-red-500/10 text-red-600 dark:text-red-400 border border-red-500/20' :
                         doc.status === 'PAUSED' ? 'bg-orange-500/10 text-orange-600 dark:text-orange-400 border border-orange-500/20' :
+                        doc.status === 'AI_AUDITING' ? 'bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20 animate-pulse' :
                         'bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20 animate-pulse'
                       }`}>
                         {doc.status === 'COMPLETED' ? 'Complet' : 
@@ -1092,6 +1093,7 @@ export default function CaseDetail() {
                          doc.status === 'DOCLING_OCR' ? 'OCR...' :
                          doc.status === 'RAG_INGESTING' ? 'Indexare...' :
                          doc.status === 'AI_PENDING' ? 'În Coadă AI' :
+                         doc.status === 'AI_AUDITING' ? 'Audit AI (GPU)...' :
                          doc.status === 'FAILED' ? 'Eșuat' : 
                          doc.status === 'PAUSED' ? 'Pauză' :
                          'Procesare...'}
@@ -1100,10 +1102,10 @@ export default function CaseDetail() {
                   </div>
                   
                   {/* Progress Bar & ETA */}
-                  {['PROCESSING', 'QUEUED', 'AI_EXTRACTING', 'DOCLING_OCR', 'RAG_INGESTING', 'AI_PENDING', 'PAUSED'].includes(doc.status) && docProgress[doc.id] && (
+                  {['PROCESSING', 'QUEUED', 'AI_EXTRACTING', 'DOCLING_OCR', 'RAG_INGESTING', 'AI_PENDING', 'AI_AUDITING', 'PAUSED'].includes(doc.status) && docProgress[doc.id] && (
                     <div className="mb-3 px-1">
                       <div className="flex justify-between items-center mb-1">
-                        <span className="text-[9px] font-black text-blue-500 uppercase tracking-tighter">
+                        <span className={`text-[9px] font-black uppercase tracking-tighter ${doc.status === 'AI_AUDITING' ? 'text-purple-500 animate-pulse' : 'text-blue-500'}`}>
                           {docProgress[doc.id].message || `Progres: ${docProgress[doc.id].percent}%`}
                         </span>
                         <span className="text-[9px] font-black text-slate-400 uppercase tracking-tighter flex items-center gap-1">
@@ -1112,7 +1114,7 @@ export default function CaseDetail() {
                       </div>
                       <div className="w-full bg-slate-100 dark:bg-white/5 h-1.5 rounded-full overflow-hidden border border-slate-200 dark:border-white/5">
                         <div 
-                          className={`h-full transition-all duration-500 ease-out ${doc.status === 'PAUSED' ? 'bg-orange-500' : 'bg-blue-500'}`}
+                          className={`h-full transition-all duration-500 ease-out ${doc.status === 'PAUSED' ? 'bg-orange-500' : doc.status === 'AI_AUDITING' ? 'bg-purple-500' : 'bg-blue-500'}`}
                           style={{ width: `${docProgress[doc.id].percent}%` }}
                         />
                       </div>
@@ -1128,7 +1130,7 @@ export default function CaseDetail() {
                     </button>
 
                     {/* Pause/Resume/Stop Controls */}
-                    {['PROCESSING', 'QUEUED', 'AI_EXTRACTING', 'DOCLING_OCR', 'RAG_INGESTING', 'AI_PENDING'].includes(doc.status) && (
+                    {['PROCESSING', 'QUEUED', 'AI_EXTRACTING', 'DOCLING_OCR', 'RAG_INGESTING', 'AI_PENDING', 'AI_AUDITING'].includes(doc.status) && (
                       <>
                         <button onClick={async () => { await api.post(`/cases/documents/${doc.id}/pause`); fetchData(); }} className="text-[9px] font-black text-amber-600 dark:text-amber-500 uppercase flex items-center gap-1 hover:text-amber-400 transition-colors">
                           <Pause className="w-2.5 h-2.5" /> Pauză
