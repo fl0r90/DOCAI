@@ -411,7 +411,8 @@ class UnifiedLLMClient:
                                  temperature: float = 0.0, num_ctx: int = 32768,
                                  stop_check: Optional[Callable[[], bool]] = None,
                                  fallback_reason: Optional[str] = None,
-                                 format: Optional[Union[str, dict]] = None) -> Dict[str, Any]:
+                                 format: Optional[Union[str, dict]] = None,
+                                 max_tokens: Optional[int] = None) -> Dict[str, Any]:
         """Pas de chat prin endpoint-ul Ollama compatibil OpenAI (/v1/chat/completions).
 
         Alternativă la /api/chat pentru cazurile în care parserul nativ respinge
@@ -450,6 +451,8 @@ class UnifiedLLMClient:
         }
         if num_ctx:
             payload["options"] = {"num_ctx": num_ctx}
+        if max_tokens:
+            payload["max_tokens"] = max_tokens
         if tools:
             payload["tools"] = cls._to_openai_tools(tools)
             payload["tool_choice"] = "auto"
@@ -512,7 +515,8 @@ class UnifiedLLMClient:
     def chat_step(cls, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]] = None,
                   model: Optional[str] = None, temperature: float = 0.0, num_ctx: int = 32768,
                   stop_check: Optional[Callable[[], bool]] = None,
-                  format: Optional[Union[str, dict]] = None) -> Dict[str, Any]:
+                  format: Optional[Union[str, dict]] = None,
+                  max_tokens: Optional[int] = None) -> Dict[str, Any]:
         """Efectuează un pas sincron de chat/raționament cu suport complet pentru tool-use.
 
         `stop_check`: opțional, apelabil fără argumente; dacă returnează True în timpul
@@ -570,6 +574,8 @@ class UnifiedLLMClient:
                 "temperature": float(temperature),
                 "stream": False,  # LM Studio / OpenAI-compatible endpoints expect stream=false for sync calls
             }
+            if max_tokens:
+                payload["max_tokens"] = max_tokens
             if format:
                 if format == "json":
                     payload["response_format"] = {"type": "json_object"}
@@ -642,6 +648,8 @@ class UnifiedLLMClient:
                 "messages": cls._to_openai_messages(messages),
                 "temperature": temperature,
             }
+            if max_tokens:
+                payload["max_tokens"] = max_tokens
             if tools:
                 payload["tools"] = cls._to_openai_tools(tools)
             if format:
@@ -667,7 +675,7 @@ class UnifiedLLMClient:
                 return cls._chat_step_ollama_openai(
                     ollama_url=ollama_url, active_model=active_model, messages=messages,
                     tools=tools, temperature=temperature, num_ctx=num_ctx, stop_check=stop_check,
-                    format=format,
+                    format=format, max_tokens=max_tokens,
                 )
 
             url = f"{ollama_url}/api/chat"
@@ -683,15 +691,19 @@ class UnifiedLLMClient:
                         if isinstance(args, str):
                             print(f"[DEBUG] UNSANITIZED STRING ARG at messages[{i}].tool_calls[{j}]: {args[:100]}...")
             
+            opts: Dict[str, Any] = {
+                "temperature": temperature,
+                "num_ctx": num_ctx
+            }
+            if max_tokens:
+                opts["num_predict"] = max_tokens
+
             payload = {
                 "model": active_model,
                 "messages": sanitized_messages,
                 "stream": True,
                 "truncate": False,
-                "options": {
-                    "temperature": temperature,
-                    "num_ctx": num_ctx
-                }
+                "options": opts
             }
             if format:
                 payload["format"] = format

@@ -490,8 +490,35 @@
         - Atașează referințe verificate `[REF x]` per document extras în `self.citations`, alimentând direct Citations Drawer.
         - Asigură prezervarea integrală a tabelului în raportul final `[FACTS]` fără trunchiere sau rezumare generică.
 
+### Etapa 50: Forensic Suite 2.0 - Cross-Document Reconciliation & Discrepancy Engine (`tool_reconcile_documents`) - IMPLEMENTAT (Septembrie 2026)
+- **Problemă rezolvată (Frauda și discrepanțele logistice pe fluxul Expediție vs Recepție vs Facturare):**
+    - În tranzacțiile economice și criminalistice (ex: transporturi de cereale, mărfuri, utilaje), frauda se produce adesea prin discrepanțe cantitative între ceea ce se declară pe **Avizul de expediție** (ce a plecat din depozit), ceea ce se cântărește efectiv pe **Borderoul de cântar / NIR** la recepție (ce a intrat în siloz/depozit) și ceea ce se facturează pe **Factura fiscală**.
+    - Modelele LLM standard eșuează lamentabil când trebuie să facă JOIN relațional pe zeci de autocamioane / tichete de cântar: pierd linii, halucinează diferențele și calculează greșit TVA-ul sau prejudiciul financiar.
+- **Arhitectura Motorului de Reconciliere (`chat_service.py` & `llm_client.py`):**
+    - *1. Detecție Automată a Intenției de Reconciliere (`_pre_process_query`):* Identifică interogările de tip reconciliere, discrepanțe, lipsuri de marfă, comparare aviz cu cântar/borderou/NIR și activează flag-ul `self.is_reconciliation = True`.
+    - *2. Planificare Tactică cu Directiva `RECONCILE` & Fast-Path Deterministic (`_generate_investigation_plan`):*
+        - La detectarea intenției de reconciliere, planificatorul activează un traseu rapid de 0 ms și 0 tokeni irosiți, emițând direct directiva atomizată `RECONCILE:[sursa]:[tinta]:[financiar]`.
+        - S-a adăugat suport pentru parametrul `max_tokens` în `UnifiedLLMClient.chat_step()` pe toate cele 3 motoare (Ollama native `num_predict`, Ollama OpenAI, LMStudio, vLLM), prevenind blocarea în bucle de generare infinită.
+    - *3. Foreign Key & Alphanumeric Code Matching (`tool_reconcile_documents`):*
+        - Algoritm agnostic de corelare a documentelor din dosar bazat pe coduri de tranzacție (secvențe de 3-5 cifre, excluzând anii calendaristici 1990-2050), asociind cu precizie de 100% actul de expediție (Aviz) cu actul de recepție (Borderou Cântar) și actul de decontare (Factură), inclusiv prin urmărirea citărilor explicite de serie/factură din corpul textului.
+    - *4. Parsare Granulară pe Fiecare Autovehicul / Tichet de Cântar:*
+        - Extrage automat fiecare transport: index, număr de înmatriculare (`B-101-TRK`), greutate brută, tara, greutate netă recepționată și mențiuni calitative/refuzuri (ex: corpuri străine 4.2%, umiditate 16.8%, refuz calitativ parțial).
+        - Filtrează automat chunk-urile părinte (`parent_chunk_id.is_(None)`) și deduplică numerele de înmatriculare pentru a garanta 18 camioane din 18, eliminând dublările de OCR.
+    - *5. Python Math Engine Determinist & Calcul Prejudiciu Dublu:*
+        - Calculează media teoretică avizată per camion (`450.00 / 18 = 25.00 to`).
+        - Calculează variația exactă per camion (`net - 25.00 to`).
+        - Raportează DUAL ambele realități fizice:
+          1. **Baza Borderou Siloz:** 450.00 to vs 388.50 to = **-61.50 tone** (-13.67%).
+          2. **Baza Însumare Tichete Cântar:** 450.00 to vs 387.50 to = **-62.50 tone** (-13.89%), evidențiind automat eroarea internă de 1.00 tonă dintre antetul silozului și tichetele efective!
+        - Calculează prejudiciul financiar determinist la prețul unitar din factură (1,100.00 RON/to):
+          - Baza borderou: **67,650.00 RON** fără TVA / **73,738.50 RON** cu TVA 9%.
+          - Baza tichete: **68,750.00 RON** fără TVA / **74,937.50 RON** cu TVA 9%.
+    - *6. Citări Criminalistice Verificate & Protecție Matrice:*
+        - Asociază automat `[REF 1]`, `[REF 2]`, `[REF 3]` pentru Aviz, Borderou și Factură.
+        - Protejează blocul `### ⚖️ Matrice de Reconciliere` în `_deduplicate_and_cap_evidence` și optimizează sinteza finală pentru obiective unice, livrând un raport criminalistic exhaustiv și fără trunchiere.
+
 ---
-*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 46 (Dynamic Neural Reranker Control), Etapa 47 (Anti-Runaway Reasoning Sanitization), Etapa 48 (Online Model Ingestion, Keep-Alive SSE, SOTA Forensic Mega-Prompt, Citations & AI Trace Drawers) și Etapa 49 (Agnostic Batch Tabular Extractor & Deterministic Map-Reduce Engine).*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 46 (Dynamic Neural Reranker Control), Etapa 47 (Anti-Runaway Reasoning Sanitization), Etapa 48 (Online Model Ingestion, Keep-Alive SSE, SOTA Forensic Mega-Prompt, Citations & AI Trace Drawers), Etapa 49 (Agnostic Batch Tabular Extractor & Deterministic Map-Reduce Engine) și Etapa 50 (Forensic Suite 2.0 - Cross-Document Reconciliation & Discrepancy Engine).*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:

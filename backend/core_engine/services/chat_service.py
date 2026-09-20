@@ -160,6 +160,7 @@ class AgenticInvestigator:
         self.compaction_threshold_tokens = int(self.processing_ctx * 0.75)
         self.max_evidence_chars = int((self.processing_ctx - 1500) * 3.5)
         self.is_batch_tabular = False
+        self.is_reconciliation = False
         self._load_history()
         self._pre_process_query()
 
@@ -451,6 +452,13 @@ class AgenticInvestigator:
                 
         # Agnostic Multi-Domain Intent Detection
         q_lower = self.user_question.lower()
+        reconciliation_patterns = [
+            r'\b(reconcili|discrepan[tț]|lipsuri|lips[aă] de marf[aă]|lips[aă] gr[aâ]u|prejudiciu)\b',
+            r'\b(compar[aă] avizul|avizul cu (?:c[aâ]ntar|borderou|nir|recep[tț]i))\b',
+            r'\b(diferen[tț][aă] [iî]ntre aviz [sș]i (?:c[aâ]ntar|borderou|recep[tț]i))\b',
+            r'\b(borderou.*c[aâ]ntar.*aviz|aviz.*borderou.*c[aâ]ntar)\b',
+            r'\b(cantitate expediat[aă].*cantitate recep[tț]ionat[aă])\b'
+        ]
         batch_tabular_patterns = [
             r'\b(tabel|tabelar|centralizator)\b',
             r'\b(extrage din (?:toate|fiecare)|din toate facturile|din toate avizele|din toate contractele|din toate documentele)\b',
@@ -459,7 +467,10 @@ class AgenticInvestigator:
             r'\b(toate facturile|toate avizele|toate contractele)\b.*\b(pret|preț|persoan|furnizor|client|suma|sume|valoare|total)\b',
             r'\b(calculeaz[aă]|suma total[aă])\b.*\b(tuturor|toate)\b'
         ]
-        if any(re.search(p, q_lower) for p in batch_tabular_patterns):
+        if any(re.search(p, q_lower) for p in reconciliation_patterns):
+            self.is_reconciliation = True
+            self.injected_evidence += "CRITICAL INTENT: CROSS-DOCUMENT RECONCILIATION & DISCREPANCY AUDIT. The user requires comparing dispatch vs receipt documents (e.g. Aviz vs Borderou Cantar / NIR / Factura), calculating exact unit/financial discrepancies, and generating a Reconciliation Matrix. RECONCILE will be used.\n"
+        elif any(re.search(p, q_lower) for p in batch_tabular_patterns):
             self.is_batch_tabular = True
             self.injected_evidence += "CRITICAL INTENT: BATCH TABULAR EXTRACTION / MAP-REDUCE. The user requires cross-document field extraction and deterministic calculations across multiple/all documents. BATCH_EXTRACT will be used.\n"
         elif re.search(r'\b(cati|câți|cate|câte|totalul|totala|totală|suma totală|sumă totală|listă completă|lista completa)\b', q_lower) or re.search(r'\btotal\b', q_lower):
@@ -1909,10 +1920,344 @@ MAI CAUT ÎN CONTINUARE: (ce a rămas de lămurit din obiectiv, sau scrie exact 
 
         return table_output + "\n" + "\n".join(math_lines)
 
+    def tool_reconcile_documents(self, source_type: str = "aviz", target_type: str = "cantar", financial_type: str = "factur") -> str:
+        """Modulul 1 (Etapa 50): Cross-Document Reconciliation & Discrepancy Engine.
+        Efectuează JOIN relațional între documente heterogene (ex: Aviz de expediție vs Borderou cântar siloz vs Factură fiscală).
+        Extrage liniile/tichetele individuale, identifică lipsurile fizice de marfă și calculează determinist prejudiciul financiar
+        folosind Python Math Engine, fără erori de halucinație LLM.
+        """
+        if self._stop_check():
+            raise ChatStoppedError("Stop request received before document reconciliation.")
+
+        with SessionLocal() as db:
+            docs = db.query(Document).filter(Document.case_id == self.case_id).all()
+            if not docs:
+                return "Nu s-au identificat documente în dosar pentru reconciliere."
+
+            # 1. Clasificare candidați documente
+            src_candidates = [
+                d for d in docs
+                if any(k in (d.filename or "").lower() or k in (d.doc_type or "").lower() for k in [source_type, "aviz", "comanda", "expeditie"])
+            ]
+            tgt_candidates = [
+                d for d in docs
+                if any(k in (d.filename or "").lower() or k in (d.doc_type or "").lower() for k in [target_type, "cantar", "cântar", "borderou", "siloz", "nir", "receptie"])
+                and not any(k in (d.filename or "").lower() for k in ["fact", "aviz"])
+            ]
+            fin_candidates = [
+                d for d in docs
+                if any(k in (d.filename or "").lower() or k in (d.doc_type or "").lower() for k in [financial_type, "fact", "invoic", "fiscal"])
+            ]
+
+            if not src_candidates or not tgt_candidates:
+                return f"Nu s-au putut asocia documente sursă ({source_type}) cu documente țintă ({target_type}) în dosar."
+
+            # 2. Algoritm de Cuplare Relațională (Foreign Key / Code Overlap Matching)
+            matched_pairs = []
+            for s in src_candidates:
+                s_codes = [
+                    c.lstrip("0") for c in re.findall(r"\d+", s.filename or "")
+                    if not (len(c) == 4 and 1990 <= int(c) <= 2050) and len(c.lstrip("0")) >= 2
+                ]
+                best_t = None
+                for t in tgt_candidates:
+                    t_codes = [
+                        c.lstrip("0") for c in re.findall(r"\d+", t.filename or "")
+                        if not (len(c) == 4 and 1990 <= int(c) <= 2050) and len(c.lstrip("0")) >= 2
+                    ]
+                    if any(c in t_codes for c in s_codes):
+                        best_t = t
+                        break
+
+                best_f = None
+                for f in fin_candidates:
+                    f_codes = [
+                        c.lstrip("0") for c in re.findall(r"\d+", f.filename or "")
+                        if not (len(c) == 4 and 1990 <= int(c) <= 2050) and len(c.lstrip("0")) >= 2
+                    ]
+                    if any(c in f_codes for c in s_codes):
+                        best_f = f
+                        break
+
+                if best_t:
+                    matched_pairs.append((s, best_t, best_f))
+
+            if not matched_pairs:
+                matched_pairs.append((src_candidates[0], tgt_candidates[0], fin_candidates[0] if fin_candidates else None))
+
+            # 3. Procesare Reconciliere pentru fiecare pereche identificată
+            reconciliation_reports = []
+
+            for source_doc, target_doc, fin_doc in matched_pairs:
+                chunks_s = db.query(DocumentChunk).filter(DocumentChunk.document_id == source_doc.id, DocumentChunk.parent_chunk_id.is_(None)).all()
+                text_s = "\n".join(c.content for c in chunks_s) if chunks_s else ""
+                if not text_s:
+                    all_cs = db.query(DocumentChunk).filter(DocumentChunk.document_id == source_doc.id).all()
+                    text_s = "\n".join(c.content for c in all_cs)
+
+                chunks_t = db.query(DocumentChunk).filter(DocumentChunk.document_id == target_doc.id, DocumentChunk.parent_chunk_id.is_(None)).all()
+                text_t = "\n".join(c.content for c in chunks_t) if chunks_t else ""
+                if not text_t:
+                    all_ct = db.query(DocumentChunk).filter(DocumentChunk.document_id == target_doc.id).all()
+                    text_t = "\n".join(c.content for c in all_ct)
+
+                text_f = ""
+                if fin_doc:
+                    chunks_f = db.query(DocumentChunk).filter(DocumentChunk.document_id == fin_doc.id, DocumentChunk.parent_chunk_id.is_(None)).all()
+                    text_f = "\n".join(c.content for c in chunks_f) if chunks_f else ""
+                    if not text_f:
+                        all_cf = db.query(DocumentChunk).filter(DocumentChunk.document_id == fin_doc.id).all()
+                        text_f = "\n".join(c.content for c in all_cf)
+
+                if not fin_doc:
+                    m_f_cite = re.search(r"(?:Factura|Facturii)\s+([A-Z0-9-_]+)", text_t, re.IGNORECASE)
+                    if m_f_cite:
+                        cite_code = m_f_cite.group(1).lower()
+                        for f in fin_candidates:
+                            if cite_code in f.filename.lower():
+                                fin_doc = f
+                                chunks_f = db.query(DocumentChunk).filter(DocumentChunk.document_id == fin_doc.id, DocumentChunk.parent_chunk_id.is_(None)).all()
+                                text_f = "\n".join(c.content for c in chunks_f) if chunks_f else ""
+                                break
+
+                # A. Parsare Document Sursă (Aviz / Comandă)
+                m_qty = re.search(r"(\d+[\d.,]*)\s*(?:tone|to|to\.|kg|buc|unit)", text_s, re.IGNORECASE)
+                declared_qty = 0.0
+                if m_qty:
+                    q_str = m_qty.group(1).replace(".", "").replace(",", ".") if "," in m_qty.group(1) and "." in m_qty.group(1) else m_qty.group(1).replace(",", ".")
+                    try: declared_qty = float(q_str)
+                    except Exception: pass
+
+                m_trucks = re.search(r"(\d+)\s*(?:autocamioane|camioane|curse|transporturi)", text_s, re.IGNORECASE)
+                declared_trucks_count = int(m_trucks.group(1)) if m_trucks else 0
+
+                # B. Parsare Document Țintă (Borderou Cântar / Tichete)
+                m_hdr_net = re.search(r"(?:TOTAL GREUTATE NETĂ|TOTAL NET[ĂA]|TOTAL RECEPȚIONAT[ĂA]|TOTAL)\s*[^:]*:\s*([\d.,]+)\s*(?:TONE|to|kg)", text_t, re.IGNORECASE)
+                header_net = 0.0
+                if m_hdr_net:
+                    hn_str = m_hdr_net.group(1).replace(".", "").replace(",", ".") if "," in m_hdr_net.group(1) and "." in m_hdr_net.group(1) else m_hdr_net.group(1).replace(",", ".")
+                    try: header_net = float(hn_str)
+                    except Exception: pass
+
+                truck_pattern = r"(?:^|\n)\s*(\d+)\.\s*([A-Z0-9-]+)\s*:\s*(?:Brut\s*([\d.,]+)\s*to,?\s*)?(?:Tara\s*([\d.,]+)\s*to,?\s*)?Net\s*([\d.,]+)\s*to(?:\s*\(([^)]+)\))?"
+                truck_matches = list(re.finditer(truck_pattern, text_t))
+                trucks = []
+                seen_plates = set()
+                for m in truck_matches:
+                    idx_str, plate, brut_str, tara_str, net_str, obs_str = m.groups()
+                    if plate in seen_plates:
+                        continue
+                    seen_plates.add(plate)
+                    try:
+                        b_val = float(brut_str.replace(",", ".")) if brut_str else None
+                        t_val = float(tara_str.replace(",", ".")) if tara_str else None
+                        n_val = float(net_str.replace(",", ".")) if net_str else 0.0
+                        trucks.append({
+                            "idx": int(idx_str),
+                            "plate": plate,
+                            "brut": b_val,
+                            "tara": t_val,
+                            "net": n_val,
+                            "obs": obs_str.strip() if obs_str else ""
+                        })
+                    except Exception:
+                        continue
+
+                num_trucks = len(trucks) if trucks else (declared_trucks_count or 1)
+                sum_net = sum(t["net"] for t in trucks) if trucks else header_net
+                if header_net == 0.0:
+                    header_net = sum_net
+
+                expected_per_truck = (declared_qty / num_trucks) if num_trucks > 0 else 0.0
+
+                # C. Parsare Document Financiar (Factură)
+                unit_price = 0.0
+                vat_rate = 9.0  # default conform sector agricol / cereale
+                if text_f:
+                    m_pu = re.search(r"Preț unitar[^\n|]*\|\s*Valoare[^\n]*\n[^\n]*\|\s*([\d.,]+)\s*\|", text_f, re.IGNORECASE)
+                    if not m_pu:
+                        m_pu = re.search(r"\|\s*\d+\s*\|.*?\|\s*([\d.,]+)\s*\|\s*(?:tone|to|buc|kg)\s*\|\s*([\d.,]+)\s*\|", text_f, re.IGNORECASE)
+                        if m_pu:
+                            p_str = m_pu.group(2).replace(",", "")
+                            try: unit_price = float(p_str)
+                            except Exception: pass
+                    else:
+                        p_str = m_pu.group(1).replace(",", "")
+                        try: unit_price = float(p_str)
+                        except Exception: pass
+
+                    if unit_price == 0.0:
+                        m_pu_gen = re.search(r"([\d.,]+)\s*(?:RON|lei)\s*/\s*(?:tonă|tona|to)", text_f, re.IGNORECASE)
+                        if m_pu_gen:
+                            try: unit_price = float(m_pu_gen.group(1).replace(",", ""))
+                            except Exception: pass
+
+                    m_vat = re.search(r"\((\d+)%\)", text_f)
+                    if m_vat:
+                        try: vat_rate = float(m_vat.group(1))
+                        except Exception: pass
+
+                # D. Înregistrare Citări Criminalistice
+                citation_id_s = len(self.citations) + 1
+                self.citations.append({
+                    "id": citation_id_s,
+                    "doc_id": source_doc.id,
+                    "filename": source_doc.filename,
+                    "doc_type": source_doc.doc_type or "AVIZ",
+                    "page": 1,
+                    "text": text_s[:350],
+                    "highlight": "",
+                    "spatial": "reconciliation_source"
+                })
+                ref_s = f"[REF {citation_id_s}]"
+
+                citation_id_t = len(self.citations) + 1
+                self.citations.append({
+                    "id": citation_id_t,
+                    "doc_id": target_doc.id,
+                    "filename": target_doc.filename,
+                    "doc_type": target_doc.doc_type or "BORDEROU_CANTAR",
+                    "page": 1,
+                    "text": text_t[:350],
+                    "highlight": "",
+                    "spatial": "reconciliation_target"
+                })
+                ref_t = f"[REF {citation_id_t}]"
+
+                ref_f = ""
+                if fin_doc:
+                    citation_id_f = len(self.citations) + 1
+                    self.citations.append({
+                        "id": citation_id_f,
+                        "doc_id": fin_doc.id,
+                        "filename": fin_doc.filename,
+                        "doc_type": fin_doc.doc_type or "FACTURA",
+                        "page": 1,
+                        "text": text_f[:350],
+                        "highlight": "",
+                        "spatial": "reconciliation_financial"
+                    })
+                    ref_f = f"[REF {citation_id_f}]"
+
+                # E. Semnatari și Mențiuni de Neconformitate
+                signatories = []
+                for label, pattern_sig, doc_ref in [
+                    ("Expeditor / Șofer", r"Predat Marfa[^\n]*\n+[^\n]*Nume:\s*([^\n]+)(?:\n+[^\n]*Act identitate:\s*([^\n]+))?", ref_s),
+                    ("Gestionar șef siloz", r"Preluat [îi]n Gestiune[^\n]*\n+[^\n]*Gestionar [sș]ef siloz:\s*([^\n]+)", ref_t)
+                ]:
+                    m_sig = re.search(pattern_sig, text_s if "Expeditor" in label else text_t, re.IGNORECASE)
+                    if m_sig:
+                        name_val = m_sig.group(1).strip()
+                        det_val = m_sig.group(2).strip() if len(m_sig.groups()) >= 2 and m_sig.group(2) else "Cântar electronic omologat"
+                        signatories.append({"role": label, "name": name_val, "details": det_val, "ref": doc_ref})
+
+                # F. Randare Matrice Reconciliere
+                lines = [
+                    "### ⚖️ Matrice de Reconciliere Documente & Audit Discrepanțe Fizice",
+                    f"- **Document Expediție (Sursă):** `{source_doc.filename}` {ref_s}",
+                    f"- **Document Recepție / Cântar (Țintă):** `{target_doc.filename}` {ref_t}"
+                ]
+                if fin_doc:
+                    lines.append(f"- **Document Financiar (Preț):** `{fin_doc.filename}` {ref_f}")
+                lines.append("")
+
+                if trucks:
+                    lines.append("#### 📋 Detaliu Reconciliere pe Fiecare Transport / Autocamion")
+                    lines.append("| # | Autovehicul | Brut (to) | Tara (to) | Net Cântărit (to) | Teoretic Aviz (to) | Discrepanță (to) | Observații Recepție / Calitate |")
+                    lines.append("|---|---|---|---|---|---|---|---|")
+                    for t in trucks:
+                        net = t["net"]
+                        diff = net - expected_per_truck
+                        diff_str = f"{diff:+.2f} to"
+                        brut_val = t.get("brut")
+                        tara_val = t.get("tara")
+                        brut_str = f"{brut_val:.2f}" if brut_val is not None else "-"
+                        tara_str = f"{tara_val:.2f}" if tara_val is not None else "-"
+                        obs = t.get("obs") or "-"
+                        t_idx = t["idx"]
+                        t_plate = t["plate"]
+                        lines.append(f"| {t_idx} | `{t_plate}` | {brut_str} | {tara_str} | {net:.2f} | {expected_per_truck:.2f} | **{diff_str}** | {obs} |")
+
+                # G. Calcule Finale de Discrepanță și Prejudiciu (Python Math Engine)
+                diff_header = header_net - declared_qty
+                pct_header = (diff_header / declared_qty * 100) if declared_qty else 0.0
+                prej_header = abs(diff_header) * unit_price
+                prej_header_vat = prej_header * (1.0 + vat_rate / 100.0)
+
+                diff_sum = sum_net - declared_qty
+                pct_sum = (diff_sum / declared_qty * 100) if declared_qty else 0.0
+                prej_sum = abs(diff_sum) * unit_price
+                prej_sum_vat = prej_sum * (1.0 + vat_rate / 100.0)
+
+                lines.append("")
+                lines.append("### 💰 Stabilire Discrepanță Fizică & Prejudiciu Financiar (Python Math Engine)")
+                lines.append(f"- **Cantitate Totală Expediată (Aviz):** {declared_qty:,.2f} tone ({num_trucks} autocamioane, medie teoretică: {expected_per_truck:.2f} to/camion) {ref_s}")
+                lines.append(f"- **Cantitate Recepționată declarată în Borderou Siloz:** {header_net:,.2f} tone {ref_t}")
+                if trucks and abs(sum_net - header_net) > 0.01:
+                    lines.append(f"- **Cantitate Recepționată din însumarea celor {num_trucks} tichete:** {sum_net:,.2f} tone {ref_t}")
+                lines.append(f"- **DISCREPANȚĂ FIZICĂ (Borderou Siloz):** **{diff_header:,.2f} tone** ({pct_header:.2f}%)")
+                if trucks and abs(sum_net - header_net) > 0.01:
+                    lines.append(f"- **DISCREPANȚĂ FIZICĂ (Sumă Tichete Cântar):** **{diff_sum:,.2f} tone** ({pct_sum:.2f}%) *(eroare internă de {abs(header_net - sum_net):.2f} tone între tichete și total borderou)*")
+
+                if unit_price > 0:
+                    vat_disp = f"{vat_rate:.0f}%"
+                    tva_amount = prej_header * (vat_rate / 100.0)
+                    lines.append(f"- **Preț unitar de achiziție / vânzare:** {unit_price:,.2f} RON/tonă (TVA {vat_disp}) {ref_f}")
+                    lines.append(f"- **PREJUDICIU FINANCIAR (fără TVA):** **{prej_header:,.2f} RON**" + (f" *(la tichete cântărite: {prej_sum:,.2f} RON)*" if abs(sum_net - header_net) > 0.01 else ""))
+                    lines.append(f"- **PREJUDICIU FINANCIAR TOTAL (cu TVA {vat_disp}):** **{prej_header_vat:,.2f} RON** (TVA calculat: {tva_amount:,.2f} RON)" + (f" *(la tichete: {prej_sum_vat:,.2f} RON)*" if abs(sum_net - header_net) > 0.01 else ""))
+
+                if signatories:
+                    lines.append("")
+                    lines.append("### 👥 Persoane și Semnături Identificate pe Documente")
+                    for s in signatories:
+                        s_role = s.get("role", "Semnatar")
+                        s_name = s.get("name", "-")
+                        s_det = s.get("details", "-")
+                        s_ref = s.get("ref", "")
+                        lines.append(f"- **{s_role}:** {s_name} ({s_det}) {s_ref}")
+
+                reconciliation_reports.append("\n".join(lines))
+
+            return "\n\n---\n\n".join(reconciliation_reports)
+
     def _generate_investigation_plan(self) -> List[Dict[str, Any]]:
         """Decompune semantic întrebarea utilizatorului în 1-4 obiective atomice folosind LLM cu fallback determinist."""
+        # Optimizare directă de performanță și economie de tokeni (Fast-Path Deterministic):
+        if self.is_reconciliation:
+            q_low = self.user_question.lower()
+            src = "aviz" if "aviz" in q_low else ("comanda" if "comanda" in q_low else "")
+            tgt = "cantar" if any(k in q_low for k in ["cantar", "cântar", "borderou", "siloz", "nir", "receptie", "recepție"]) else "cantar"
+            fin = "factur" if any(k in q_low for k in ["factur", "pret", "preț", "prejudiciu", "bani", "cost"]) else "factur"
+            return [{
+                "id": 1,
+                "title": "Reconciliere documente, calcul discrepanță fizică și stabilire prejudiciu financiar",
+                "keys": [f"RECONCILE:{src or 'aviz'}:{tgt or 'cantar'}:{fin or 'factur'}"]
+            }]
+
+        if self.is_batch_tabular:
+            q_low = self.user_question.lower()
+            filt = "factur" if "factur" in q_low else ("aviz" if "aviz" in q_low else ("contract" if "contract" in q_low else ""))
+            fields_list = []
+            if any(k in q_low for k in ["persoan", "furnizor", "emitent", "cine"]): fields_list.append("furnizor_persoana")
+            if any(k in q_low for k in ["client", "cumparator", "beneficiar", "destinatar"]): fields_list.append("client")
+            if any(k in q_low for k in ["pret", "valoare", "suma", "cost", "total"]): fields_list.append("valoare_pret")
+            if any(k in q_low for k in ["data", "scadent", "termen"]): fields_list.append("data")
+            if any(k in q_low for k in ["cantitat", "tone", "volum", "kg"]): fields_list.append("cantitate")
+            if not fields_list: fields_list = ["furnizor_persoana", "client", "valoare_pret", "data"]
+            return [{
+                "id": 1,
+                "title": f"Extragere tabulară batch {filt or 'documente'} ({', '.join(fields_list)}) și agregare deterministică",
+                "keys": [f"BATCH_EXTRACT:{filt}:{','.join(fields_list)}"]
+            }]
+
         plan_prompt = f"""Ești Senior Forensic Evidence Strategist și Arhitect de Investigație Judiciară.
 Misiunea ta este să descompui o interogare complexă într-un plan tactic format din 1 până la maximum 4 obiective atomice de verificare.
+
+═══ RECONCILIERE ȘI DISCREPANȚE ÎNTRE DOCUMENTE (JOIN RELAȚIONAL DISPATCH VS RECEIPT VS FACTURĂ) ═══
+Dacă utilizatorul solicită reconcilierea, compararea avizelor cu borderoul de cântar/NIR, identificarea lipsurilor cantitative de marfă sau calculul prejudiciului (ex: 'compară avizul cu borderoul de cântar', 'calculează discrepanța și prejudiciul', 'reconciliere cantitativă'):
+- Titlu: 'Reconciliere documente, calcul discrepanță fizică și stabilire prejudiciu financiar'
+- Chei: ['RECONCILE:[filtru_sursa]:[filtru_tinta]:[filtru_financiar]']
+(Exemplu: Pentru 'compară avizul cu borderoul de cântar și factura de grâu', primul obiectiv va avea keys: ['RECONCILE:aviz:cantar:factur'])
 
 ═══ OPERAȚIUNI TABULARE BATCH / CENTRALIZATOARE PESTE MULTIPLE DOCUMENTE ═══
 Dacă utilizatorul solicită extragerea unor câmpuri/valori din mai multe sau toate documentele (ex: 'toate facturile', '100 de facturi', 'tabel cu...', 'extrage din fiecare', 'persoana și prețul', 'calculează totalul'), formulează ca prim obiectiv:
@@ -1954,7 +2299,8 @@ Răspuns JSON:
                 temperature=0.0,
                 num_ctx=self.processing_ctx,
                 stop_check=self._stop_check,
-                format="json"
+                format="json",
+                max_tokens=512
             )
             content = res.get("content", "").strip()
             json_match = re.search(r'\{.*\}', content, re.DOTALL)
@@ -1971,8 +2317,18 @@ Răspuns JSON:
                             "keys": keys or [t.get("title", f"Obiectiv {idx}")[:40]]
                         })
                     if clean_targets:
+                        # Asigurare că dacă utilizatorul a cerut reconciliere, primul obiectiv conține RECONCILE
+                        if self.is_reconciliation:
+                            has_reconcile = any(any(k.startswith("RECONCILE:") for k in t.get("keys", [])) for t in clean_targets)
+                            if not has_reconcile:
+                                q_low = self.user_question.lower()
+                                src = "aviz" if "aviz" in q_low else ("comanda" if "comanda" in q_low else "")
+                                tgt = "cantar" if any(k in q_low for k in ["cantar", "cântar", "borderou", "siloz", "nir", "receptie", "recepție"]) else "cantar"
+                                fin = "factur" if any(k in q_low for k in ["factur", "pret", "preț", "prejudiciu", "bani", "cost"]) else "factur"
+                                clean_targets[0]["keys"] = [f"RECONCILE:{src or 'aviz'}:{tgt or 'cantar'}:{fin or 'factur'}"]
+                                clean_targets[0]["title"] = "Reconciliere documente, calcul discrepanță fizică și stabilire prejudiciu financiar"
                         # Asigurare că dacă utilizatorul a cerut batch tabular, primul obiectiv conține BATCH_EXTRACT
-                        if self.is_batch_tabular:
+                        elif self.is_batch_tabular:
                             has_batch = any(any(k.startswith("BATCH_EXTRACT:") for k in t.get("keys", [])) for t in clean_targets)
                             if not has_batch:
                                 q_low = self.user_question.lower()
@@ -1990,6 +2346,17 @@ Răspuns JSON:
             print(f"[!] Plan generation via LLM fallback to heuristic: {e}")
 
         # Fallback dacă LLM-ul nu a răspuns în JSON:
+        if self.is_reconciliation:
+            q_low = self.user_question.lower()
+            src = "aviz" if "aviz" in q_low else ("comanda" if "comanda" in q_low else "")
+            tgt = "cantar" if any(k in q_low for k in ["cantar", "cântar", "borderou", "siloz", "nir", "receptie", "recepție"]) else "cantar"
+            fin = "factur" if any(k in q_low for k in ["factur", "pret", "preț", "prejudiciu", "bani", "cost"]) else "factur"
+            return [{
+                "id": 1,
+                "title": "Reconciliere documente, calcul discrepanță fizică și stabilire prejudiciu financiar",
+                "keys": [f"RECONCILE:{src or 'aviz'}:{tgt or 'cantar'}:{fin or 'factur'}"]
+            }]
+
         if self.is_batch_tabular:
             q_low = self.user_question.lower()
             filt = "factur" if "factur" in q_low else ("aviz" if "aviz" in q_low else ("contract" if "contract" in q_low else ""))
@@ -2026,12 +2393,12 @@ Răspuns JSON:
             return
 
         # Cheile țintei 1 sunt procesate direct pe thread-ul principal
-        target_1_keys = {k.strip().lower() for k in plan[0].get("keys", []) if k.strip() and not k.strip().startswith("BATCH_EXTRACT:")}
+        target_1_keys = {k.strip().lower() for k in plan[0].get("keys", []) if k.strip() and not k.strip().startswith("BATCH_EXTRACT:") and not k.strip().startswith("RECONCILE:")}
         upcoming_keys = []
         for t in plan[1:]:
             for k in t.get("keys", []):
                 clean_k = k.strip()
-                if clean_k.startswith("BATCH_EXTRACT:"):
+                if clean_k.startswith("BATCH_EXTRACT:") or clean_k.startswith("RECONCILE:"):
                     continue
                 if clean_k and clean_k.lower() not in target_1_keys and clean_k not in upcoming_keys:
                     upcoming_keys.append(clean_k)
@@ -2198,8 +2565,8 @@ Răspuns JSON:
             if not snippet or not snippet.strip():
                 continue
 
-            # Izolare blocuri tabulare batch (Map-Reduce) pentru a le păstra integre
-            if "| # | Document" in snippet or "Centralizator & Agregare Deterministică" in snippet:
+            # Izolare blocuri tabulare batch (Map-Reduce) și matrice de reconciliere pentru a le păstra integre
+            if "| # | Document" in snippet or "Centralizator & Agregare Deterministică" in snippet or "Matrice de Reconciliere" in snippet or "Prejudiciu Financiar" in snippet:
                 tabular_blocks.append(snippet.strip())
                 continue
 
@@ -2338,6 +2705,27 @@ Răspuns JSON:
                 for clue in discovered_clues[:2]:
                     if clue.lower() not in [k.lower() for k in keys_to_search]:
                         keys_to_search.append(clue)
+        # Verificare dacă obiectivul curent solicită Reconciliere Documente (Cross-Document Join)
+        reconcile_key = next((k for k in keys_to_search if k.startswith("RECONCILE:")), None)
+        is_reconcile_target = (
+            reconcile_key is not None or
+            any(term in target.get("title", "").lower() for term in ["reconciliere", "discrepanț", "lipsuri de marf", "prejudiciu"]) or
+            (getattr(self, "is_reconciliation", False) and target.get("id") == 1)
+        )
+        if is_reconcile_target:
+            src_filt = "aviz"
+            tgt_filt = "cantar"
+            fin_filt = "factur"
+            if reconcile_key:
+                parts = reconcile_key.split(":")
+                if len(parts) >= 2 and parts[1].strip(): src_filt = parts[1].strip()
+                if len(parts) >= 3 and parts[2].strip(): tgt_filt = parts[2].strip()
+                if len(parts) >= 4 and parts[3].strip(): fin_filt = parts[3].strip()
+
+            reconcile_obs = self.tool_reconcile_documents(source_type=src_filt, target_type=tgt_filt, financial_type=fin_filt)
+            if reconcile_obs:
+                evidence_snippets.append(reconcile_obs)
+
         # Verificare dacă obiectivul curent solicită Extragere Tabulară Batch (Map-Reduce)
         batch_key = next((k for k in keys_to_search if k.startswith("BATCH_EXTRACT:")), None)
         is_tabular_target = (
@@ -2361,7 +2749,7 @@ Răspuns JSON:
                 evidence_snippets.append(table_obs)
 
         for k in keys_to_search:
-            if k.startswith("BATCH_EXTRACT:"):
+            if k.startswith("BATCH_EXTRACT:") or k.startswith("RECONCILE:"):
                 continue
             if self._stop_check():
                 raise ChatStoppedError("Stop request received during sub-target.")
@@ -2407,7 +2795,7 @@ Răspuns JSON:
             f"DOVEZI IDENTIFICATE DIN DOSAR:\n{combined_evidence[:self.max_evidence_chars]}\n\n"
             "CERINȚĂ: Formulează concluzia factuală concretă pentru acest obiectiv în limba ROMÂNĂ. "
             "Extrage cifre exacte, cantități, diferențe și citează obligatoriu referințele [REF x]. "
-            "Dacă dovezile conțin un tabel centralizator sau calcule agregate (Python Math Engine), include OBLIGATORIU tabelul complet și secțiunea de calcule agregate în răspunsul tău. "
+            "Dacă dovezile conțin un tabel centralizator, o matrice de reconciliere sau calcule agregate (Python Math Engine), include OBLIGATORIU tabelul/matricea completă și secțiunea de calcule agregate în răspunsul tău. "
             "Efectuează calcule matematice directe dacă obiectivul cere o diferență sau o valoare. "
             "Dacă dovezile conțin discuții sau instrucțiuni despre nereguli, diferențe sau aranjamente (ex: pe WhatsApp), expune-le explicit. "
             "Dacă dovezile nu conțin nicio mențiune sau document despre acest obiectiv, specifică explicit 'Nu s-au găsit dovezi'.\n"
@@ -2423,31 +2811,48 @@ Răspuns JSON:
             model=self.active_model,
             temperature=0.0,
             num_ctx=self.processing_ctx,
-            stop_check=self._stop_check
+            stop_check=self._stop_check,
+            max_tokens=4096
         )
         raw_res = step_res.get("content", "").strip()
         clean_res = self._sanitize_llm_response(raw_res)
+        if is_reconcile_target and reconcile_obs and "| # |" not in (clean_res or ""):
+            clean_res = f"{clean_res}\n\n{reconcile_obs}"
         return clean_res or raw_res
 
     def _synthesize_final_report(self, plan: List[Dict[str, Any]]) -> str:
         """Generează raportul final unificat din faptele verificate per target."""
+        # Optimizare directă: Dacă investigația a avut un singur obiectiv (ex: reconciliere sau batch tabular),
+        # faptele verificate conțin deja matricea completă și concluzia criminalistică deterministică.
+        if len(plan) == 1:
+            single_fact = self.working_memory.get(1, "").strip()
+            if single_fact and len(single_fact) > 100:
+                return single_fact
+
         facts_summary = "\n\n".join([
             f"### Ținta {t['id']}: {t['title']}\n{self.working_memory.get(t['id'], 'Lipsesc dovezi.')}"
             for t in plan
         ])
 
         final_prompt = (
-            f"ÎNTREBAREA INVESTIGATĂ:\n{self.user_question}\n\n"
-            f"CONCLUZII ȘI FAPTE VERIFICATE PE OBIECTIVE:\n{facts_summary}\n\n"
-            "DIRECTIVĂ STRICTĂ DE FORMAT:\n"
-            "Răspunde DIRECT și EXCLUSIV în limba ROMÂNĂ, redactând raportul criminalistic complet.\n"
-            "Începe răspunsul TĂU STRICT cu primul caracter '[' al secțiunii [FACTS]. Este STRICT INTERZIS să generezi 'Thinking Process:', introduceri meta sau text în limba engleză.\n"
-            "Dacă concluziile pe obiective conțin un tabel centralizator sau calcule agregate (Python Math Engine), PĂSTREAZĂ OBLIGATORIU tabelul Markdown complet și secțiunea de calcule matematice deterministe în secțiunea [FACTS], fără a omite rânduri sau a le rezuma generic.\n\n"
-            "Structura OBLIGATORIE a raportului:\n"
+            "Ești un Senior Forensic Investigator și Auditor Criminalist.\n"
+            "Misiunea ta este să formulezi un RAPORT JUDICIAR FINAL DE INVESTIGAȚIE complet, riguros și profesional, exclusiv pe baza faptelor verificate din dosar prezentate mai jos.\n\n"
+            "DIRECTIVĂ CRITICĂ DE GENERARE:\n"
+            "- Este STRICT INTERZIS să generezi tag-uri <think>...</think>, monologuri interne sau introduceri meta.\n"
+            "- Începe RĂSPUNSUL TĂU DIRECT cu primul caracter '[' al secțiunii [FACTS].\n\n"
+            f"FAPTE VERIFICATE PE OBIECTIVE DE INVESTIGAȚIE:\n{facts_summary}\n\n"
+            f"ÎNTREBAREA INIȚIALĂ A UTILIZATORULUI: {self.user_question}\n\n"
+            "INSTRUCȚIUNI DE ELABORARE:\n"
+            "1. Răspunde DIRECT la întrebarea utilizatorului pe baza faptelor confirmate.\n"
+            "2. Citează obligatoriu referințele verificabile [REF x] pentru fiecare afirmație sau sumă menționată.\n"
+            "3. Păstrează cifrele exacte, cantitățile și monedele (RON, EUR, etc.).\n"
+            "4. Dacă faptele includ tabele centrale, matrici de reconciliere sau calcule din Python Math Engine, reproduce-le structurat în raport.\n"
+            "5. Păstrează un ton neutru, formal, criminalistic și exhaustiv.\n"
+            "6. STRUCTUREAZĂ RAPORTUL OBLIGATORIU ÎN URMĂTOARELE SECȚIUNI MARKDOWN:\n\n"
             "[FACTS]\n"
-            "- Listă detaliată a tuturor faptelor confirmate, cantităților și participanților, citând referințele [REF x]\n"
+            "- Faptele certe probate cu trimiteri la [REF x]\n"
             "[ANALYSIS]\n"
-            "- Conexiuni logice între documente, contradicții identificate (ex: discrepanțe între acte formale și discuții informale)\n"
+            "- Analiza coroborată și implicațiile identificate\n"
             "[CONCLUSION]\n"
             "- Răspunsul direct, clar și complet la fiecare aspect din întrebarea utilizatorului\n"
             "[MISSING EVIDENCE]\n"
@@ -2465,7 +2870,8 @@ Răspuns JSON:
             model=self.active_model,
             temperature=0.0,
             num_ctx=synthesis_ctx,
-            stop_check=self._stop_check
+            stop_check=self._stop_check,
+            max_tokens=3000
         )
         raw_final = final_res.get("content", "").strip()
         clean_final = self._sanitize_llm_response(raw_final, target_header="[FACTS]")
