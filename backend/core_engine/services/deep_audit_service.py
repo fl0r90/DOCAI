@@ -696,7 +696,7 @@ FACTORI DE RISC & CLAUZE PENALE:
 {json.dumps(forensic_risks, indent=2, ensure_ascii=False)}
 
 TEXT DOCUMENT (FRAGMENTE ESENȚIALE):
-{self.raw_text[:7000]}
+{self.raw_text[:4000]}
 """
         else:
             prompt = f"""### System:

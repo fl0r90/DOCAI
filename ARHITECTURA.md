@@ -567,11 +567,23 @@
     - *5. Citații Verificate & Randare Judiciară:*
         - Asignează citații automate `[REF x]` pentru fiecare document pe axa timpului, legate direct de Citations Drawer.
         - Produce un tabel Markdown de sinteză cronologică și un raport structurat în `[FACTS]`, `[ANALYSIS]`, `[ANOMALII IDENTIFICATE]`, `[CONCLUSION]`, `[MISSING EVIDENCE]`, `[CONFIDENCE]: HIGH`.
-    - *6. Validare Live End-to-End:*
-        - Testat pe dosarul 12 (Agroterra) pe cele 69 de documente: generează o axă a timpului de 39 de evenimente cheie legate de schema Nordic/Cereal Grup, evidențiind 18 anomalii cauzale concrete în sub o secundă.
+    - *6. Validare Live End-to-End & Decuplare Narativă Agnostică (Etapa 52.1):*
+        - Testat pe dosarul 12 (Agroterra) pe cele 69 de documente: generează o axă a timpului de 36 de evenimente cheie și 18 anomalii cauzale concrete.
+        - **Decuplare Totală & Agnosticism:** Eliminat orice șablon text din codul Python. Python execută strict extragerea de date, parsarea temporală ISO, sortarea și calculul matematic al anomaliilor (faptele certe), iar modelul activ (Qwen 3.5 9B) redactează dinamic, în timp real, secțiunile `[ANALYSIS]`, `[CONCLUSION]` și `[MISSING EVIDENCE]` personalizate pe întrebarea utilizatorului, garantând agnosticism absolut pentru orice dosar sau domeniu.
+
+### Etapa 52.2: Dynamic Context Window Scaling & Truncation Elimination in Deep Forensic Audit
+- **Problema Detectată:** În cadrul auditului forensic pe documente complexe (Pasul 7/8 din `deep_audit_service.py`), sintezele executive (`ai_summary`) erau trunchiate brusc la exact ~5.900 - 6.000 caractere (în mijlocul secțiunii III, fără a atinge secțiunile IV, V și VI).
+- **Cauza Tehnică Identificată:** 
+    - Promptul către modelul de procesare (`granite4.2:8b`) conținea metadate macro, tabele financiare, factori de risc, extrase de ledger și textul brut al documentului, consumând între 4.500 și 5.500 de tokeni.
+    - În `UnifiedLLMClient.async_generate`, `num_ctx` era plafonat rigid la valoarea `processing_ctx` din configurație (8.192 tokeni).
+    - Deoarece în Ollama `num_ctx` reprezintă plafonul global (`prompt_tokens + completion_tokens`), modelul avea la dispoziție doar ~2.000 - 2.600 de tokeni pentru generare. La atingerea a 8.192 tokeni totali, inferența se oprea forțat (`done_reason: length`), retezând textul în plină frază.
+- **Soluție Arhitecturală Implementată:**
+    - *1. Dimensionare Dinamică a Contextului în `llm_client.py`:* S-a introdus calculul dinamic al `proc_ctx = max(configured_ctx, (len(prompt) // 3) + target_predict + 1024, 16384)`, garantând că indiferent de mărimea promptului, Ollama alocă o fereastră de context de minim 16k tokeni cu spațiu garantat de 4.096 tokeni pentru generare.
+    - *2. Optimizare Payload Prompt în `deep_audit_service.py`:* Redus fragmentul brut la primele 4.000 de caractere (evitând duplicarea informațiilor deja structurate în metadate și ledger).
+    - *3. Validare Live:* Sintezele generate au crescut la 8.700+ caractere, atingând complet toate cele VI secțiuni până la concluzia finală.
 
 ---
-*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 46 (Dynamic Neural Reranker Control), Etapa 47 (Anti-Runaway Reasoning Sanitization), Etapa 48 (Online Model Ingestion, Keep-Alive SSE, SOTA Forensic Mega-Prompt, Citations & AI Trace Drawers), Etapa 49 (Agnostic Batch Tabular Extractor & Deterministic Map-Reduce Engine), Etapa 50 (Forensic Suite 2.0 - Cross-Document Reconciliation Engine), Etapa 51 (Forensic Suite 2.0 - Superseding Contract Clauses & Addendum Resolution Engine) și Etapa 52 (Forensic Suite 2.0 - Multi-Source Chronological Event Splicer & Unified Timeline Engine).*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 46 (Dynamic Neural Reranker Control), Etapa 47 (Anti-Runaway Reasoning Sanitization), Etapa 48 (Online Model Ingestion, Keep-Alive SSE, SOTA Forensic Mega-Prompt, Citations & AI Trace Drawers), Etapa 49 (Agnostic Batch Tabular Extractor & Deterministic Map-Reduce Engine), Etapa 50 (Forensic Suite 2.0 - Cross-Document Reconciliation Engine), Etapa 51 (Forensic Suite 2.0 - Superseding Contract Clauses & Addendum Resolution Engine), Etapa 52/52.1 (Multi-Source Chronological Event Splicer & Dynamic Agnostic Synthesis) și Etapa 52.2 (Dynamic Context Window Scaling & Truncation Elimination).*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:

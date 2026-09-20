@@ -913,11 +913,16 @@ class UnifiedLLMClient:
                 # Ollama /api/generate
                 ollama_url = os.getenv("OLLAMA_URL", "http://llm:11434").rstrip("/")
                 url = f"{ollama_url}/api/generate"
-                proc_ctx = int(cfg.get("processing_ctx") or cfg.get("narrative_ctx") or 16384)
+                configured_ctx = int(cfg.get("processing_ctx") or cfg.get("narrative_ctx") or 16384)
+                target_predict = max_tokens or 4096
+                # Estimează tokenii din prompt și garantează spațiu complet pentru num_predict
+                est_prompt_tokens = len(prompt) // 3
+                needed_ctx = est_prompt_tokens + target_predict + 1024
+                proc_ctx = max(configured_ctx, needed_ctx, 16384)
                 options: Dict[str, Any] = {
                     "temperature": temperature,
                     "num_ctx": proc_ctx,
-                    "num_predict": max_tokens or 4096
+                    "num_predict": target_predict
                 }
                 payload = {
                     "model": active_model,
