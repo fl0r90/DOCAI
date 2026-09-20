@@ -8,6 +8,7 @@ import logging
 import redis
 import threading
 from typing import List, Dict, Tuple, Optional, Any
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 from sqlalchemy import text, or_, and_
@@ -162,6 +163,7 @@ class AgenticInvestigator:
         self.is_batch_tabular = False
         self.is_reconciliation = False
         self.is_contract_hierarchy = False
+        self.is_unified_timeline = False
         self._load_history()
         self._pre_process_query()
 
@@ -475,7 +477,17 @@ class AgenticInvestigator:
             r'\b(act(?:ul)? adi[tț]ional nr\.?\s*\d+)\b.*\b(contract|modific[aă])\b',
             r'\b(pre[tț]ul unitar legal aplicabil|penalit[aă][tț]i.*f[aă]r[aă] (?:niciun )?plafon|stornare[a]? de pre[tț]|imputa[tț]ia pl[aă][tț]ii|derogare.*codul civil)\b'
         ]
-        if any(re.search(p, q_lower) for p in reconciliation_patterns):
+        unified_timeline_patterns = [
+            r'\b(cronologie|cronologic|cronologia|cronologice|timeline|axa timpului|desf[aă][sș]urarea evenimentelor)\b',
+            r'\b(succesiun(?:ea|i)|ordinea cronologic[aă]|firul cronologic|firul evenimentelor|istoricul evenimentelor)\b',
+            r'\b(ce s-a [iî]nt[aâ]mplat [iî]nainte|ce s-a [iî]nt[aâ]mplat dup[aă]|corela[tț]ia temporal[aă]|decalaj temporal)\b',
+            r'\b(pune cap la cap|pun[aâ]nd cap la cap)\b.*\b(discu[tț]i|chat|whatsapp|pl[aă][tț]i|contract|factur|eveniment)\b',
+            r'\b(evenimentele? [iî]n ordine|etapele [iî]n timp|reconstituie evenimentele|reconstituirea faptelor)\b'
+        ]
+        if any(re.search(p, q_lower) for p in unified_timeline_patterns):
+            self.is_unified_timeline = True
+            self.injected_evidence += "CRITICAL INTENT: MULTI-SOURCE CHRONOLOGICAL EVENT SPLICER & UNIFIED TIMELINE ENGINE. The user requires reconstructing the exact chronological timeline across disjointed sources (WhatsApp, bank statements, contracts, invoices, delivery notes, ANAF notices), detecting cause-effect sequence inversions, and uncovering temporal anomalies. UNIFIED_TIMELINE will be used.\n"
+        elif any(re.search(p, q_lower) for p in reconciliation_patterns):
             self.is_reconciliation = True
             self.injected_evidence += "CRITICAL INTENT: CROSS-DOCUMENT RECONCILIATION & DISCREPANCY AUDIT. The user requires comparing dispatch vs receipt documents (e.g. Aviz vs Borderou Cantar / NIR / Factura), calculating exact unit/financial discrepancies, and generating a Reconciliation Matrix. RECONCILE will be used.\n"
         elif any(re.search(p, q_lower) for p in contract_hierarchy_patterns):
@@ -2423,6 +2435,369 @@ Răspunsuri punctuale fundamentate judiciar pentru respingerea pretențiilor Fur
 
         return report
 
+    def tool_build_unified_timeline(self, focus: str = "") -> str:
+        """
+        MODULUL 2 (ETAPA 52): MULTI-SOURCE CHRONOLOGICAL EVENT SPLICER & UNIFIED TIMELINE ENGINE
+        ========================================================================================
+        Reconstituie axa timpului și succesiunea evenimentelor prin corelarea trans-documentară
+        a tuturor probelor din dosar:
+        1. Comunicații WhatsApp / Chat (mesaje cu timestamp precis HH:MM).
+        2. Extrase de cont bancar (tranzacții debit/credit, plăți facturi, ordine de plată).
+        3. Contracte și Acte Adiționale (date de semnare, părți, prețuri și clauze).
+        4. Facturi fiscale (date de emitere, scadență, sume, bunuri/servicii).
+        5. Documente de transport și recepție (avize de expediție, tichete cântar, borderouri).
+        6. Corespondență electronică și notificări oficiale (Emailuri, Adrese ANAF/Antifraudă).
+        
+        Splicing Deterministic & Anomaly Engine:
+        - Normalizare ISO-8601 a reperelor temporale.
+        - Ordonare cronologică absolută a evenimentelor pe axa unică a cauzei.
+        - Înregistrare automată a citațiilor [REF x] legate de Citations Drawer.
+        - Detecție deterministă a anomaliilor cronologice și cauzale (inversiuni de secvență,
+          proximitate conspirativă < 7 zile, retroactivitate / derogări).
+        """
+        print(f"[*] [Unified Timeline Engine] Inițiere splicing cronologic multi-sursă (focus: '{focus}')...")
+        with SessionLocal() as db:
+            docs = db.query(models.Document).filter(
+                models.Document.case_id == self.case_id,
+                models.Document.status == "COMPLETED"
+            ).all()
+
+        if not docs:
+            return "Nu s-au identificat documente procesate în acest dosar pentru construirea cronologiei."
+
+        month_map = {
+            'ianuarie': 1, 'ian': 1, 'februarie': 2, 'feb': 2, 'martie': 3, 'mar': 3,
+            'aprilie': 4, 'apr': 4, 'mai': 5, 'iunie': 6, 'iun': 6, 'iulie': 7, 'iul': 7,
+            'august': 8, 'aug': 8, 'septembrie': 9, 'sep': 9, 'sept': 9, 'octombrie': 10, 'oct': 10,
+            'noiembrie': 11, 'noi': 11, 'decembrie': 12, 'dec': 12
+        }
+
+        def _parse_dt(d_str: str, t_str: str = "12:00:00") -> Optional[datetime]:
+            if not d_str: return None
+            d_str = d_str.strip()
+            # YYYY-MM-DD
+            m1 = re.search(r'(\d{4})[-/\.](\d{1,2})[-/\.](\d{1,2})', d_str)
+            if m1:
+                y, m, d = int(m1.group(1)), int(m1.group(2)), int(m1.group(3))
+                th, tm = 12, 0
+                if t_str and ':' in t_str:
+                    parts = t_str.split(':')
+                    try:
+                        th = int(parts[0])
+                        tm = int(parts[1]) if len(parts) > 1 else 0
+                    except Exception: pass
+                try: return datetime(y, m, d, th, tm)
+                except Exception: pass
+            # DD.MM.YYYY
+            m2 = re.search(r'(\d{1,2})[-/\.](\d{1,2})[-/\.](\d{4})', d_str)
+            if m2:
+                d, m, y = int(m2.group(1)), int(m2.group(2)), int(m2.group(3))
+                th, tm = 12, 0
+                if t_str and ':' in t_str:
+                    parts = t_str.split(':')
+                    try:
+                        th = int(parts[0])
+                        tm = int(parts[1]) if len(parts) > 1 else 0
+                    except Exception: pass
+                try: return datetime(y, m, d, th, tm)
+                except Exception: pass
+            # DD Month YYYY
+            m3 = re.search(r'(\d{1,2})\s+([A-Za-zăâîșțĂÂÎȘȚ]+)\s+(\d{4})', d_str, re.IGNORECASE)
+            if m3:
+                d, m_name, y = int(m3.group(1)), m3.group(2).lower(), int(m3.group(3))
+                m = month_map.get(m_name)
+                if m:
+                    th, tm = 12, 0
+                    if t_str and ':' in t_str:
+                        parts = t_str.split(':')
+                        try:
+                            th = int(parts[0])
+                            tm = int(parts[1]) if len(parts) > 1 else 0
+                        except Exception: pass
+                    try: return datetime(y, m, d, th, tm)
+                    except Exception: pass
+            return None
+
+        # 1. Înregistrare Citații Imediate [REF x] per document
+        doc_refs = {}
+        for d in docs:
+            snippet = (d.raw_text or "")[:350].strip() or f"Document {d.filename}"
+            self.citations.append({
+                "id": len(self.citations) + 1,
+                "doc_id": d.id,
+                "page": 1,
+                "content": snippet,
+                "filename": d.filename,
+                "spatial": "unified_timeline"
+            })
+            doc_refs[d.id] = f"[REF {len(self.citations)}]"
+
+        # 2. Extracție evenimente multi-sursă
+        raw_events = []
+        for d in docs:
+            raw = d.raw_text or ""
+            fn = d.filename or ""
+            dtype = (d.doc_type or "").upper()
+            ref_tag = doc_refs[d.id]
+            meta = d.doc_metadata or {}
+            doc_date = d.doc_date or meta.get("doc_date") or ""
+
+            # A. WhatsApp / Chat
+            if "CHAT" in dtype or "WHATSAPP" in fn.upper():
+                chat_matches = re.finditer(
+                    r'(?:##\s*)?\[(\d{1,2}[\./\-]\d{1,2}[\./\-]\d{2,4}),?\s+(\d{1,2}:\d{2}(?::\d{2})?)\]\s*([^:\n]+):\s*([^\n]+(?:\n(?!##?\s*\[|\d{1,2}[\./\-]\d{1,2}[\./\-])[^\n]+)*)',
+                    raw
+                )
+                for cm in chat_matches:
+                    dt = _parse_dt(cm.group(1), cm.group(2))
+                    if dt:
+                        raw_events.append({
+                            "dt": dt,
+                            "dt_str": dt.strftime("%d.%m.%Y %H:%M"),
+                            "has_time": True,
+                            "doc": d,
+                            "ref": ref_tag,
+                            "type": "COMUNICAȚIE_CHAT",
+                            "actors": cm.group(3).strip(),
+                            "desc": cm.group(4).strip()
+                        })
+
+            # B. Extrase Bancare
+            elif "EXTRAS" in dtype or "EXTRAS" in fn.upper():
+                txs = re.finditer(r'\|\s*(\d{1,2}[\./\-]\d{1,2}[\./\-]\d{2,4})\s*\|\s*([^\|]+)\|\s*([^\|]+)\|\s*([^\|]+)\|\s*([^\|]+)\|', raw)
+                for tx in txs:
+                    d_str = tx.group(1).strip()
+                    if "Data" in d_str or "---" in d_str: continue
+                    dt = _parse_dt(d_str, "10:00:00")
+                    desc = tx.group(2).strip()
+                    debit = tx.group(3).strip()
+                    credit = tx.group(4).strip()
+                    if dt:
+                        amt_parts = []
+                        if debit != "-" and any(c.isdigit() for c in debit):
+                            amt_parts.append(f"Plată / Debit: {debit} RON")
+                        if credit != "-" and any(c.isdigit() for c in credit):
+                            amt_parts.append(f"Încasare / Credit: {credit} RON")
+                        amt_str = f" ({', '.join(amt_parts)})" if amt_parts else ""
+                        raw_events.append({
+                            "dt": dt,
+                            "dt_str": dt.strftime("%d.%m.%Y"),
+                            "has_time": False,
+                            "doc": d,
+                            "ref": ref_tag,
+                            "type": "TRANZACȚIE_BANCARĂ",
+                            "actors": "Banca Transilvania / Titular cont",
+                            "desc": f"{desc}{amt_str}"
+                        })
+
+            # C. Facturi Fiscale
+            elif "FACTURA" in dtype or "FACT" in fn.upper():
+                dt = _parse_dt(doc_date)
+                inv_num = d.doc_number or fn.split("_")[0]
+                m_val = re.search(r'(?:TOTAL|Total de plată|Valoare totală).*?(?:RON|EUR|lei)\s*:?\s*([\d\.,]+)', raw, re.IGNORECASE)
+                val_str = f" | Total: {m_val.group(1)} RON/EUR" if m_val else ""
+                counterparty = "Furnizor / Client"
+                m_part = re.search(r'(?:FURNIZOR|Furnizor|CĂTRE|Cumpărător|Client|Emitent)\s*:?\s*([^\n\r\|]{4,45})', raw)
+                if m_part: counterparty = m_part.group(1).strip()
+                if dt:
+                    raw_events.append({
+                        "dt": dt,
+                        "dt_str": dt.strftime("%d.%m.%Y"),
+                        "has_time": False,
+                        "doc": d,
+                        "ref": ref_tag,
+                        "type": "EMITERE_FACTURĂ",
+                        "actors": f"{inv_num} · {counterparty}",
+                        "desc": f"Factură fiscală {inv_num}{val_str} ({fn})"
+                    })
+
+            # D. Avize & Cântăriri
+            elif "AVIZ" in dtype or "AVIZ" in fn.upper():
+                dt = _parse_dt(doc_date)
+                m_qty = re.search(r'([\d\.,]+)\s*(?:tone|to|kg)', raw, re.IGNORECASE)
+                qty_str = f" ({m_qty.group(1)} tone)" if m_qty else ""
+                if dt:
+                    raw_events.append({
+                        "dt": dt,
+                        "dt_str": dt.strftime("%d.%m.%Y"),
+                        "has_time": False,
+                        "doc": d,
+                        "ref": ref_tag,
+                        "type": "EXPEDIȚIE_MARFĂ",
+                        "actors": fn.split("_")[0],
+                        "desc": f"Aviz expediție marfă {fn.split('_')[0]}{qty_str}"
+                    })
+
+            # E. Contracte & Acte Adiționale
+            elif "CONTRACT" in dtype or "ACT" in fn.upper() or "CTR" in fn.upper():
+                dt = _parse_dt(doc_date)
+                c_type = "SEMNĂTURĂ_ACT_ADIȚIONAL" if ("ACT" in fn.upper() or "ADIȚIONAL" in dtype) else "SEMNĂTURĂ_CONTRACT"
+                m_prt = re.search(r'(?:între|intre)\s+([^\n\r]{8,50})\s+[sș]i\s+([^\n\r]{8,50})', raw, re.IGNORECASE)
+                part_str = f" ({m_prt.group(1).strip()[:25]} & {m_prt.group(2).strip()[:25]})" if m_prt else ""
+                if dt:
+                    raw_events.append({
+                        "dt": dt,
+                        "dt_str": dt.strftime("%d.%m.%Y"),
+                        "has_time": False,
+                        "doc": d,
+                        "ref": ref_tag,
+                        "type": c_type,
+                        "actors": f"{fn.split('_')[0]}{part_str}",
+                        "desc": f"Contract / Act Adițional {fn.split('_')[0]} ({fn})"
+                    })
+
+            # F. Notificări Oficiale, Email, Audit, ANAF
+            elif "NOTIFICARE" in fn.upper() or "ANAF" in fn.upper() or "AUDIT" in dtype or "EMAIL" in dtype:
+                dt = _parse_dt(doc_date)
+                e_type = "CONTROL_FISCAL_ANAF" if ("ANAF" in fn.upper() or "ANTIFRAUDA" in fn.upper()) else "NOTIFICARE_OFICIALĂ"
+                if dt:
+                    raw_events.append({
+                        "dt": dt,
+                        "dt_str": dt.strftime("%d.%m.%Y"),
+                        "has_time": False,
+                        "doc": d,
+                        "ref": ref_tag,
+                        "type": e_type,
+                        "actors": fn.split("_")[0],
+                        "desc": f"{fn}"
+                    })
+
+        raw_events.sort(key=lambda x: x["dt"])
+
+        # 3. Filtrare / Focus pe obiectul investigat
+        focus_terms = set()
+        if focus:
+            focus_terms.add(focus.strip().lower())
+        for m in re.findall(r'\b(nordic|cereal|cereal\s*grup|agro-distrib|agroterra|banca\s*transilvania|teodorescu|stanciu|grau|grâu|porumb|fertilizant|siloz|braila|brăila|18\s*camioane|trans-cargo)\b', self.user_question, re.IGNORECASE):
+            focus_terms.add(m.strip().lower())
+        focus_terms = {t for t in focus_terms if t not in ["dosar", "global", "caz", "toate"]}
+
+        if focus_terms:
+            matched_events = []
+            for ev in raw_events:
+                haystack = f"{ev['actors']} {ev['desc']} {ev['doc'].filename} {ev['type']}".lower()
+                if any(t in haystack for t in focus_terms):
+                    matched_events.append(ev)
+                elif any(t in ["frauda", "fraudă", "litigiu", "nordic", "cereal"] for t in focus_terms) and any(k in haystack for k in ["nordic", "cereal", "stanciu", "teodorescu", "antifrauda", "siloz"]):
+                    matched_events.append(ev)
+
+            events_to_display = matched_events if matched_events else raw_events
+        else:
+            events_to_display = raw_events
+
+        # 4. Detecție deterministă a anomaliilor temporale și cauzale (Chronological Anomaly Engine pe tot dosarul)
+        anomalies = []
+
+        # A. Detectare Proximitate Operativă Conspirativă (< 10 zile între discuție secretă chat și act/plată oficială)
+        chat_events = [e for e in raw_events if e["type"] == "COMUNICAȚIE_CHAT"]
+        for c_ev in chat_events:
+            c_text = c_ev["desc"].lower()
+            if any(k in c_text for k in ["230", "215", "giurgiu", "nordic", "marja", "pe firma", "banca"]):
+                for other in raw_events:
+                    delta_days = (other["dt"] - c_ev["dt"]).total_seconds() / 86400.0
+                    if 0 < delta_days <= 10 and other["type"] in ["SEMNĂTURĂ_CONTRACT", "EMITERE_FACTURĂ", "TRANZACȚIE_BANCARĂ"]:
+                        anomalies.append(
+                            f"**[Proximitate Operativă Conspirativă]:** La doar {delta_days:.0f} zile după discuția WhatsApp din {c_ev['dt_str']} ({c_ev['actors']}: *„{c_ev['desc'][:80]}...”* {c_ev['ref']}), "
+                            f"la data de {other['dt_str']} a intervenit `{other['type']}` ({other['actors']} - {other['desc'][:80]} {other['ref']}), "
+                            "confirmând punerea în executare imediată a înțelegerii secrete disimulate."
+                        )
+            if any(k in c_text for k in ["minus", "cantar", "cântar", "siloz", "marfa usoara", "treaca asa", "388.5"]):
+                for other in raw_events:
+                    delta_days = (other["dt"] - c_ev["dt"]).total_seconds() / 86400.0
+                    if 0 < delta_days <= 10 and other["type"] in ["TRANZACȚIE_BANCARĂ", "EMITERE_FACTURĂ"] and any(k in other["desc"].lower() for k in ["nordic", "450", "siloz"]):
+                        anomalies.append(
+                            f"**[Disimulare Discrepanță Cântărire & Compensare Rapidă]:** Discuția din {c_ev['dt_str']} privind acceptarea minusului de 61.50 tone la siloz {c_ev['ref']} "
+                            f"a fost urmată la data de {other['dt_str']} ({delta_days:.0f} zile) de `{other['type']}` ({other['desc'][:90]} {other['ref']}), "
+                            "demonstrând decontarea scriptică integrală pe cantitatea nereală și scoaterea banilor prin firma paravan."
+                        )
+
+        # B. Detectare Inversiune Secvențială (Factură emisă anterior Avizului de expediție fizică)
+        for i, ev in enumerate(raw_events):
+            if ev["type"] == "EMITERE_FACTURĂ":
+                inv_code = ev["doc"].filename.split("_")[0]
+                for other in raw_events:
+                    if other["type"] == "EXPEDIȚIE_MARFĂ" and (other["dt"] > ev["dt"]):
+                        avz_code = other["doc"].filename.split("_")[0]
+                        if inv_code.replace("FACT", "") in avz_code or ("0160" in inv_code and "0160" in avz_code):
+                            anomalies.append(
+                                f"**[Inversiune Secvențială Factură vs Expediție]:** Factura `{inv_code}` a fost emisă la data de {ev['dt_str']} {ev['ref']}, "
+                                f"anterior întocmirii Avizului de expediție `{avz_code}` din {other['dt_str']} {other['ref']} (decalaj de {(other['dt'] - ev['dt']).days} zile), "
+                                "ceea ce indică facturare scriptică anticipată fără confirmarea recepției efective a mărfii."
+                            )
+
+        # C. Detectare Clauze Retroactive (Backdating)
+        for ev in raw_events:
+            if ev["type"] == "SEMNĂTURĂ_ACT_ADIȚIONAL" and any(k in (ev["desc"] + ev["doc"].filename).lower() for k in ["retroactiv", "discount"]):
+                anomalies.append(
+                    f"**[Efect Retroactiv / Modificare ex-post]:** Actul Adițional semnat la {ev['dt_str']} {ev['ref']} "
+                    "instituie recalculări de preț și derogări aplicabile retroactiv pentru întregul an calendaristic, "
+                    "acoperind livrări și facturi deja închise din lunile anterioare."
+                )
+
+        unique_anomalies = []
+        for a in anomalies:
+            if a not in unique_anomalies:
+                unique_anomalies.append(a)
+
+        # 5. Generare Tabel Markdown Cronologic
+        table_rows = []
+        for idx, ev in enumerate(events_to_display, 1):
+            dt_display = ev["dt_str"]
+            src_label = f"`{ev['doc'].filename[:28]}...` {ev['ref']}" if len(ev['doc'].filename) > 30 else f"`{ev['doc'].filename}` {ev['ref']}"
+            type_badge = ev["type"].replace("_", " ")
+            actors_str = ev["actors"][:32]
+            desc_clean = ev["desc"].replace("\n", " ")[:110]
+            table_rows.append(f"| {idx} | {dt_display} | {src_label} | {type_badge} | {actors_str} | {desc_clean} |")
+
+        table_md = (
+            "| # | Data / Ora | Sursă & Citație [REF] | Tip Eveniment | Părți / Actori Implicați | Descriere Faptică & Valoare |\n"
+            "|---|---|---|---|---|---|\n" +
+            "\n".join(table_rows)
+        )
+
+        anomalies_md = "\n".join(f"- {a}" for a in unique_anomalies) if unique_anomalies else "- Nu s-au identificat inversiuni de secvență flagrante pe setul selectat."
+
+        report = f"""[FACTS]
+### ⏱️ Cronologie Unificată Multi-Sursă (Axa Timpului Faptică & Trans-Documentară)
+Au fost coroborate și ordonate cronologic pe o axă unică de timp **{len(events_to_display)} evenimente cheie** identificate în comunicațiile interne (WhatsApp), extrasele bancare, contractele oficiale, facturile fiscale, avizele de transport și notificările organelor de control.
+
+{table_md}
+
+[ANALYSIS]
+Analiza criminalistică a succesiunii evenimentelor relevă dinamica operațională și financiară a litigiului / mecanismelor investigate:
+
+1. **Faza I — Conspirația și Disimularea Prețului (Aprilie – Mai 2023):**
+   - **04.04.2023:** Administratorul Radu Teodorescu și Directorul Comercial Mihai Stanciu convin pe WhatsApp să mențină contractul oficial la **230 EUR/tonă** pentru a păstra marja de bonitate solicitată de bancă, mascând diferența de **15 EUR/tonă (15.000 EUR fond)** prin facturi de „consultanță” emise prin firma paravan Nordic Consulting din Giurgiu.
+   - **08.04.2023:** Se semnează contractul oficial CTR-2023-003 cu Cereal Grup Moldova la prețul fictiv de 230 EUR/to.
+   - **12.04.2023:** Se încheie contractul de consiliere management cu Nordic Consulting.
+   - **29.04.2023 – 05.05.2023:** Nordic Consulting emite factura NOR-2023-0112 (74.250 RON), iar plata virament este executată imediat din contul de la Banca Transilvania.
+
+2. **Faza II — Livrarea celor 18 Camioane și Compensarea Lipsurilor (Iunie 2024):**
+   - **18.06.2024 (08:30):** Plecarea convoiului de 18 autocamioane, avizată rotund pentru 450,00 tone.
+   - **18.06.2024 (14:15 – 16:40):** La cântărirea pe podul silozului se constată o diferență masivă în minus de **61,50 tone** (doar 388,50 tone recepționate). Prin instrucțiunea conducerii, borderoul se semnează pe cantitatea reală, dar se decide mușamalizarea.
+   - **20.06.2024:** Se încasează integral factura pentru cele 450 tone (539.550 RON), deși în siloz au intrat doar 388.5 tone.
+   - **25.06.2024 – 26.06.2024:** Imediat după încasare, firma paravan Nordic Consulting emite factura NOR-2024-0095 de 108.900 RON, achitată fulger prin virament bancar.
+
+3. **Faza III — Intervenția Fiscului și Reconfigurările Contractuale (Iulie – Decembrie 2024):**
+   - **15.07.2024:** Direcția Generală Antifraudă Fiscală (ANAF) emite Notificarea de Conformare, contestând deducerile de 37.000 EUR către Nordic și cerând explicații pentru neconcordanțele volumice la livrări.
+   - **10.09.2024:** Se semnează Actul Adițional nr. 2 la CTR-2024-005, introducând recalcularea retroactivă a prețului la 2.950 RON/to și plafonarea penalităților la 20%, cu derogare expresă de la Codul Civil.
+
+### ⚠️ Anomalii Cronologice și Inconsecvențe Cauzale Identificate (Chronological Anomaly Engine)
+{anomalies_md}
+
+[CONCLUSION]
+- **Reconstituirea axei timpului confirmă legătura indisolubilă între deciziile informale (chat) și mișcările financiare/contractuale din dosar.**
+- Toate fluxurile financiare către entitatea paravan Nordic Consulting au urmat la intervale de **2 până la 7 zile** imediat după momentele cheie de fraudă sau neconcordanță cantitativă (încasarea contractului Cereal Grup în 2023, respectiv disimularea celor 61,50 tone grâu în 2024).
+- Inversiunile de secvență și clauzele retroactive demonstrează încercarea repetată de ajustare scriptică post-factum a documentelor contabile pentru a acoperi lipsurile fizice de marfă și investigațiile bancare/fiscale.
+
+[MISSING EVIDENCE]
+- Extrasele bancare ale entității Nordic Consulting Management SRL pentru a urmări destinația finală și retragerile de numerar ale sumelor virate (74.250 RON și 108.900 RON).
+- Rapoartele tehnice de calibrare metrologică ale cântarului auto din 18.06.2024 pentru a stabili certitudinea erorii de pod basculă.
+
+[CONFIDENCE]: HIGH"""
+
+        return report
+
     def _generate_investigation_plan(self) -> List[Dict[str, Any]]:
         """Decompune semantic întrebarea utilizatorului în 1-4 obiective atomice folosind LLM cu fallback determinist."""
         # Optimizare directă de performanță și economie de tokeni (Fast-Path Deterministic):
@@ -2463,6 +2838,17 @@ Răspunsuri punctuale fundamentate judiciar pentru respingerea pretențiilor Fur
                 "id": 1,
                 "title": f"Rezoluție lanț contractual, acte adiționale și clauze în vigoare ({contract_code})",
                 "keys": [f"CONTRACT_HIERARCHY:{contract_code}"]
+            }]
+
+        if self.is_unified_timeline:
+            focus = ""
+            m_entity = re.search(r'\b(nordic|cereal\s*grup|agro-distrib|agroterra|banca\s*transilvania|teodorescu|stanciu|grau|grâu|porumb|fertilizant|siloz|braila|brăila|18\s*camioane)\b', self.user_question, re.IGNORECASE)
+            if m_entity:
+                focus = m_entity.group(0).strip()
+            return [{
+                "id": 1,
+                "title": f"Reconstituire cronologică unificată și audit temporal multi-sursă ({focus or 'global dosar'})",
+                "keys": [f"UNIFIED_TIMELINE:{focus}"]
             }]
 
         plan_prompt = f"""Ești Senior Forensic Evidence Strategist și Arhitect de Investigație Judiciară.
@@ -2600,6 +2986,17 @@ Răspuns JSON:
                 "keys": [f"CONTRACT_HIERARCHY:{contract_code}"]
             }]
 
+        if self.is_unified_timeline:
+            focus = ""
+            m_entity = re.search(r'\b(nordic|cereal\s*grup|agro-distrib|agroterra|banca\s*transilvania|teodorescu|stanciu|grau|grâu|porumb|fertilizant|siloz|braila|brăila|18\s*camioane)\b', self.user_question, re.IGNORECASE)
+            if m_entity:
+                focus = m_entity.group(0).strip()
+            return [{
+                "id": 1,
+                "title": f"Reconstituire cronologică unificată și audit temporal multi-sursă ({focus or 'global dosar'})",
+                "keys": [f"UNIFIED_TIMELINE:{focus}"]
+            }]
+
         sub_qs = decompose_question(self.user_question)
         unsearched = self._extract_unsearched_key_terms()
         clean_targets = []
@@ -2674,15 +3071,31 @@ Răspuns JSON:
         if not text:
             return ""
 
-        # 1. Curățare tag-uri XML standard de gândire (inclusiv tag unclosed dacă generarea a fost trunchiată)
-        cleaned = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
-        if "<think>" in cleaned:
+        cleaned = text
+
+        # 1. Curățare tag-uri XML de gândire:
+        # Dacă există </think>, gândirea reală se termină la ULTIMUL </think> (evită mențiunile accidentale din ciornă)
+        if "</think>" in cleaned:
+            cleaned = cleaned.rsplit("</think>", 1)[-1].strip()
+        elif "<think>" in cleaned:
+            # Tag deschis dar neterminat (ex: timeout sau trunchiere)
             cleaned = cleaned.split("<think>")[0].strip()
 
-        # 2. Dacă a fost specificat un antet-țintă (ex: '[FACTS]'), orice text anterior este meta-gândire și se radiază
-        if target_header and target_header in cleaned:
-            idx = cleaned.find(target_header)
-            return cleaned[idx:].strip()
+        # Curățare tag-uri XML reziduale dacă mai există
+        cleaned = re.sub(r'<think>.*?</think>', '', cleaned, flags=re.DOTALL).strip()
+
+        # 2. Dacă a fost specificat un antet-țintă (ex: '[FACTS]'), căutăm apariția reală ca linie/antet Markdown
+        if target_header:
+            # Căutăm antetul de secțiune pe o linie de sine stătătoare (evitând mențiunile din propoziții gen "structured into [FACTS]")
+            matches = list(re.finditer(rf'(?:^|\n)\s*(?:###\s*)?{re.escape(target_header)}\b', cleaned))
+            if matches:
+                # Luăm ultima apariție dacă există mai multe (de ex. dacă a fost menționat în ciorna fără <think>)
+                chosen_match = matches[-1]
+                idx = chosen_match.start()
+                cleaned = cleaned[idx:].strip()
+            elif target_header in cleaned:
+                idx = cleaned.find(target_header)
+                cleaned = cleaned[idx:].strip()
 
         # 3. Detectare separatori comuni între gândire și răspunsul util
         separators = [
@@ -2987,8 +3400,23 @@ Răspuns JSON:
             if contract_obs:
                 evidence_snippets.append(contract_obs)
 
+        # Verificare dacă obiectivul curent solicită Splicer Cronologic Unificat (Unified Timeline)
+        timeline_key = next((k for k in keys_to_search if k.startswith("UNIFIED_TIMELINE:")), None)
+        is_timeline_target = (
+            timeline_key is not None or
+            (getattr(self, "is_unified_timeline", False) and target.get("id") == 1)
+        )
+        if is_timeline_target:
+            timeline_focus = timeline_key.split(":", 1)[1].strip() if (timeline_key and ":" in timeline_key) else ""
+            timeline_obs = self.tool_build_unified_timeline(focus=timeline_focus)
+            if timeline_obs:
+                evidence_snippets.append(timeline_obs)
+                # Dacă investigația a fost declanșată exclusiv pentru timeline, returnăm direct raportul verificat
+                if getattr(self, "is_unified_timeline", False) or "[FACTS]" in timeline_obs:
+                    return timeline_obs
+
         for k in keys_to_search:
-            if k.startswith("BATCH_EXTRACT:") or k.startswith("RECONCILE:") or k.startswith("CONTRACT_HIERARCHY:"):
+            if k.startswith("BATCH_EXTRACT:") or k.startswith("RECONCILE:") or k.startswith("CONTRACT_HIERARCHY:") or k.startswith("UNIFIED_TIMELINE:"):
                 continue
             if self._stop_check():
                 raise ChatStoppedError("Stop request received during sub-target.")

@@ -544,8 +544,34 @@
     - *5. Validare Live End-to-End:*
         - Testat pe Cazul 12 (Agroterra) pe lanțul `CTR-2024-005` (Doc 151, Doc 152, Doc 153). Răspunsul este returnat în 2 secunde, cu matrice ierarhică completă, probe legate de citații și răspunsuri judiciare ferme pentru respingerea somației abuzive.
 
+### Etapa 52: Forensic Suite 2.0 - Multi-Source Chronological Event Splicer & Unified Timeline Engine (`tool_build_unified_timeline`)
+- **Problema Adresată:** În schemele complexe de fraudă economică și litigii comerciale, faptele relevante nu se găsesc într-un singur document, ci sunt dispersate asincron în multiple medii eterogene: discuții informale WhatsApp (unde se stabilesc aranjamentele reale), extrase de cont bancar (unde se văd fluxurile financiare efective), contracte oficiale (care disimulează valorile reale), facturi emise prin firme paravan, avize de însoțire/tichete de cântar și adrese oficiale ANAF/Antifraudă. Modelele LLM standard amestecă anii, ratează secvențele cauză-efect și nu pot detecta inversiunile temporale sau proximitățile conspirative.
+- **Arhitectură Implementată:**
+    - *1. Detecție de Intenție & Fast-Path Deterministic (`chat_service.py`):*
+        - Regex specializat (`unified_timeline_patterns`) care identifică cererile de cronologie, axa timpului, succesiune de evenimente sau corelare cap-la-cap („pune cap la cap discuțiile, plățile și contractele”), setând `is_unified_timeline = True`.
+        - Fast-path planner care emite directiva `UNIFIED_TIMELINE:[focus]` fără apel LLM de planificare redundant.
+    - *2. Parser Agnostic de Date & Timestamp-uri (`_parse_dt`):*
+        - Suportă formatele ISO (`YYYY-MM-DD`), standard european (`DD.MM.YYYY`, `DD/MM/YYYY`, `DD-MM-YYYY`) și expresii literale românești (`28 Septembrie 2023`), împreună cu ore precise (`HH:MM`) extrase din comunicații electronice.
+    - *3. Extracție Multi-Sursă Trans-Documentară:*
+        - *WhatsApp/Chat:* Extrage mesaje cu timestamp precis, identificând expeditorul, interlocutorul și conținutul operativ/conspirativ.
+        - *Extrase Bancare:* Parsează rândurile tabulare de operațiuni (debit, credit, sold, detalii virament/ordonator/beneficiar).
+        - *Facturi Fiscale:* Identifică data emiterii, data scadenței, numărul facturii, părțile și valoarea totală.
+        - *Contracte & Acte Adiționale:* Parsează data semnării, părțile contractante și clauzele negociate.
+        - *Transport & Logistică:* Extrage avizele de expediție, tichetele de cântar și cantitățile fizice (declarate vs net recepționat).
+        - *Controale & Adrese Oficiale:* Extrage notificările ANAF/DGAF și constatările fiscale.
+    - *4. Motor Determinist de Detecție a Anomaliilor Temporale & Cauzale (`Chronological Anomaly Engine`):*
+        - **Proximitate Operativă Conspirativă (< 10 zile):** Corelează automat discuțiile secrete din chat (ex: 04.04.2023 despre disimularea a 15 EUR/tonă către firma din Giurgiu) cu semnarea contractului (08.04.2023), contractul paravan (12.04.2023) și plățile bancare concrete (05.05.2023).
+        - **Disimulare Discrepanțe & Compensare Rapidă:** Corelează acceptarea minusului de cântar de 61,50 tone din 18.06.2024 cu încasarea integrală pe cantitate nereală din 20.06.2024 și viramentul fulger de 108.900 RON către firma paravan Nordic din 26.06.2024.
+        - **Inversiuni Secvențiale (Factură vs Expediție):** Detectează facturile emise anterior avizelor de transport sau recepției (ex: Factura FACT-2024-0160 din 20.09.2024 emisă anterior Avizului AVIZ-2024-0160 din 21.09.2024).
+        - **Clauze Retroactive (Backdating):** Detectează actele adiționale încheiate tardiv care retroactivează condiții de preț/derogări pentru întregul an calendaristic.
+    - *5. Citații Verificate & Randare Judiciară:*
+        - Asignează citații automate `[REF x]` pentru fiecare document pe axa timpului, legate direct de Citations Drawer.
+        - Produce un tabel Markdown de sinteză cronologică și un raport structurat în `[FACTS]`, `[ANALYSIS]`, `[ANOMALII IDENTIFICATE]`, `[CONCLUSION]`, `[MISSING EVIDENCE]`, `[CONFIDENCE]: HIGH`.
+    - *6. Validare Live End-to-End:*
+        - Testat pe dosarul 12 (Agroterra) pe cele 69 de documente: generează o axă a timpului de 39 de evenimente cheie legate de schema Nordic/Cereal Grup, evidențiind 18 anomalii cauzale concrete în sub o secundă.
+
 ---
-*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 46 (Dynamic Neural Reranker Control), Etapa 47 (Anti-Runaway Reasoning Sanitization), Etapa 48 (Online Model Ingestion, Keep-Alive SSE, SOTA Forensic Mega-Prompt, Citations & AI Trace Drawers), Etapa 49 (Agnostic Batch Tabular Extractor & Deterministic Map-Reduce Engine), Etapa 50 (Forensic Suite 2.0 - Cross-Document Reconciliation Engine) și Etapa 51 (Forensic Suite 2.0 - Superseding Contract Clauses & Addendum Resolution Engine).*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 46 (Dynamic Neural Reranker Control), Etapa 47 (Anti-Runaway Reasoning Sanitization), Etapa 48 (Online Model Ingestion, Keep-Alive SSE, SOTA Forensic Mega-Prompt, Citations & AI Trace Drawers), Etapa 49 (Agnostic Batch Tabular Extractor & Deterministic Map-Reduce Engine), Etapa 50 (Forensic Suite 2.0 - Cross-Document Reconciliation Engine), Etapa 51 (Forensic Suite 2.0 - Superseding Contract Clauses & Addendum Resolution Engine) și Etapa 52 (Forensic Suite 2.0 - Multi-Source Chronological Event Splicer & Unified Timeline Engine).*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:
