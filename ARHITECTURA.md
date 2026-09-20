@@ -471,8 +471,27 @@
           1. **Jurnal Execuție:** fluxul complet de căutări, apeluri de unelte (tool calls), parametri și observații;
           2. **Raționament Intern:** monologul intern al modelului (`<think>`) izolat și formatat curat cu scroll independent.
 
+### Etapa 49: Agnostic Batch Tabular Extractor & Deterministic Map-Reduce Engine - IMPLEMENTAT (Septembrie 2026)
+- **Problemă rezolvată (Limitările căutării Top-K pe zeci/sute de documente independente):**
+    - Căutarea clasică prin similitudine semantică (RAG Top-K) aduce doar top 4-10 chunk-uri. Dacă un dosar conține 100 de facturi sau avize, 90+ dintre ele sunt complet ignorate, iar un LLM forțat să analizeze sute de documente dintr-un singur context suferă de pierdere de atenție ("needle in a haystack") sau halucinează calcule matematice.
+- **Arhitectura Batch Tabular Map-Reduce (`core_engine/services/chat_service.py`):**
+    - *1. Detecție Automată de Intenție Batch (`_pre_process_query`):* Identifică cererile de extragere în masă ("am 100 de facturi", "toate facturile", "extrage din fiecare", "tabel cu", "lista tuturor", "calculează totalul") și activează flag-ul `is_batch_tabular`.
+    - *2. Planificare Tactică cu Directiva `BATCH_EXTRACT` (`_generate_investigation_plan`):* Planificatorul formulează obiective specifice de tip `BATCH_EXTRACT:[filtru_tip]:[câmp1,câmp2,...]` (ex: `BATCH_EXTRACT:factur:furnizor_persoana,pret_achizitie,data`).
+    - *3. Extracție Structurată Agnostică în 4 Trepte (`tool_batch_extract_tabular`):*
+        - *Treapta 1 (Dynamic Attributes):* Interoghează atributele structurate pre-extrase la ingestie din `doc_metadata` (normalizare aliasuri pentru furnizori, cumpărători, sume, valute, date, cantități).
+        - *Treapta 2 (Regex & Tipare Structurale):* Scanează `raw_text` și `ai_summary` pentru tipare specifice de facturi/avize (`TOTAL GENERAL DE PLATĂ`, `FURNIZOR`, `CLIENT`, etc.).
+        - *Treapta 3 (Parser Tabele Markdown):* Extrage linii specifice de produse/servicii și cantități din tabelele Markdown generate de Docling.
+        - *Treapta 4 (Micro-LLM Map Fallback):* Fallback rapid pentru câmpuri arbitrare nestructurate.
+    - *4. Motor de Calcul Matematic Determinist (Python Math Engine - Reduce Stage):*
+        - Parser robust de sume și valute (`_parse_numeric_amount`), capabil să proceseze nativ atât formate europene (`125.350,00 EUR`), cât și anglo-saxone (`125,350.00 RON`).
+        - Agregare deterministă 100% în Python: sumă totală per valută, medie, valori minime și maxime asociate cu fișierul sursă exact. Zero halucinații matematice de la LLM.
+    - *5. Integrare Citații & Redactare Tabel:**
+        - Generează un tabel Markdown curat cu toate fișierele și valorile extrase.
+        - Atașează referințe verificate `[REF x]` per document extras în `self.citations`, alimentând direct Citations Drawer.
+        - Asigură prezervarea integrală a tabelului în raportul final `[FACTS]` fără trunchiere sau rezumare generică.
+
 ---
-*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 46 (Dynamic Neural Reranker Control), Etapa 47 (Anti-Runaway Reasoning Sanitization) și Etapa 48 (Online Model Ingestion, Keep-Alive SSE, SOTA Forensic Mega-Prompt, Citations & AI Trace Drawers).*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 46 (Dynamic Neural Reranker Control), Etapa 47 (Anti-Runaway Reasoning Sanitization), Etapa 48 (Online Model Ingestion, Keep-Alive SSE, SOTA Forensic Mega-Prompt, Citations & AI Trace Drawers) și Etapa 49 (Agnostic Batch Tabular Extractor & Deterministic Map-Reduce Engine).*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:

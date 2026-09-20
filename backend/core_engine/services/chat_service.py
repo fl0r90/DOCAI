@@ -159,6 +159,7 @@ class AgenticInvestigator:
         # Prag de compactare stil OpenCode: 75% din contextul configurat (ex: 12.288 pt 16K, 24.576 pt 32K)
         self.compaction_threshold_tokens = int(self.processing_ctx * 0.75)
         self.max_evidence_chars = int((self.processing_ctx - 1500) * 3.5)
+        self.is_batch_tabular = False
         self._load_history()
         self._pre_process_query()
 
@@ -450,7 +451,18 @@ class AgenticInvestigator:
                 
         # Agnostic Multi-Domain Intent Detection
         q_lower = self.user_question.lower()
-        if re.search(r'\b(cati|câți|cate|câte|totalul|totala|totală|suma totală|sumă totală|listă completă|lista completa)\b', q_lower) or re.search(r'\btotal\b', q_lower):
+        batch_tabular_patterns = [
+            r'\b(tabel|tabelar|centralizator)\b',
+            r'\b(extrage din (?:toate|fiecare)|din toate facturile|din toate avizele|din toate contractele|din toate documentele)\b',
+            r'\b(am \d+ (?:de )?(?:facturi|avize|documente|contracte))\b',
+            r'\b(lista tuturor (?:facturilor|avizelor|contractelor|documentelor))\b',
+            r'\b(toate facturile|toate avizele|toate contractele)\b.*\b(pret|preț|persoan|furnizor|client|suma|sume|valoare|total)\b',
+            r'\b(calculeaz[aă]|suma total[aă])\b.*\b(tuturor|toate)\b'
+        ]
+        if any(re.search(p, q_lower) for p in batch_tabular_patterns):
+            self.is_batch_tabular = True
+            self.injected_evidence += "CRITICAL INTENT: BATCH TABULAR EXTRACTION / MAP-REDUCE. The user requires cross-document field extraction and deterministic calculations across multiple/all documents. BATCH_EXTRACT will be used.\n"
+        elif re.search(r'\b(cati|câți|cate|câte|totalul|totala|totală|suma totală|sumă totală|listă completă|lista completa)\b', q_lower) or re.search(r'\btotal\b', q_lower):
             self.injected_evidence += "CRITICAL: The user is asking for a QUANTITATIVE answer or a TOTAL COUNT. You MUST use SEARCH_STRUCTURED_DATA to get accurate counts from the database tables. Do NOT rely on individual text fragments for totals.\n"
         elif re.search(r'\b(plata|plăți|incasare|încasare|sume|ron|eur|usd|achizitie|achiziție|pret|preț|valoare|cost|costuri|factura|factură|virament|iban|cont bancar)\b', q_lower):
             self.injected_evidence += "Suggested Intent: FINANCIAL / TABULAR -> Use SEARCH_STRUCTURED_DATA or targeted SEARCH_TEXT for exact amounts, invoices, and transactions.\n"
@@ -1579,10 +1591,259 @@ MAI CAUT ÎN CONTINUARE: (ce a rămas de lămurit din obiectiv, sau scrie exact 
             return f"MATH RESULT: {eval(expr):,.2f}"
         except: return "Math error: invalid expression."
 
+    def _parse_numeric_amount(self, val_str: str) -> Tuple[Optional[float], str]:
+        """Extrage agnostic valoarea numerică și moneda dintr-un șir de caractere (suportă formate RO/EU și US)."""
+        if not val_str or str(val_str).strip() in ['N/A', '-', 'None', '']:
+            return None, ''
+        val_clean = str(val_str).strip()
+        curr = ''
+        curr_m = re.search(r'(EUR|RON|USD|LEI|MDL|GBP)', val_clean, re.IGNORECASE)
+        if curr_m:
+            c = curr_m.group(1).upper()
+            curr = 'RON' if c == 'LEI' else c
+        
+        # Eliminăm literele și păstrăm cifrele și separatorii
+        clean = re.sub(r'[A-Za-z]', '', val_clean).strip()
+        # Format mixt: 125.350,00 vs 125,350.00
+        if ',' in clean and '.' in clean:
+            if clean.rfind(',') > clean.rfind('.'):
+                # Format european: 125.350,00 -> 125350.00
+                clean = clean.replace('.', '').replace(',', '.')
+            else:
+                # Format anglo: 125,350.00 -> 125350.00
+                clean = clean.replace(',', '')
+        elif ',' in clean:
+            parts = clean.split(',')
+            if len(parts) == 2 and len(parts[1]) <= 2:
+                clean = parts[0].replace(' ', '') + '.' + parts[1]
+            else:
+                clean = clean.replace(',', '')
+        clean = clean.replace(' ', '')
+        try:
+            val = float(clean)
+            return val, curr or 'RON'
+        except Exception:
+            return None, curr
+
+    def tool_batch_extract_tabular(
+        self,
+        fields: Optional[List[str]] = None,
+        filter_type: str = "",
+        aggregate_math: str = "auto",
+        limit: int = 150
+    ) -> str:
+        """Tool: Extracție tabulară în masă (Map-Reduce) peste zeci sau sute de documente independente.
+        Depășește limitările căutării semantice Top-K prin extragerea structurată a fiecărui document
+        și calcul matematic determinist (Python Math Engine) fără halucinații.
+        """
+        if self._stop_check():
+            raise ChatStoppedError("Stop request received before batch tabular extraction.")
+
+        # 1. Determinare agnostic a câmpurilor cerute
+        if not fields:
+            inferred = []
+            q_low = self.user_question.lower()
+            if any(k in q_low for k in ["persoan", "furnizor", "emitent", "cine"]): inferred.append("furnizor_persoana")
+            if any(k in q_low for k in ["client", "cumparator", "beneficiar", "destinatar"]): inferred.append("client")
+            if any(k in q_low for k in ["pret", "valoare", "suma", "cost", "total"]): inferred.append("valoare_pret")
+            if any(k in q_low for k in ["data", "scadent", "termen"]): inferred.append("data")
+            if any(k in q_low for k in ["cantitat", "tone", "volum", "kg"]): inferred.append("cantitate")
+            if any(k in q_low for k in ["produs", "serviciu", "marfa", "obiect"]): inferred.append("produs_serviciu")
+            if any(k in q_low for k in ["numar", "serie"]): inferred.append("numar_document")
+            fields = inferred if inferred else ["furnizor_persoana", "client", "valoare_pret", "data"]
+
+        # 2. Determinare filtru tip document
+        if not filter_type:
+            q_low = self.user_question.lower()
+            if "factur" in q_low: filter_type = "factur"
+            elif "aviz" in q_low: filter_type = "aviz"
+            elif "contract" in q_low: filter_type = "contract"
+            elif "borderou" in q_low: filter_type = "borderou"
+            elif "extras" in q_low or "banc" in q_low: filter_type = "extras"
+            elif "chitanta" in q_low or "chitanță" in q_low: filter_type = "chitan"
+
+        # 3. Interogare documente din baza de date
+        with SessionLocal() as db:
+            query = db.query(Document).filter(Document.case_id == self.case_id)
+            if filter_type:
+                query = query.filter(
+                    or_(
+                        Document.doc_type.ilike(f"%{filter_type}%"),
+                        Document.filename.ilike(f"%{filter_type}%"),
+                        Document.doc_category.ilike(f"%{filter_type}%")
+                    )
+                )
+            docs = query.order_by(Document.id.asc()).limit(limit).all()
+
+        if not docs:
+            return f"Nu s-au identificat documente conforme filtrului '{filter_type or 'toate'}' în dosarul curent (Case {self.case_id})."
+
+        print(f"[*] [Batch Tabular Extractor] Se procesează {len(docs)} documente pentru câmpurile: {fields} (filtru: '{filter_type}')")
+
+        # 4. Map Stage: Extracție structurată per document
+        extracted_rows = []
+        for idx, doc in enumerate(docs, 1):
+            if self._stop_check():
+                raise ChatStoppedError("Stop request received during batch tabular extraction.")
+
+            meta = doc.doc_metadata if isinstance(doc.doc_metadata, dict) else {}
+            dyn = meta.get("dynamic_attributes", {}) or {}
+            raw = doc.raw_text or ""
+            summary = doc.ai_summary or ""
+
+            # Înregistrare referință / citare verificată
+            citation_id = len(self.citations) + 1
+            snippet = (summary[:350] if summary else (raw[:350] if raw else doc.filename))
+            self.citations.append({
+                "id": citation_id,
+                "doc_id": doc.id,
+                "page": 1,
+                "content": snippet,
+                "highlight_term": doc.filename[:30],
+                "filename": doc.filename,
+                "spatial": "batch_tabular_extraction"
+            })
+
+            row_data = {
+                "idx": idx,
+                "filename": doc.filename,
+                "citation_ref": f"[REF {citation_id}]",
+                "doc_id": doc.id,
+                "fields": {}
+            }
+
+            for f in fields:
+                f_norm = re.sub(r'[^a-z0-9]', '', f.lower())
+                val = ""
+
+                # Tier 1: Dynamic Attributes directe din metadata
+                for k, v in dyn.items():
+                    k_norm = re.sub(r'[^a-z0-9]', '', k.lower())
+                    if f_norm in k_norm or k_norm in f_norm:
+                        if v and str(v).strip():
+                            val = str(v).strip()
+                            break
+
+                # Tier 2: Euristici semantice agnostice pe text și rezumat
+                if not val:
+                    if any(p in f_norm for p in ['persoan', 'furnizor', 'emitent', 'vanzator']):
+                        val = dyn.get('furnizor') or dyn.get('furnizor_nume') or ''
+                        if not val:
+                            m = re.search(r'(?:FURNIZOR|EMITENT|DELEGAT|PERSOANA)\s*:\s*\n*([^\n\r\|]{3,60})', raw, re.IGNORECASE)
+                            if m: val = m.group(1).strip()
+                        if not val and 'de către' in summary:
+                            m = re.search(r'de către ([A-Z0-9\.\- ]+?)(?: către|\.|\,)', summary)
+                            if m: val = m.group(1).strip()
+
+                    elif any(p in f_norm for p in ['client', 'cumparator', 'beneficiar', 'destinatar']):
+                        val = dyn.get('client') or dyn.get('client_nume') or ''
+                        if not val:
+                            m = re.search(r'(?:CLIENT|BENEFICIAR|CUMPĂRĂTOR)\s*:\s*\n*([^\n\r\|]{3,60})', raw, re.IGNORECASE)
+                            if m: val = m.group(1).strip()
+                        if not val and 'către' in summary:
+                            m = re.search(r'către ([A-Z0-9\.\- ]+?)(?:\,|\.|\s+cu\s+|\s+pentru\s+)', summary)
+                            if m: val = m.group(1).strip()
+
+                    elif any(p in f_norm for p in ['pret', 'valoare', 'suma', 'cost', 'total']):
+                        val = dyn.get('valoare_totala') or dyn.get('total_plata') or dyn.get('total_general') or dyn.get('Valoare_totala_EUR') or ''
+                        if not val:
+                            m = re.search(r'(?:TOTAL GENERAL DE PLAT[AĂ]|TOTAL DE PLAT[AĂ]|TOTAL GENERAL|TOTAL FĂRĂ TVA)\s*:\s*\n*([\d\.,\s]+(?:EUR|RON|USD)?)', raw, re.IGNORECASE)
+                            if m: val = m.group(1).strip()
+                        if not val and doc.total_amount:
+                            val = f"{doc.total_amount:,.2f} RON"
+
+                    elif any(p in f_norm for p in ['data', 'scadent', 'termen']):
+                        val = doc.doc_date or dyn.get('data_emiterii') or ''
+                        if not val:
+                            m = re.search(r'(?:Data emiterii|Data)\s*:\s*([\d\.\-\/]+)', raw, re.IGNORECASE)
+                            if m: val = m.group(1).strip()
+
+                    elif any(p in f_norm for p in ['cantitat', 'tone', 'volum', 'kg']):
+                        val = dyn.get('cantitate_vandata') or dyn.get('cantitate_livrata') or dyn.get('cantitate_totala') or ''
+                        if not val:
+                            m = re.search(r'\|\s*([\d\.]+)\s*\|\s*(?:tone|kg|buc)\b', raw, re.IGNORECASE)
+                            if m: val = m.group(1).strip()
+
+                    elif any(p in f_norm for p in ['produs', 'serviciu', 'marfa']):
+                        val = dyn.get('produs_serviciu') or dyn.get('tip_tranzactie') or dyn.get('produs_principal') or ''
+                        if not val:
+                            m = re.search(r'\|\s*\d+\s*\|\s*([^\n\|]{5,60})\s*\|', raw)
+                            if m and not any(h in m.group(1).lower() for h in ['denumire', 'descriere', 'produs']):
+                                val = m.group(1).strip()
+
+                    elif any(p in f_norm for p in ['numar', 'serie']):
+                        val = doc.doc_number or dyn.get('numar_serie') or dyn.get('Nr_Seria') or ''
+                        if not val:
+                            m = re.search(r'(?:Seria și numărul|Număr|Nr\.?)\s*:\s*([A-Z0-9\-_ ]{3,30})', raw, re.IGNORECASE)
+                            if m: val = m.group(1).strip()
+
+                row_data["fields"][f] = val if val else "N/A"
+
+            extracted_rows.append(row_data)
+
+        # 5. Reduce Stage: Calcule matematice deterministe (Python Math Engine)
+        currency_totals: Dict[str, float] = {}
+        currency_counts: Dict[str, int] = {}
+        currency_values: Dict[str, List[Tuple[float, str]]] = {}
+
+        for row in extracted_rows:
+            for f, val in row["fields"].items():
+                amt, curr = self._parse_numeric_amount(val)
+                if amt is not None and curr:
+                    currency_totals[curr] = currency_totals.get(curr, 0.0) + amt
+                    currency_counts[curr] = currency_counts.get(curr, 0) + 1
+                    if curr not in currency_values: currency_values[curr] = []
+                    currency_values[curr].append((amt, row["filename"]))
+
+        # 6. Construire Tabel Markdown
+        clean_headers = [f.replace("_", " ").title() for f in fields]
+        md_table_lines = [
+            f"| # | Document | {' | '.join(clean_headers)} | Referință |",
+            f"|---|---|{'|'.join(['---'] * len(clean_headers))}|---|"
+        ]
+        for row in extracted_rows:
+            col_vals = [str(row["fields"].get(f, "N/A")) for f in fields]
+            fname_display = row["filename"]
+            if len(fname_display) > 38:
+                fname_display = fname_display[:35] + "..."
+            md_table_lines.append(f"| {row['idx']} | {fname_display} | {' | '.join(col_vals)} | {row['citation_ref']} |")
+
+        table_output = "\n".join(md_table_lines)
+
+        # 7. Construire Bloc Sinteză & Statistici Deterministe
+        math_lines = [
+            "\n\n### 📊 Centralizator & Agregare Deterministică (Python Math Engine)",
+            f"- **Total documente analizate:** {len(extracted_rows)} documente ({filter_type or 'toate tipurile'})"
+        ]
+        if currency_totals:
+            for curr, total in currency_totals.items():
+                cnt = currency_counts[curr]
+                avg = total / cnt if cnt else 0.0
+                c_vals = sorted(currency_values[curr], key=lambda x: x[0])
+                min_val, min_doc = c_vals[0]
+                max_val, max_doc = c_vals[-1]
+                min_doc_clean = min_doc[:35] if min_doc else ""
+                max_doc_clean = max_doc[:35] if max_doc else ""
+                math_lines.append(
+                    f"- **Total General {curr}:** {total:,.2f} {curr} ({cnt} poziții, Medie: {avg:,.2f} {curr})\n"
+                    f"  - Valoare minimă: {min_val:,.2f} {curr} (`{min_doc_clean}`)\n"
+                    f"  - Valoare maximă: {max_val:,.2f} {curr} (`{max_doc_clean}`)"
+                )
+        else:
+            math_lines.append("- *Notă:* Nu s-au detectat coloane monetare agregabile.")
+
+        return table_output + "\n" + "\n".join(math_lines)
+
     def _generate_investigation_plan(self) -> List[Dict[str, Any]]:
         """Decompune semantic întrebarea utilizatorului în 1-4 obiective atomice folosind LLM cu fallback determinist."""
         plan_prompt = f"""Ești Senior Forensic Evidence Strategist și Arhitect de Investigație Judiciară.
 Misiunea ta este să descompui o interogare complexă într-un plan tactic format din 1 până la maximum 4 obiective atomice de verificare.
+
+═══ OPERAȚIUNI TABULARE BATCH / CENTRALIZATOARE PESTE MULTIPLE DOCUMENTE ═══
+Dacă utilizatorul solicită extragerea unor câmpuri/valori din mai multe sau toate documentele (ex: 'toate facturile', '100 de facturi', 'tabel cu...', 'extrage din fiecare', 'persoana și prețul', 'calculează totalul'), formulează ca prim obiectiv:
+- Titlu: 'Extragere tabulară batch [tip_documente] ([câmpuri cerute]) și agregare deterministică'
+- Chei: ['BATCH_EXTRACT:[filtru_tip]:[câmp1,câmp2,...]']
+(Exemplu: Pentru 'am 100 de facturi și vreau persoana și prețul de achiziție', primul obiectiv va avea keys: ['BATCH_EXTRACT:factur:furnizor_persoana,pret_achizitie'])
 
 ═══ MATRICEA DE EXTRAGERE A CHEILOR DE CĂUTARE (Câmpul 'keys') ═══
 Cheile de căutare sunt trimise direct în motorul de căutare hibrid (BM25 Lexical + Cross-Encoder Reranker).
@@ -1635,11 +1896,41 @@ Răspuns JSON:
                             "keys": keys or [t.get("title", f"Obiectiv {idx}")[:40]]
                         })
                     if clean_targets:
+                        # Asigurare că dacă utilizatorul a cerut batch tabular, primul obiectiv conține BATCH_EXTRACT
+                        if self.is_batch_tabular:
+                            has_batch = any(any(k.startswith("BATCH_EXTRACT:") for k in t.get("keys", [])) for t in clean_targets)
+                            if not has_batch:
+                                q_low = self.user_question.lower()
+                                filt = "factur" if "factur" in q_low else ("aviz" if "aviz" in q_low else ("contract" if "contract" in q_low else ""))
+                                f_list = []
+                                if any(k in q_low for k in ["persoan", "furnizor", "emitent", "cine"]): f_list.append("furnizor_persoana")
+                                if any(k in q_low for k in ["client", "cumparator", "beneficiar"]): f_list.append("client")
+                                if any(k in q_low for k in ["pret", "valoare", "suma", "cost", "total"]): f_list.append("valoare_pret")
+                                if any(k in q_low for k in ["data", "scadent"]): f_list.append("data")
+                                if not f_list: f_list = ["furnizor_persoana", "client", "valoare_pret", "data"]
+                                clean_targets[0]["keys"] = [f"BATCH_EXTRACT:{filt}:{','.join(f_list)}"]
+                                clean_targets[0]["title"] = f"Extragere tabulară batch {filt or 'documente'} ({', '.join(f_list)}) și agregare deterministică"
                         return clean_targets
         except Exception as e:
             print(f"[!] Plan generation via LLM fallback to heuristic: {e}")
 
         # Fallback dacă LLM-ul nu a răspuns în JSON:
+        if self.is_batch_tabular:
+            q_low = self.user_question.lower()
+            filt = "factur" if "factur" in q_low else ("aviz" if "aviz" in q_low else ("contract" if "contract" in q_low else ""))
+            fields_list = []
+            if any(k in q_low for k in ["persoan", "furnizor", "emitent", "cine"]): fields_list.append("furnizor_persoana")
+            if any(k in q_low for k in ["client", "cumparator", "beneficiar", "destinatar"]): fields_list.append("client")
+            if any(k in q_low for k in ["pret", "valoare", "suma", "cost", "total"]): fields_list.append("valoare_pret")
+            if any(k in q_low for k in ["data", "scadent", "termen"]): fields_list.append("data")
+            if any(k in q_low for k in ["cantitat", "tone", "volum", "kg"]): fields_list.append("cantitate")
+            if not fields_list: fields_list = ["furnizor_persoana", "client", "valoare_pret", "data"]
+            return [{
+                "id": 1,
+                "title": f"Extragere tabulară batch {filt or 'documente'} ({', '.join(fields_list)}) și agregare deterministică",
+                "keys": [f"BATCH_EXTRACT:{filt}:{','.join(fields_list)}"]
+            }]
+
         sub_qs = decompose_question(self.user_question)
         unsearched = self._extract_unsearched_key_terms()
         clean_targets = []
@@ -1660,11 +1951,13 @@ Răspuns JSON:
             return
 
         # Cheile țintei 1 sunt procesate direct pe thread-ul principal
-        target_1_keys = {k.strip().lower() for k in plan[0].get("keys", []) if k.strip()}
+        target_1_keys = {k.strip().lower() for k in plan[0].get("keys", []) if k.strip() and not k.strip().startswith("BATCH_EXTRACT:")}
         upcoming_keys = []
         for t in plan[1:]:
             for k in t.get("keys", []):
                 clean_k = k.strip()
+                if clean_k.startswith("BATCH_EXTRACT:"):
+                    continue
                 if clean_k and clean_k.lower() not in target_1_keys and clean_k not in upcoming_keys:
                     upcoming_keys.append(clean_k)
 
@@ -1824,9 +2117,15 @@ Răspuns JSON:
         seen_keys = set()
         unique_chunks = []
         graph_blocks = []
+        tabular_blocks = []
 
         for snippet in snippets:
             if not snippet or not snippet.strip():
+                continue
+
+            # Izolare blocuri tabulare batch (Map-Reduce) pentru a le păstra integre
+            if "| # | Document" in snippet or "Centralizator & Agregare Deterministică" in snippet:
+                tabular_blocks.append(snippet.strip())
                 continue
 
             # Izolare context relațional Neo4j dacă este inclus în snippet
@@ -1880,7 +2179,8 @@ Răspuns JSON:
             if clean_graph_lines:
                 combined_graph = "\n\n" + "\n".join(clean_graph_lines)
 
-        result = "\n\n".join(selected_chunks) + combined_graph
+        combined_tabular = ("\n\n" + "\n\n".join(tabular_blocks)) if tabular_blocks else ""
+        result = "\n\n".join(selected_chunks) + combined_tabular + combined_graph
         return result.strip()
 
     def _extract_clues_from_working_memory(self) -> List[str]:
@@ -1963,7 +2263,31 @@ Răspuns JSON:
                 for clue in discovered_clues[:2]:
                     if clue.lower() not in [k.lower() for k in keys_to_search]:
                         keys_to_search.append(clue)
+        # Verificare dacă obiectivul curent solicită Extragere Tabulară Batch (Map-Reduce)
+        batch_key = next((k for k in keys_to_search if k.startswith("BATCH_EXTRACT:")), None)
+        is_tabular_target = (
+            batch_key is not None or
+            any(term in target.get("title", "").lower() for term in ["extragere tabular", "centralizator", "tabel cu", "agregare deterministic"]) or
+            (getattr(self, "is_batch_tabular", False) and target.get("id") == 1)
+        )
+        if is_tabular_target:
+            filt = ""
+            req_fields = []
+            if batch_key:
+                parts = batch_key.split(":")
+                if len(parts) >= 2: filt = parts[1].strip()
+                if len(parts) >= 3: req_fields = [f.strip() for f in parts[2].split(",") if f.strip()]
+            if not filt and "factur" in self.user_question.lower(): filt = "factur"
+            elif not filt and "aviz" in self.user_question.lower(): filt = "aviz"
+            elif not filt and "contract" in self.user_question.lower(): filt = "contract"
+
+            table_obs = self.tool_batch_extract_tabular(fields=req_fields, filter_type=filt)
+            if table_obs:
+                evidence_snippets.append(table_obs)
+
         for k in keys_to_search:
+            if k.startswith("BATCH_EXTRACT:"):
+                continue
             if self._stop_check():
                 raise ChatStoppedError("Stop request received during sub-target.")
             obs = self.tool_search_text(k)
@@ -2008,16 +2332,17 @@ Răspuns JSON:
             f"DOVEZI IDENTIFICATE DIN DOSAR:\n{combined_evidence[:self.max_evidence_chars]}\n\n"
             "CERINȚĂ: Formulează concluzia factuală concretă pentru acest obiectiv în limba ROMÂNĂ. "
             "Extrage cifre exacte, cantități, diferențe și citează obligatoriu referințele [REF x]. "
+            "Dacă dovezile conțin un tabel centralizator sau calcule agregate (Python Math Engine), include OBLIGATORIU tabelul complet și secțiunea de calcule agregate în răspunsul tău. "
             "Efectuează calcule matematice directe dacă obiectivul cere o diferență sau o valoare. "
             "Dacă dovezile conțin discuții sau instrucțiuni despre nereguli, diferențe sau aranjamente (ex: pe WhatsApp), expune-le explicit. "
             "Dacă dovezile nu conțin nicio mențiune sau document despre acest obiectiv, specifică explicit 'Nu s-au găsit dovezi'.\n"
-            "DIRECTIVĂ CRITICĂ: Răspunde DIRECT cu concluzia factuală în limba ROMÂNĂ (2-4 propoziții). "
+            "DIRECTIVĂ CRITICĂ: Răspunde DIRECT cu concluzia factuală în limba ROMÂNĂ. "
             "Este STRICT INTERZIS să generezi 'Thinking Process:', monologuri în engleză sau introduceri meta."
         )
 
         step_res = UnifiedLLMClient.chat_step(
             messages=[
-                {"role": "system", "content": "Ești un Auditor Investigativ de Elită. Răspunde strict pe baza probelor furnizate, exclusiv în limba ROMÂNĂ. Fii concis, riguros și direct (2-4 fraze). Nu include procese de gândire sau text în engleză."},
+                {"role": "system", "content": "Ești un Auditor Investigativ de Elită. Răspunde strict pe baza probelor furnizate, exclusiv în limba ROMÂNĂ. Fii concis, riguros și direct. Nu include procese de gândire sau text în engleză."},
                 {"role": "user", "content": prompt}
             ],
             model=self.active_model,
@@ -2041,7 +2366,8 @@ Răspuns JSON:
             f"CONCLUZII ȘI FAPTE VERIFICATE PE OBIECTIVE:\n{facts_summary}\n\n"
             "DIRECTIVĂ STRICTĂ DE FORMAT:\n"
             "Răspunde DIRECT și EXCLUSIV în limba ROMÂNĂ, redactând raportul criminalistic complet.\n"
-            "Începe răspunsul TĂU STRICT cu primul caracter '[' al secțiunii [FACTS]. Este STRICT INTERZIS să generezi 'Thinking Process:', introduceri meta sau text în limba engleză.\n\n"
+            "Începe răspunsul TĂU STRICT cu primul caracter '[' al secțiunii [FACTS]. Este STRICT INTERZIS să generezi 'Thinking Process:', introduceri meta sau text în limba engleză.\n"
+            "Dacă concluziile pe obiective conțin un tabel centralizator sau calcule agregate (Python Math Engine), PĂSTREAZĂ OBLIGATORIU tabelul Markdown complet și secțiunea de calcule matematice deterministe în secțiunea [FACTS], fără a omite rânduri sau a le rezuma generic.\n\n"
             "Structura OBLIGATORIE a raportului:\n"
             "[FACTS]\n"
             "- Listă detaliată a tuturor faptelor confirmate, cantităților și participanților, citând referințele [REF x]\n"
