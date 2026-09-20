@@ -593,4 +593,12 @@ Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), 
 4. **Early Stop Mechanism:** Agentul nu e fortat sa ajunga la pasul 15. Imediat ce are `[FACTS]` complete care raspund integral la intrebarea utilizatorului, opreste bucla si emite o concluzie.
 5. **Graph Search (Harta Documentului):** Utilizand `Neo4j`, cand agentul gaseste entitati (nume de companii), poate extrage conexiunile ierarhice (actionariat, auto-tranzactionare, management overlap).
 
+---
+
+## 5. Roadmap & TODO (Next Milestones)
+- [ ] **Multi-Pass Sectional Recursive Synthesis (Sinteză Ierarhică pe Capitole/TOC):**
+  - *Context:* Pentru documente masive (100–300+ pagini, dosare penale complexe sau rapoarte de audit internațional) unde volumul de constatări esențiale este atât de dens încât sinteza însăși depășește plafonul de 16k–32k tokeni de ieșire per pas.
+  - *Mecanism Propus:* În loc de un singur apel LLM de sinteză executivă, sistemul va descompune generarea pe arborele de capitole (TOC Engine), generând câte un raport modular dedicat de 4k tokeni per capitol tematic (Financiar, Clauze Juridice, Riscuri/Anchete, Concluzii). Acestea vor fi legate într-un dosar de sinteză multi-tab în interfață, eliminând orice degradare de atenție sau compresie forțată.
+
+
 
