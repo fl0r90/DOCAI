@@ -1777,9 +1777,84 @@ MAI CAUT ÎN CONTINUARE: (ce a rămas de lămurit din obiectiv, sau scrie exact 
                             m = re.search(r'(?:Seria și numărul|Număr|Nr\.?)\s*:\s*([A-Z0-9\-_ ]{3,30})', raw, re.IGNORECASE)
                             if m: val = m.group(1).strip()
 
-                row_data["fields"][f] = val if val else "N/A"
+                row_data["fields"][f] = val if val else ""
 
             extracted_rows.append(row_data)
+
+        # Tier 4: Fallback LLM / Rolling Scratchpad pentru rândurile cu câmpuri nesoluționate din metadata sau regex
+        unresolved_rows = [
+            r for r in extracted_rows 
+            if any(r["fields"].get(f) in ["", "N/A", None] for f in fields)
+        ]
+        if unresolved_rows:
+            missing_fields_set = list({f for r in unresolved_rows for f in fields if not r["fields"].get(f)})
+            print(f"[*] [Batch Tabular Extractor] Se declanșează Tier 4 Fallback pentru {len(unresolved_rows)} documente (câmpuri lipsă: {missing_fields_set})...")
+            
+            # Procesăm documentele nesoluționate
+            for row in unresolved_rows[:15]:
+                if self._stop_check():
+                    break
+                doc_id = row["doc_id"]
+                with SessionLocal() as db:
+                    doc_obj = db.query(Document).filter(Document.id == doc_id).first()
+                if not doc_obj:
+                    continue
+
+                raw_doc = doc_obj.raw_text or ""
+                # Dacă documentul este voluminos (> 15.000 caractere), declanșăm Rolling Scratchpad pe el!
+                if len(raw_doc) > 15000:
+                    print(f"[*] [Batch Tabular Extractor] Document mare ({len(raw_doc)} chars), se apelează Rolling Scratchpad pe ID {doc_id}...")
+                    focus = f"Extrage valorile pentru câmpurile: {', '.join(missing_fields_set)}"
+                    scratch_res = ""
+                    try:
+                        for msg, is_final, obs in self.run_rolling_scratchpad_digest(doc_id=doc_id, focus_query=focus):
+                            if is_final:
+                                scratch_res = obs
+                                break
+                    except Exception as e:
+                        print(f"[!] Eroare la Rolling Scratchpad pentru doc {doc_id}: {e}")
+                    raw_snippet = scratch_res[:4000] if scratch_res else raw_doc[:4000]
+                else:
+                    raw_snippet = raw_doc[:4000] if raw_doc else (doc_obj.ai_summary or "")
+
+                if not raw_snippet:
+                    continue
+
+                missing_for_this_row = [f for f in fields if not row["fields"].get(f)]
+                llm_prompt = (
+                    f"Extrage din textul următorului document valorile exacte pentru câmpurile specificate.\n"
+                    f"CÂMPURI CERUTE: {missing_for_this_row}\n\n"
+                    f"TEXT DOCUMENT:\n{raw_snippet}\n\n"
+                    f"Răspunde STRICT în format JSON conform schemei:\n"
+                    f"{json.dumps({f: '...' for f in missing_for_this_row})}"
+                )
+                try:
+                    micro_res = UnifiedLLMClient.chat_step(
+                        messages=[
+                            {"role": "system", "content": "Ești un extractor precis de date din documente. Răspunde exclusiv JSON."},
+                            {"role": "user", "content": llm_prompt}
+                        ],
+                        model=self.active_model,
+                        temperature=0.0,
+                        num_ctx=self.processing_ctx,
+                        stop_check=self._stop_check,
+                        format="json"
+                    )
+                    content = micro_res.get("content", "").strip()
+                    m = re.search(r'\{.*\}', content, re.DOTALL)
+                    if m:
+                        parsed = json.loads(m.group(0))
+                        for mf in missing_for_this_row:
+                            if mf in parsed and parsed[mf] and parsed[mf] != "...":
+                                row["fields"][mf] = str(parsed[mf]).strip()
+                except Exception as e:
+                    print(f"[!] Eroare la micro-LLM extraction pentru doc {doc_id}: {e}")
+
+        # Normalizare finală a valorilor rămase necompletate la 'N/A'
+        for row in extracted_rows:
+            for f in fields:
+                if not row["fields"].get(f):
+                    row["fields"][f] = "N/A"
 
         # 5. Reduce Stage: Calcule matematice deterministe (Python Math Engine)
         currency_totals: Dict[str, float] = {}
