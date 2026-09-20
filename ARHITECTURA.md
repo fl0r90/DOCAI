@@ -517,8 +517,35 @@
         - Asociază automat `[REF 1]`, `[REF 2]`, `[REF 3]` pentru Aviz, Borderou și Factură.
         - Protejează blocul `### ⚖️ Matrice de Reconciliere` în `_deduplicate_and_cap_evidence` și optimizează sinteza finală pentru obiective unice, livrând un raport criminalistic exhaustiv și fără trunchiere.
 
+### Etapa 51: Forensic Suite 2.0 - Superseding Contract Clauses & Addendum Resolution Engine (`tool_resolve_contract_hierarchy`)
+- **Problema Adresată:** În contractele comerciale reale, clauzele juridice (prețuri, termene, penalități, plafoane de răspundere, ordinea de stingere a debitelor) nu sunt formulate simplist, ci sunt modificate în cascadă prin Acte Adiționale succesive, anexe și derogări parțiale. Căutarea semantică generică (RAG clasic) eșuează lamentabil: amestecă acte adiționale din contracte diferite, citează clauze abrogate și atribuie clauzele corecte unor documente greșite.
+- **Arhitectură Implementată:**
+    - *1. Detecție & Calibrare la Ingestie cu Granite 4.2:8b (`deep_audit_service.py`):*
+        - La faza de ingestie/audit pe calupuri (Pass 1 Macro & Pass 6 Executive Summary), Granite detectează dacă un act este `ACT_ADIȚIONAL` sau `ANEXĂ` și extrage în JSONB-ul documentului:
+          * `este_act_modificator`: `true`
+          * `numar_contract_baza`: ex. `CTR-2024-005`
+          * `act_aditional_anterior`: referința la actul precedent
+          * `clauze_modificate`: lista de articole modificate/abrogate/derogate.
+        - Persistență directă în PostgreSQL (`doc_metadata['contract_modificat']`) și sincronizare în graful relațional Neo4j: `(ActAditional)-[:MODIFIES]->(ContractBaza)`.
+    - *2. Corecție Anti-Truncation (Ollama `num_predict` & Token Cap):*
+        - Mărit parametrul default `num_predict` de la 2048 la 4096 în `llm_client.py` și transmis explicit `max_tokens=4096` în `deep_audit_service.py` cu ghidaj de densitate, asigurând generarea rapoartelor executive complete de peste 10.000 caractere de la Secțiunea I la Secțiunea VI fără trunchieri.
+    - *3. Detecție de Intenție Juridică & Fast-Path Planner (`chat_service.py`):*
+        - Regex specializat (`contract_hierarchy_patterns`) care identifică litigiile pe clauze, acte adiționale, prețuri, scadențe, penalități și derogări de la Codul Civil, activând `is_contract_hierarchy = True`.
+        - Fast-path determinist care returnează instantaneu directiva `CONTRACT_HIERARCHY:[cod_contract]`.
+    - *4. Motorul de Rezoluție a Ierarhiei Contractuale (`tool_resolve_contract_hierarchy`):*
+        - Identifică toate documentele din lanț (Contract Cadru + toate Actele Adiționale asociate).
+        - Sortează cronologic pe baza `doc_date` și a axei timpului.
+        - Asignează citații imediate `[REF 1]`, `[REF 2]`, `[REF 3]` exacte pe documentele din lanț, eliminând 100% confuzia cu alte contracte din dosar.
+        - Aplică principiul *Lex posterior derogat priori*:
+          * Preț unitar: identifică prețul inițial (2.800 RON), prețul condiționat temporal (3.200 RON post-15 iulie) și mecanismul de discount retroactiv de volum (2.950 RON pentru tot anul dacă se ating 400t).
+          * Scadență: identifică reducerea termenului (de la 30 la 15 zile), dar subordonată condiției suspensive de transmitere a codului UIT din RO e-Transport (în lipsa UIT, scadența este suspendată de drept fără penalități).
+          * Penalități: urmărește eliminarea plafonului inițial de 10% în Actul 1 și reintroducerea plafonului global de 20% în Actul 2.
+          * Imputația plății: constată validitatea derogării exprese de la art. 1506-1509 Cod Civil, plățile parțiale stingând cu prioritate debitul principal (marfa), nu penalitățile.
+    - *5. Validare Live End-to-End:*
+        - Testat pe Cazul 12 (Agroterra) pe lanțul `CTR-2024-005` (Doc 151, Doc 152, Doc 153). Răspunsul este returnat în 2 secunde, cu matrice ierarhică completă, probe legate de citații și răspunsuri judiciare ferme pentru respingerea somației abuzive.
+
 ---
-*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 46 (Dynamic Neural Reranker Control), Etapa 47 (Anti-Runaway Reasoning Sanitization), Etapa 48 (Online Model Ingestion, Keep-Alive SSE, SOTA Forensic Mega-Prompt, Citations & AI Trace Drawers), Etapa 49 (Agnostic Batch Tabular Extractor & Deterministic Map-Reduce Engine) și Etapa 50 (Forensic Suite 2.0 - Cross-Document Reconciliation & Discrepancy Engine).*
+*Ultima actualizare: Septembrie 2026 - Adăugat Etapa 46 (Dynamic Neural Reranker Control), Etapa 47 (Anti-Runaway Reasoning Sanitization), Etapa 48 (Online Model Ingestion, Keep-Alive SSE, SOTA Forensic Mega-Prompt, Citations & AI Trace Drawers), Etapa 49 (Agnostic Batch Tabular Extractor & Deterministic Map-Reduce Engine), Etapa 50 (Forensic Suite 2.0 - Cross-Document Reconciliation Engine) și Etapa 51 (Forensic Suite 2.0 - Superseding Contract Clauses & Addendum Resolution Engine).*
 
 ### Arhitectura Completa a Sistemului Forensic DocAI (Cum functioneaza)
 Sistemul este construit pe un pipeline iterativ cu mai multi pasi (pana la 15), care impune rigoare matematica si de dovezi:

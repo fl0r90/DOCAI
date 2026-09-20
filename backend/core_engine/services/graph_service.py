@@ -139,6 +139,25 @@ class GraphService:
                         """,
                         src=str(src).strip(), dst=str(dst).strip(), rtype=rtype,
                     )
+
+                # Relație MODIFIES între documente (dacă este Act Adițional sau Anexă)
+                contract_mod = (doc_metadata or {}).get("contract_modificat", {})
+                if isinstance(contract_mod, dict) and contract_mod.get("numar_contract_baza"):
+                    base_ref = str(contract_mod.get("numar_contract_baza")).strip()
+                    if len(base_ref) >= 2:
+                        session.run(
+                            """
+                            MATCH (d:Document {id: $doc_id})
+                            MATCH (parent:Document)
+                            WHERE parent.case_id = $case_id AND parent.id <> $doc_id AND (
+                                parent.doc_number = $base_ref
+                                OR parent.name CONTAINS $base_ref
+                            )
+                            MERGE (d)-[r:MODIFIES]->(parent)
+                            SET r.detected_at = datetime()
+                            """,
+                            doc_id=doc_id, case_id=case_id, base_ref=base_ref
+                        )
         except Exception as ex:
             print(f"[!] Eroare sync_document_to_graph (doc {doc_id}): {ex}")
 

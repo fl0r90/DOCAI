@@ -917,7 +917,7 @@ class UnifiedLLMClient:
                 options: Dict[str, Any] = {
                     "temperature": temperature,
                     "num_ctx": proc_ctx,
-                    "num_predict": max_tokens or 2048
+                    "num_predict": max_tokens or 4096
                 }
                 payload = {
                     "model": active_model,

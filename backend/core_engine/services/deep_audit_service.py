@@ -130,11 +130,18 @@ class DeepForensicAuditor:
         
         prompt = f"""### System:
 Ești un Expert Auditor Forensic de Date. Analizează conținutul documentului și extrage metadatele esențiale de identificare și guvernanță.
-Documentul poate fi de orice tip: SITUATII_FINANCIARE | RAPORT_AUDIT | FACTURA | CONTRACT | EXTRAS_CONT | PROCES_VERBAL | FISA_UTILAJ | DECIZIE.
+Documentul poate fi de orice tip: SITUATII_FINANCIARE | RAPORT_AUDIT | FACTURA | CONTRACT | ACT_ADIȚIONAL | ACORD | EXTRAS_CONT | PROCES_VERBAL | FISA_UTILAJ | DECIZIE.
+
+ATENȚIE SPECIALĂ PENTRU CONTRACTE ȘI ACTE ADIȚIONALE / ANEXE:
+Dacă documentul este un ACT ADIȚIONAL, ANEXĂ, ACORD MODIFICATOR sau NOTIFICARE CONTRACTUALĂ:
+- Setează "este_act_modificator": true în obiectul "contract_modificat".
+- Extrage cu exactitate numărul și data contractului de bază modificat (ex: CTR-2024-005 din 15.02.2024).
+- Menționează orice acte adiționale anterioare referite sau modificate.
+- Extrage lista clauzelor modificate, abrogate sau derogate (Articol, Subiect: Preț / Penalități / Scadență / Imputație / Reziliere, Descriere exactă a modificării).
 
 Returnează STRICT un JSON valid cu următoarea structură:
 {{
-    "tip_document": "ex: SITUATII_FINANCIARE | FACTURA | CONTRACT | EXTRAS_CONT | RAPORT | DECIZIE",
+    "tip_document": "ex: CONTRACT | ACT_ADIȚIONAL | SITUATII_FINANCIARE | FACTURA | EXTRAS_CONT | RAPORT | DECIZIE",
     "numar_document": "număr / serie sau null",
     "data_document": "YYYY-MM-DD sau DD-MM-YYYY sau data aprobării/emiterii",
     "emitent": "Numele oficial al entității emitente / furnizorului / companiei",
@@ -144,6 +151,13 @@ Returnează STRICT un JSON valid cu următoarea structură:
     "valoare_totala": "Valoare totală dacă există, altfel null",
     "moneda": "RON | EUR | USD | etc.",
     "standard_contabil": "ex: IFRS / OMFP / N/A",
+    "contract_modificat": {{
+        "este_act_modificator": false,
+        "numar_contract_baza": null,
+        "data_contract_baza": null,
+        "act_aditional_anterior": null,
+        "clauze_modificate": []
+    }},
     "atribute_specifice": {{
         "proprietate_cheie_1": "valoare",
         "proprietate_cheie_2": "valoare"
@@ -642,9 +656,55 @@ Fii extrem de specific, citează cifrele, numele și numerele exacte. Dacă o ax
             sample_ledgers = [f"Secțiunea {c['chunk_idx']} (Pag. {c['page_start']}-{c['page_end']}):\n{c['dossier_text'][:400]}" for c in forensic_ledger[:4]]
             ledger_preview = "\n\n".join(sample_ledgers)
 
-        prompt = f"""### System:
+        contract_mod = macro_meta.get("contract_modificat") or {}
+        is_contractual = (
+            macro_meta.get("tip_document") in ["CONTRACT", "ACT_ADIȚIONAL", "ACT_ADITIONAL", "ACORD", "ANEXA", "ANEXA_CONTRACT"]
+            or "CTR-" in self.filename.upper()
+            or "ACT-" in self.filename.upper()
+            or "CONTRACT" in self.filename.upper()
+            or contract_mod.get("este_act_modificator")
+        )
+
+        if is_contractual:
+            prompt = f"""### System:
+Ești un Senior Forensic Investigator și Auditor Criminalist specializat în Drept Comercial și Contracte.
+Redactează un RAPORT EXECUTIV CRIMINALISTIC CONTRACTUAL (Forensic Contract Audit Summary) dens, riguros și detaliat în limba ROMÂNĂ pentru documentul contractual '{self.filename}'.
+
+IMPORTANT: Dacă documentul este un ACT ADIȚIONAL sau MODIFICATOR:
+- Evidențiază chiar la începutul raportului (sub titlu) ce Contract de Bază modifică (număr și dată) și dacă modifică vreun act adițional anterior!
+- Detaliază clar clauzele anterioare care au fost înlocuite, abrogate sau completate (preț, penalități, scadență, condiții suspensive).
+
+Raportul TREBUIE structurat ferm pe următoarele secțiuni cu litere mari și bullet points:
+I. IDENTIFICARE & NATURĂ JURIDICĂ (Tip Act, Număr, Dată, Părți Semnatare)
+II. IERARHIE CONTRACTUALĂ & DOCUMENTE AMENDATE (Contractul de bază modificat, acte adiționale precedente, clauze înlocuite/abrogate)
+III. REGIMUL PREȚURILOR & CONDIȚII FINANCIARE (Preț unitar, tranșe, discounturi retroactive de volum, modalități de facturare)
+IV. TERMENE, SCADENȚE & CONDIȚII SUSPENSIVE (Termen de scadență, condiționări de recepție sau coduri UIT/RO e-Transport)
+V. PENALITĂȚI, GARANȚII & ORDINEA DE IMPUTAȚIE A PLĂȚILOR (Cota penalităților/zi, existența sau eliminarea plafoanelor, derogări de la art. 1506-1509 Cod Civil la stingerea datoriilor)
+VI. RISCURI FORENSIC & CAPCANE JURIDICE (Capcane comerciale, contradicții cu contractul inițial, expuneri în caz de litigiu)
+
+CONSTRÂNGERE DE FORMĂ & DENSITATE:
+Fii dens, precis și concis. Fiecare secțiune va conține strict 2-4 bullet points clare și percutante. Evită introducerile lungi sau repetițiile discursive, astfel încât raportul să fie complet de la Secțiunea I până la Concluzii (Secțiunea VI) fără a fi trunchiat!
+
+### User:
+DATE MACRO:
+{json.dumps(macro_meta, indent=2, ensure_ascii=False)}
+
+DATE TRANZACȚIONALE / FINANCIARE:
+{json.dumps(fin_items[:12], indent=2, ensure_ascii=False)}
+
+FACTORI DE RISC & CLAUZE PENALE:
+{json.dumps(forensic_risks, indent=2, ensure_ascii=False)}
+
+TEXT DOCUMENT (FRAGMENTE ESENȚIALE):
+{self.raw_text[:7000]}
+"""
+        else:
+            prompt = f"""### System:
 Ești un Senior Forensic Investigator și Auditor Criminalist de Elită.
 Redactează un RAPORT EXECUTIV CRIMINALISTIC (Forensic Audit Summary) complet, dens și riguros structurat în limba ROMÂNĂ pentru documentul '{self.filename}'.
+
+CONSTRÂNGERE DE FORMĂ & DENSITATE:
+Fii dens, precis și concis. Fiecare secțiune va conține strict 2-4 bullet points clare și percutante, fără divagații discursive, astfel încât toate cele VI secțiuni să fie redactate complet până la final fără trunchiere.
 
 Raportul TREBUIE să fie formulat profesional, organizat clar pe următoarele secțiuni cu litere mari și bullet points:
 I. IDENTIFICARE & GUVERNANȚĂ CORPORATIVĂ (Emitent, Standarde, Perioadă, Aprobare CA)
@@ -668,7 +728,7 @@ PROBE DIN DOSARUL GRANULAR (EXTRASE):
 {ledger_preview}
 """
         try:
-            summary = await self.llm.generate(prompt, self.model, is_json=False)
+            summary = await self.llm.generate(prompt, self.model, is_json=False, max_tokens=4096)
             if summary and len(summary.strip()) > 200:
                 return summary.strip()
         except Exception as e:
@@ -716,10 +776,12 @@ PROBE DIN DOSARUL GRANULAR (EXTRASE):
             "emitent": macro_meta.get("emitent"),
             "cui_cif": macro_meta.get("cui_cif"),
             "standard_contabil": macro_meta.get("standard_contabil"),
+            "contract_modificat": macro_meta.get("contract_modificat", {}),
             "dynamic_attributes": {
                 "emitent": macro_meta.get("emitent"),
                 "cui_cif": macro_meta.get("cui_cif"),
                 "standard_contabil": macro_meta.get("standard_contabil"),
+                "contract_modificat": macro_meta.get("contract_modificat", {}),
                 "perioada_raportare": macro_meta.get("perioada_raportare"),
                 "moneda_raportare": macro_meta.get("moneda_raportare"),
                 "actionari_principali": macro_meta.get("actionari_principali", []),
