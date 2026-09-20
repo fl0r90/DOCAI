@@ -2757,46 +2757,56 @@ Răspunsuri punctuale fundamentate judiciar pentru respingerea pretențiilor Fur
 
         anomalies_md = "\n".join(f"- {a}" for a in unique_anomalies) if unique_anomalies else "- Nu s-au identificat inversiuni de secvență flagrante pe setul selectat."
 
-        report = f"""[FACTS]
+        facts_block = f"""[FACTS]
 ### ⏱️ Cronologie Unificată Multi-Sursă (Axa Timpului Faptică & Trans-Documentară)
-Au fost coroborate și ordonate cronologic pe o axă unică de timp **{len(events_to_display)} evenimente cheie** identificate în comunicațiile interne (WhatsApp), extrasele bancare, contractele oficiale, facturile fiscale, avizele de transport și notificările organelor de control.
+Au fost coroborate și ordonate cronologic pe o axă unică de timp **{len(events_to_display)} evenimente cheie** identificate în dosar.
 
 {table_md}
 
-[ANALYSIS]
-Analiza criminalistică a succesiunii evenimentelor relevă dinamica operațională și financiară a litigiului / mecanismelor investigate:
+### ⚠️ Anomalii Cronologice și Inconsecvențe Cauzale Identificate Determinist
+{anomalies_md}"""
 
-1. **Faza I — Conspirația și Disimularea Prețului (Aprilie – Mai 2023):**
-   - **04.04.2023:** Administratorul Radu Teodorescu și Directorul Comercial Mihai Stanciu convin pe WhatsApp să mențină contractul oficial la **230 EUR/tonă** pentru a păstra marja de bonitate solicitată de bancă, mascând diferența de **15 EUR/tonă (15.000 EUR fond)** prin facturi de „consultanță” emise prin firma paravan Nordic Consulting din Giurgiu.
-   - **08.04.2023:** Se semnează contractul oficial CTR-2023-003 cu Cereal Grup Moldova la prețul fictiv de 230 EUR/to.
-   - **12.04.2023:** Se încheie contractul de consiliere management cu Nordic Consulting.
-   - **29.04.2023 – 05.05.2023:** Nordic Consulting emite factura NOR-2023-0112 (74.250 RON), iar plata virament este executată imediat din contul de la Banca Transilvania.
+        # Generare dinamică a Analizei Criminalistice și a Concluziei prin LLM (Qwen 3.5 9B)
+        print(f"[*] [Unified Timeline Engine] Solicitare sinteză narativă și concluzii de la modelul activ: {self.active_model}...")
+        synthesis_prompt = f"""Ești Senior Forensic Evidence Strategist și Auditor Criminalist.
+Ai la dispoziție o axă a timpului faptică și anomaliile cronologice extrase determinist din dosar:
 
-2. **Faza II — Livrarea celor 18 Camioane și Compensarea Lipsurilor (Iunie 2024):**
-   - **18.06.2024 (08:30):** Plecarea convoiului de 18 autocamioane, avizată rotund pentru 450,00 tone.
-   - **18.06.2024 (14:15 – 16:40):** La cântărirea pe podul silozului se constată o diferență masivă în minus de **61,50 tone** (doar 388,50 tone recepționate). Prin instrucțiunea conducerii, borderoul se semnează pe cantitatea reală, dar se decide mușamalizarea.
-   - **20.06.2024:** Se încasează integral factura pentru cele 450 tone (539.550 RON), deși în siloz au intrat doar 388.5 tone.
-   - **25.06.2024 – 26.06.2024:** Imediat după încasare, firma paravan Nordic Consulting emite factura NOR-2024-0095 de 108.900 RON, achitată fulger prin virament bancar.
+{facts_block}
 
-3. **Faza III — Intervenția Fiscului și Reconfigurările Contractuale (Iulie – Decembrie 2024):**
-   - **15.07.2024:** Direcția Generală Antifraudă Fiscală (ANAF) emite Notificarea de Conformare, contestând deducerile de 37.000 EUR către Nordic și cerând explicații pentru neconcordanțele volumice la livrări.
-   - **10.09.2024:** Se semnează Actul Adițional nr. 2 la CTR-2024-005, introducând recalcularea retroactivă a prețului la 2.950 RON/to și plafonarea penalităților la 20%, cu derogare expresă de la Codul Civil.
+ÎNTREBAREA UTILIZATORULUI: {self.user_question}
 
-### ⚠️ Anomalii Cronologice și Inconsecvențe Cauzale Identificate (Chronological Anomaly Engine)
-{anomalies_md}
+INSTRUCȚIUNI OBLIGATORII:
+1. Redactează exclusiv secțiunile Markdown [ANALYSIS], [CONCLUSION] și [MISSING EVIDENCE] în limba ROMÂNĂ.
+2. În secțiunea [ANALYSIS], structurează evenimentele pe etape/faze logice și explică interconexiunile dintre probe (discuții WhatsApp, plăți bancare, contracte, facturi, controale ANAF).
+3. În secțiunea [CONCLUSION], sintetizează concluziile răspunzând DIRECT, complet și argumentat la întrebarea utilizatorului, citând obligatoriu etichetele [REF x] asociate din tabel.
+4. În secțiunea [MISSING EVIDENCE], notează ce probe suplimentare ar fi necesare pentru completarea probatoriului (sau 'N/A').
+5. La final, adaugă '[CONFIDENCE]: HIGH'.
+6. DIRECTIVĂ CRITICĂ: Răspunde DIRECT în limba ROMÂNĂ. Este STRICT INTERZIS să generezi tag-uri <think>...</think>, monologuri interne sau text în limba engleză.
+7. Începe răspunsul DIRECT cu primul caracter '[' al secțiunii [ANALYSIS]."""
 
-[CONCLUSION]
-- **Reconstituirea axei timpului confirmă legătura indisolubilă între deciziile informale (chat) și mișcările financiare/contractuale din dosar.**
-- Toate fluxurile financiare către entitatea paravan Nordic Consulting au urmat la intervale de **2 până la 7 zile** imediat după momentele cheie de fraudă sau neconcordanță cantitativă (încasarea contractului Cereal Grup în 2023, respectiv disimularea celor 61,50 tone grâu în 2024).
-- Inversiunile de secvență și clauzele retroactive demonstrează încercarea repetată de ajustare scriptică post-factum a documentelor contabile pentru a acoperi lipsurile fizice de marfă și investigațiile bancare/fiscale.
-
-[MISSING EVIDENCE]
-- Extrasele bancare ale entității Nordic Consulting Management SRL pentru a urmări destinația finală și retragerile de numerar ale sumelor virate (74.250 RON și 108.900 RON).
-- Rapoartele tehnice de calibrare metrologică ale cântarului auto din 18.06.2024 pentru a stabili certitudinea erorii de pod basculă.
-
-[CONFIDENCE]: HIGH"""
-
-        return report
+        try:
+            synthesis_ctx = max(self.processing_ctx, 16384)
+            step_res = UnifiedLLMClient.chat_step(
+                messages=[
+                    {"role": "system", "content": "Ești un Maestru Auditor Criminalist. Sintetizează faptele și anomaliile cronologice din dosar într-un raport criminalistic judiciar în limba ROMÂNĂ. Începe direct cu [ANALYSIS]."},
+                    {"role": "user", "content": synthesis_prompt}
+                ],
+                model=self.active_model,
+                temperature=0.0,
+                num_ctx=synthesis_ctx,
+                stop_check=self._stop_check,
+                max_tokens=4096
+            )
+            raw_llm = step_res.get("content", "").strip()
+            clean_llm = self._sanitize_llm_response(raw_llm, target_header="[ANALYSIS]")
+            if not clean_llm:
+                clean_llm = raw_llm
+            return f"{facts_block}\n\n{clean_llm}"
+        except ChatStoppedError:
+            raise
+        except Exception as e:
+            print(f"[!] Eroare la sinteza LLM pentru timeline: {e}")
+            return f"{facts_block}\n\n[ANALYSIS]\nEroare la generarea analizei LLM: {e}\n\n[CONCLUSION]\nConsultați tabelul cronologic de mai sus pentru detaliile complete."
 
     def _generate_investigation_plan(self) -> List[Dict[str, Any]]:
         """Decompune semantic întrebarea utilizatorului în 1-4 obiective atomice folosind LLM cu fallback determinist."""
