@@ -653,8 +653,25 @@ Fii extrem de specific, citează cifrele, numele și numerele exacte. Dacă o ax
         """Generează raportul criminalistic executiv de înaltă densitate."""
         ledger_preview = ""
         if forensic_ledger:
-            sample_ledgers = [f"Secțiunea {c['chunk_idx']} (Pag. {c['page_start']}-{c['page_end']}):\n{c['dossier_text'][:400]}" for c in forensic_ledger[:4]]
+            total_ledgers = len(forensic_ledger)
+            if total_ledgers <= 8:
+                selected_chunks = forensic_ledger
+                max_chars = 400
+            else:
+                # Eșantionare uniformă trans-documentară pentru a acoperi 100% din pagini (de la prima la ultima)
+                step = total_ledgers / 8.0
+                selected_chunks = [forensic_ledger[int(i * step)] for i in range(8)]
+                if forensic_ledger[-1] not in selected_chunks:
+                    selected_chunks[-1] = forensic_ledger[-1]
+                max_chars = 300
+            sample_ledgers = [f"Secțiunea {c['chunk_idx']} (Pag. {c['page_start']}-{c['page_end']}):\n{c['dossier_text'][:max_chars]}" for c in selected_chunks]
             ledger_preview = "\n\n".join(sample_ledgers)
+
+        # Extragere reprezentativă din text: Head (preambul/părți) + Tail (semnături/clauze finale)
+        if len(self.raw_text) > 4000:
+            text_excerpt = self.raw_text[:2500] + "\n\n[... secțiuni intermediare sintetizate în dosarul granular mai sus ...]\n\n" + self.raw_text[-1500:]
+        else:
+            text_excerpt = self.raw_text
 
         contract_mod = macro_meta.get("contract_modificat") or {}
         is_contractual = (
@@ -696,7 +713,7 @@ FACTORI DE RISC & CLAUZE PENALE:
 {json.dumps(forensic_risks, indent=2, ensure_ascii=False)}
 
 TEXT DOCUMENT (FRAGMENTE ESENȚIALE):
-{self.raw_text[:4000]}
+{text_excerpt}
 """
         else:
             prompt = f"""### System:

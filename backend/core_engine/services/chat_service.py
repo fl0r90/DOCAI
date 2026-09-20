@@ -3169,7 +3169,7 @@ Răspuns JSON:
         compaction_prompt = (
             f"Ești un Compactor de Memorie Judiciară. Condensează următoarele fragmente de probe din dosar pentru obiectivul '{target_title}'.\n\n"
             "REGULI STRICTE DE CONDENSARE:\n"
-            f"0. Păstrează cu PRIORITATE ABSOLUTĂ orice probe, cifre sau declarații direct relevante pentru obiectivul: '{target_title}'.\n"
+            f"0. Păstrează cu PRIORITATE ABSOLUTĂ orice clauze contractuale, articole legale (ex: ART. 1, ART. 2, ART. 3) și prevederi textuale integrale, precum și orice probe, cifre sau declarații direct relevante pentru obiectivul: '{target_title}'.\n"
             "1. Păstrează OBLIGATORIU toate cifrele, cantitățile și unitățile de măsură (ex: tone, bucăți, procente, diferențe).\n"
             "2. Păstrează OBLIGATORIU toate codurile de documente și numerele (avize, facturi, borderouri, tichete cântar, serii).\n"
             "3. Păstrează OBLIGATORIU valorile monetare, prețurile unitare și taxele aplicate.\n"
@@ -3341,6 +3341,45 @@ Răspuns JSON:
 
         return unique_clues
 
+    def _resolve_target_doc_id(self, ref_hint: str) -> Optional[int]:
+        """Rezolvă agnostic identificatorul unui document (doc_id) din referințe gen 'REF 22', '157', 'CONTRACT_IMPRUMUT', etc."""
+        if not ref_hint:
+            return None
+        hint = str(ref_hint).strip()
+
+        # 1. Căutare după număr referință: REF 22, [REF 22], REF22, #22
+        m_ref = re.search(r'\b(?:REF\s*\[?|#)?(\d+)\b', hint, re.IGNORECASE)
+        if m_ref:
+            num = int(m_ref.group(1))
+            # Verificăm dacă există în lista de citate din sesiune
+            for c in self.citations:
+                if c.get("id") == num and c.get("doc_id"):
+                    return c.get("doc_id")
+            # Sau dacă num este direct doc_id în dosarul curent
+            with SessionLocal() as db:
+                doc = db.query(Document).filter(Document.id == num, Document.case_id == self.case_id).first()
+                if doc:
+                    return doc.id
+
+        # 2. Căutare textuală/lexicală în denumirea fișierelor din dosar
+        clean_hint = re.sub(r'^(?:FETCH_DOCUMENT|REQUEST_FULL_DOCUMENT|EXPAND_DOCUMENT|REF\s*\d+)\s*[:\-]?\s*', '', hint, flags=re.IGNORECASE).strip()
+        clean_hint = clean_hint.replace("[", "").replace("]", "").replace("'", "").replace('"', "")
+        if len(clean_hint) >= 3:
+            with SessionLocal() as db:
+                all_case_docs = db.query(Document).filter(Document.case_id == self.case_id).all()
+                # Potrivire exactă parțială
+                for d in all_case_docs:
+                    fname = (d.filename or "").lower()
+                    if clean_hint.lower() in fname:
+                        return d.id
+                # Căutare pe tokeni relevanți (>= 4 caractere)
+                tokens = [t for t in re.split(r'[-_.\s]+', clean_hint) if len(t) >= 4 and t.lower() not in ['pagina', 'articol', 'articolul', 'art', 'clauza', 'partea', 'anexa']]
+                for t in tokens:
+                    for d in all_case_docs:
+                        if t.lower() in (d.filename or "").lower():
+                            return d.id
+        return None
+
     def _execute_sub_target(self, target: Dict[str, Any]) -> str:
         """Rezolvă un target individual într-un context izolat și curat (Context-Flush)."""
         evidence_snippets = []
@@ -3478,7 +3517,11 @@ Răspuns JSON:
             "Dacă dovezile conțin un tabel centralizator, o matrice de reconciliere sau calcule agregate (Python Math Engine), include OBLIGATORIU tabelul/matricea completă și secțiunea de calcule agregate în răspunsul tău. "
             "Efectuează calcule matematice directe dacă obiectivul cere o diferență sau o valoare. "
             "Dacă dovezile conțin discuții sau instrucțiuni despre nereguli, diferențe sau aranjamente (ex: pe WhatsApp), expune-le explicit. "
-            "Dacă dovezile nu conțin nicio mențiune sau document despre acest obiectiv, specifică explicit 'Nu s-au găsit dovezi'.\n"
+            "Dacă dovezile nu conțin nicio mențiune sau document despre acest obiectiv, specifică explicit 'Nu s-au găsit dovezi'.\n\n"
+            "CAPACITATE FETCH INTEGRAL (DYNAMIC DOCUMENT RETRIEVAL):\n"
+            "- Dacă probele conțin doar un fragment parțial, o clauză retezată sau dacă ai nevoie de textul integral al unui act (contract, decizie, extras, raport etc.) pentru a stabili certitudinea, emite pe prima linie comanda:\n"
+            "  FETCH_DOCUMENT: [REF x] (sau doc_id / nume document)\n"
+            "  Sistemul va încărca automat documentul complet din dosar și ți-l va furniza pentru analiză completă.\n\n"
             "DIRECTIVĂ CRITICĂ: Răspunde DIRECT cu concluzia factuală în limba ROMÂNĂ. "
             "Este STRICT INTERZIS să generezi 'Thinking Process:', monologuri în engleză sau introduceri meta."
         )
@@ -3496,6 +3539,72 @@ Răspuns JSON:
         )
         raw_res = step_res.get("content", "").strip()
         clean_res = self._sanitize_llm_response(raw_res)
+
+        # ACTIVE DOCUMENT EXPANSION LOOP (Autonomie la Cererea Modelului sau Auto-Healing pe Fragmente Parțiale)
+        expanded_doc_id = None
+
+        # 1. Detectare cerere explicită FETCH_DOCUMENT din partea modelului
+        fetch_match = re.search(r'(?:\[?\b(?:FETCH_DOCUMENT|REQUEST_FULL_DOCUMENT|EXPAND_DOCUMENT)\b[:\s]+([^\]\n\r]+)\]?)', raw_res, re.IGNORECASE)
+        if fetch_match:
+            expanded_doc_id = self._resolve_target_doc_id(fetch_match.group(1))
+
+        # 2. Auto-Healing: Modelul raportează că un articol sau textul unui act este incomplet / doar parțial
+        if not expanded_doc_id:
+            incomplete_patterns = [
+                r'(?:textul\s+complet\s+al\s+[^.\n]+?\s*nu\s+este\s+disponibil)',
+                r'(?:doar\s+menționăm\s+["\'][^"\']+["\']\s+parțial)',
+                r'(?:doar\s+această\s+parțialitate\s+este\s+menționată)',
+                r'(?:nu\s+este\s+disponibil\s+textul\s+complet)',
+                r'(?:clauz[aă]\s+retezat[aă]|fragment\s+incomplet)'
+            ]
+            for pat in incomplete_patterns:
+                m = re.search(pat, raw_res, re.IGNORECASE)
+                if m:
+                    context_window = raw_res[max(0, m.start() - 200):min(len(raw_res), m.end() + 200)]
+                    ref_m = re.search(r'\b(?:REF\s*\[?|#)?(\d+)\b', context_window, re.IGNORECASE)
+                    if ref_m:
+                        expanded_doc_id = self._resolve_target_doc_id(ref_m.group(0))
+                    if not expanded_doc_id:
+                        for token in ["contract", "imprumut", "extras", "proces_verbal", "decizie", "raport", "nota"]:
+                            if token in context_window.lower():
+                                expanded_doc_id = self._resolve_target_doc_id(token)
+                                if expanded_doc_id:
+                                    break
+                    if expanded_doc_id:
+                        break
+
+        # 3. Dacă s-a identificat un document ce trebuie expandat integral:
+        if expanded_doc_id:
+            print(f"[*] [Active Document Expansion] Modelul a solicitat/necesită documentul integral (ID {expanded_doc_id}) pentru Ținta {target.get('id')}. Preluare text complet...")
+            full_doc_str = self.tool_fetch_full_document(expanded_doc_id, focus_terms=target["title"])
+            if full_doc_str and "not found" not in full_doc_str and "No text fragments" not in full_doc_str:
+                expanded_evidence = f"{combined_evidence}\n\n=== DOCUMENT INTEGRAL EXTRAS DIN DOSAR LA CERERE ===\n{full_doc_str}"
+                retry_prompt = (
+                    f"OBIECTIV DE INVESTIGAT: {target['title']}\n\n"
+                    f"{prev_facts_ctx}"
+                    f"DOVEZI IDENTIFICATE DIN DOSAR (INCLUSIV DOCUMENTUL INTEGRAL SOLICITAT):\n{expanded_evidence[:self.max_evidence_chars]}\n\n"
+                    "NOTĂ AUDIT: Ai solicitat sau era necesar textul complet al documentului. Documentul a fost extras integral din dosar și se află mai sus. "
+                    "CERINȚĂ: Formulează concluzia factuală definitivă și completă în limba ROMÂNĂ. "
+                    "Citează textul integral al clauzelor sau articolelor relevante (nu mai afirma că textul lipsește sau e parțial, deoarece ai documentul integral în față). "
+                    "Extrage cifre exacte, date și citează referințele [REF x].\n"
+                    "DIRECTIVĂ CRITICĂ: Răspunde DIRECT cu concluzia factuală definitivă în limba ROMÂNĂ. Nu include procese de gândire sau text în engleză."
+                )
+                step_res2 = UnifiedLLMClient.chat_step(
+                    messages=[
+                        {"role": "system", "content": "Ești un Auditor Investigativ de Elită. Răspunde strict pe baza probelor furnizate, exclusiv în limba ROMÂNĂ. Fii concis, riguros și direct. Nu include procese de gândire sau text în engleză."},
+                        {"role": "user", "content": retry_prompt}
+                    ],
+                    model=self.active_model,
+                    temperature=0.0,
+                    num_ctx=self.processing_ctx,
+                    stop_check=self._stop_check,
+                    max_tokens=4096
+                )
+                raw_res2 = step_res2.get("content", "").strip()
+                clean_res2 = self._sanitize_llm_response(raw_res2)
+                if clean_res2 and len(clean_res2) > 20:
+                    clean_res = clean_res2
+
         if is_reconcile_target and reconcile_obs and "| # |" not in (clean_res or ""):
             clean_res = f"{clean_res}\n\n{reconcile_obs}"
         return clean_res or raw_res
@@ -3528,7 +3637,8 @@ Răspuns JSON:
             "3. Păstrează cifrele exacte, cantitățile și monedele (RON, EUR, etc.).\n"
             "4. Dacă faptele includ tabele centrale, matrici de reconciliere sau calcule din Python Math Engine, reproduce-le structurat în raport.\n"
             "5. Păstrează un ton neutru, formal, criminalistic și exhaustiv.\n"
-            "6. STRUCTUREAZĂ RAPORTUL OBLIGATORIU ÎN URMĂTOARELE SECȚIUNI MARKDOWN:\n\n"
+            "6. La secțiunea [MISSING EVIDENCE], consemnează DOAR documente sau probe externe care lipsesc efectiv din dosar. Dacă o clauză, un articol sau un act a fost deja citat și consemnat în faptele de mai sus, este STRICT INTERZIS să afirmi că textul lui nu este disponibil în dosar.\n"
+            "7. STRUCTUREAZĂ RAPORTUL OBLIGATORIU ÎN URMĂTOARELE SECȚIUNI MARKDOWN:\n\n"
             "[FACTS]\n"
             "- Faptele certe probate cu trimiteri la [REF x]\n"
             "[ANALYSIS]\n"
