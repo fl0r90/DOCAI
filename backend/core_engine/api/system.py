@@ -885,3 +885,24 @@ def get_debug_logs(
     from ..services.debug_logger import debug_logger
     safe_limit = min(max(1, limit), 500)
     return debug_logger.get_recent_logs(limit=safe_limit, offset=offset, level=level, service=service)
+
+
+@router.get("/logs/llm-trace")
+def get_llm_trace_logs(limit: int = 50, admin: User = Depends(check_admin)):
+    """
+    Servește istoricul detaliat al execuțiilor LLM (prompt integral pe bucăți, gândire/reasoning, unelte și răspuns brut).
+    """
+    import redis, json
+    try:
+        r = redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
+        raw_items = r.lrange("llm_full_trace_logs", 0, limit - 1)
+        traces = []
+        for item in raw_items:
+            try:
+                traces.append(json.loads(item.decode('utf-8') if isinstance(item, bytes) else item))
+            except Exception:
+                pass
+        return {"traces": traces, "total": len(traces)}
+    except Exception as e:
+        return {"traces": [], "total": 0, "error": str(e)}
+

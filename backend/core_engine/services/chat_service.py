@@ -892,7 +892,7 @@ class AgenticInvestigator:
                 if doc_obj.raw_text and raw_len <= 3000:
                     doc_context = doc_obj.raw_text.strip()
                 else:
-                    doc_context = (chunk.content or "").strip()
+                    doc_context = (getattr(chunk, 'parent_content', None) or chunk.content or "").strip()
 
                 if not doc_context:
                     continue
@@ -1078,12 +1078,17 @@ Răspunde EXCLUSIV cu scratchpad-ul comprimat (format bullet-points)."""
             # Lăsăm ~3.000 tokeni pentru prompt de sistem + obiectiv + starea curentă + output scurt
             available_tokens = max(4000, chat_ctx - 3000)
             batch_size = max(18000, int(available_tokens * 3.5))
-            overlap = min(2000, max(1000, int(batch_size * 0.05)))
+            overlap = max(500, min(2000, max(1000, int(batch_size * 0.05))))
 
             slices = []
             curr_pos = 0
             while curr_pos < len(raw):
                 end_pos = min(len(raw), curr_pos + batch_size)
+                # Aliniere inteligentă pe capăt de linie (\n) pentru a preveni tăierea cuvintelor sau tabelelor
+                if end_pos < len(raw):
+                    last_nl = raw.rfind('\n', curr_pos + (batch_size // 2), end_pos)
+                    if last_nl != -1:
+                        end_pos = last_nl + 1
                 slices.append((curr_pos, end_pos, raw[curr_pos:end_pos]))
                 if end_pos >= len(raw):
                     break
@@ -1244,6 +1249,45 @@ MAI CAUT ÎN CONTINUARE: (ce a rămas de lămurit din obiectiv, sau scrie exact 
             final_observation = f"{final_header}:\n\nSINTEZĂ PROBE CONFIRMATE:\n{am_gasit_deja}\n\nDETALIU PROBE PE CALUPURI:\n{compiled_text}"
 
             yield (f"✅ Finalizat Rolling Scratchpad ({len(accumulated_findings)} calupuri cu probe identificate, {elapsed:.0f}s)!", True, final_observation)
+
+    def tool_zoom_page(self, doc_id: int, center_page: int, expand_pages: int = 1) -> str:
+        """
+        Tool: Targeted Page Zoom Navigation.
+        Fetches contiguous page content [center_page - expand_pages, center_page + expand_pages] for a document.
+        Useful when tables, formulas, multi-year calculations or clauses span across adjacent pages.
+        """
+        start_p = max(1, center_page - expand_pages)
+        end_p = center_page + expand_pages
+        with SessionLocal() as db:
+            doc_obj = db.query(Document).filter(Document.id == doc_id).first()
+            if not doc_obj:
+                return f"Document ID {doc_id} not found."
+
+            chunks = db.query(DocumentChunk).filter(
+                DocumentChunk.document_id == doc_id,
+                DocumentChunk.page_number >= start_p,
+                DocumentChunk.page_number <= end_p
+            ).order_by(DocumentChunk.page_number, DocumentChunk.chunk_index).all()
+
+            if not chunks:
+                return f"No pages found for Document ID {doc_id} in page range [{start_p}-{end_p}]."
+
+            formatted_pages = []
+            for c in chunks:
+                citation_id = len(self.citations) + 1
+                self.citations.append({
+                    "id": citation_id,
+                    "doc_id": doc_obj.id,
+                    "page": c.page_number or center_page,
+                    "content": (c.content or "")[:500],
+                    "highlight_term": "",
+                    "filename": doc_obj.filename if doc_obj else f"Doc_{doc_id}",
+                    "spatial": ""
+                })
+                header = f"[REF {citation_id} - {doc_obj.filename} | Pagina {c.page_number or center_page}]"
+                formatted_pages.append(f"{header}\n{c.content}")
+
+            return "\n\n".join(formatted_pages)
 
     def tool_fetch_full_document(self, doc_id: int, focus_terms: str = ""):
         """Tool: Retrieve complete full-text or progressive scratchpad digest when document exceeds context window."""
@@ -3518,8 +3562,11 @@ Răspuns JSON:
             "Efectuează calcule matematice directe dacă obiectivul cere o diferență sau o valoare. "
             "Dacă dovezile conțin discuții sau instrucțiuni despre nereguli, diferențe sau aranjamente (ex: pe WhatsApp), expune-le explicit. "
             "Dacă dovezile nu conțin nicio mențiune sau document despre acest obiectiv, specifică explicit 'Nu s-au găsit dovezi'.\n\n"
-            "CAPACITATE FETCH INTEGRAL (DYNAMIC DOCUMENT RETRIEVAL):\n"
-            "- Dacă probele conțin doar un fragment parțial, o clauză retezată sau dacă ai nevoie de textul integral al unui act (contract, decizie, extras, raport etc.) pentru a stabili certitudinea, emite pe prima linie comanda:\n"
+            "CAPACITATE FETCH INTEGRAL & NAVIGARE ZOOM PĂGÂNI (DYNAMIC DOCUMENT & PAGE RETRIEVAL):\n"
+            "- Dacă probele conțin doar o parte a unui tabel, o formulă întreruptă, calcule pe mai mulți ani care continuă pe pagini adiacente sau o clauză retezată, emite pe prima linie comanda:\n"
+            "  ZOOM_PAGE: [REF x], pag 5 (sau doc_id, pagina_centrală)\n"
+            "  Sistemul va extinde automat ferestra de vizualizare la paginile adiacente (ex: paginile 4-6) și va furniza contextul extins.\n"
+            "- Dacă ai nevoie de textul integral al unui act (contract, decizie, extras, raport etc.) pentru a stabili certitudinea, emite pe prima linie comanda:\n"
             "  FETCH_DOCUMENT: [REF x] (sau doc_id / nume document)\n"
             "  Sistemul va încărca automat documentul complet din dosar și ți-l va furniza pentru analiză completă.\n\n"
             "DIRECTIVĂ CRITICĂ: Răspunde DIRECT cu concluzia factuală în limba ROMÂNĂ. "
@@ -3540,12 +3587,55 @@ Răspuns JSON:
         raw_res = step_res.get("content", "").strip()
         clean_res = self._sanitize_llm_response(raw_res)
 
-        # ACTIVE DOCUMENT EXPANSION LOOP (Autonomie la Cererea Modelului sau Auto-Healing pe Fragmente Parțiale)
+        # ACTIVE DOCUMENT & PAGE EXPANSION LOOP (Autonomie 3-Tier Fallback: ZOOM_PAGE -> FETCH_DOCUMENT / Scratchpad)
+        zoom_match = re.search(r'(?:\[?\b(?:ZOOM_PAGE|PAGE_ZOOM|EXPAND_PAGE)\b[:\s]+([^\]\n\r]+)\]?)', raw_res, re.IGNORECASE)
         expanded_doc_id = None
+        zoom_doc_id = None
+        zoom_page_num = 1
+
+        if zoom_match:
+            zoom_args = zoom_match.group(1).strip()
+            # Parsing ref/doc_id and page number
+            parts = [p.strip() for p in zoom_args.split(",")]
+            zoom_doc_id = self._resolve_target_doc_id(parts[0])
+            if len(parts) >= 2:
+                p_m = re.search(r'\d+', parts[1])
+                if p_m:
+                    zoom_page_num = int(p_m.group(0))
+
+        if zoom_doc_id:
+            print(f"[*] [Targeted Page Zoom] Modelul a solicitat zoom pe pagina {zoom_page_num} a documentului ID {zoom_doc_id}. Preluare pagini adiacente...")
+            zoom_str = self.tool_zoom_page(zoom_doc_id, center_page=zoom_page_num, expand_pages=1)
+            if zoom_str and "not found" not in zoom_str and "No pages found" not in zoom_str:
+                expanded_evidence = f"{combined_evidence}\n\n=== CONTEXT EXPANDAT PE PAGINILE ADIACENTE (ZOOM PAGINA {zoom_page_num}) ===\n{zoom_str}"
+                retry_prompt = (
+                    f"OBIECTIV DE INVESTIGAT: {target['title']}\n\n"
+                    f"{prev_facts_ctx}"
+                    f"DOVEZI IDENTIFICATE DIN DOSAR (INCLUSIV PAGINILE ADIACENTE EXPANDATE):\n{expanded_evidence[:self.max_evidence_chars]}\n\n"
+                    "NOTĂ AUDIT: Ai solicitat navigarea zoom pe pagini adiacente. Contextul extins a fost adus mai sus. "
+                    "CERINȚĂ: Formulează concluzia factuală definitivă și completă în limba ROMÂNĂ. "
+                    "Extrage cifre exacte, date și citează referințele [REF x].\n"
+                    "DIRECTIVĂ CRITICĂ: Răspunde DIRECT cu concluzia factuală definitivă în limba ROMÂNĂ. Nu include procese de gândire sau text în engleză."
+                )
+                step_res_z = UnifiedLLMClient.chat_step(
+                    messages=[
+                        {"role": "system", "content": "Ești un Auditor Investigativ de Elită. Răspunde strict pe baza probelor furnizate, exclusiv în limba ROMÂNĂ. Fii concis, riguros și direct. Nu include procese de gândire sau text în engleză."},
+                        {"role": "user", "content": retry_prompt}
+                    ],
+                    model=self.active_model,
+                    temperature=0.0,
+                    num_ctx=self.processing_ctx,
+                    stop_check=self._stop_check,
+                    max_tokens=4096
+                )
+                raw_res_z = step_res_z.get("content", "").strip()
+                clean_res_z = self._sanitize_llm_response(raw_res_z)
+                if clean_res_z and len(clean_res_z) > 20:
+                    clean_res = clean_res_z
 
         # 1. Detectare cerere explicită FETCH_DOCUMENT din partea modelului
         fetch_match = re.search(r'(?:\[?\b(?:FETCH_DOCUMENT|REQUEST_FULL_DOCUMENT|EXPAND_DOCUMENT)\b[:\s]+([^\]\n\r]+)\]?)', raw_res, re.IGNORECASE)
-        if fetch_match:
+        if fetch_match and not zoom_doc_id:
             expanded_doc_id = self._resolve_target_doc_id(fetch_match.group(1))
 
         # 2. Auto-Healing: Modelul raportează că un articol sau textul unui act este incomplet / doar parțial

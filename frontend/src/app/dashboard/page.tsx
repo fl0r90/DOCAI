@@ -195,6 +195,12 @@ export default function Dashboard() {
           >
             <Bug className="w-4 h-4" /> Telemetrie & Debug
           </button>
+          <button 
+            onClick={() => router.push('/dashboard/llm-trace')}
+            className="w-full px-4 py-3 rounded-xl flex items-center gap-3 font-bold text-sm transition-all text-left text-indigo-600 dark:text-indigo-400 bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/20"
+          >
+            <Terminal className="w-4 h-4 text-indigo-500" /> LLM Inspector (Live Trace)
+          </button>
           <button onClick={() => router.push('/dashboard/llm')} className="w-full px-4 py-3 hover:bg-black/5 dark:hover:bg-white/5 rounded-xl text-slate-500 dark:text-slate-400 flex items-center gap-3 font-bold text-sm transition-all text-left">
             <Brain className="w-4 h-4" /> Configurație LLM
           </button>

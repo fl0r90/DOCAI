@@ -14,6 +14,39 @@ from .debug_logger import debug_logger
 logger = logging.getLogger(__name__)
 
 
+def _record_llm_trace(model: str, messages: Any, prompt_text: str, content: str, reasoning: str, tool_calls: list, duration_ms: float, meta: dict = None):
+    """Înregistrează un jurnal complet de execuție LLM în Redis pentru LLM Inspector (Admin)."""
+    try:
+        import redis, json, time, os
+        from datetime import datetime, timezone
+        r = redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
+        
+        if not prompt_text and isinstance(messages, list):
+            prompt_parts = []
+            for m in messages:
+                role = m.get("role", "user")
+                c = m.get("content", "")
+                prompt_parts.append(f"[{role.upper()}]\n{c}")
+            prompt_text = "\n\n".join(prompt_parts)
+            
+        record = {
+            "id": f"trace_{int(time.time()*1000)}",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "model": model,
+            "messages": messages if isinstance(messages, list) else [],
+            "prompt_text": prompt_text or "",
+            "content": content or "",
+            "reasoning": reasoning or "",
+            "tool_calls": tool_calls or [],
+            "duration_ms": round(duration_ms, 2),
+            "meta": meta or {}
+        }
+        r.lpush("llm_full_trace_logs", json.dumps(record, ensure_ascii=False))
+        r.ltrim("llm_full_trace_logs", 0, 99)
+    except Exception as e:
+        print(f"[RECORD_LLM_TRACE_ERR] {e}")
+
+
 def _normalize_ollama_model_name(model_name: str) -> str:
     """
     Normalize Ollama model names to ensure they use the correct format.
@@ -34,6 +67,8 @@ def _normalize_ollama_model_name(model_name: str) -> str:
         Normalized model name using colon separator for tag
     """
     if not model_name:
+        return model_name
+    if ":" in model_name:
         return model_name
 
     # Eliminăm prefixul de organizație dacă există (ex: google/gemma-4-e4b -> gemma-4-e4b)
@@ -131,8 +166,6 @@ class UnifiedLLMClient:
 
     3. **Automatic fallback**: On 400 error from `/api/chat`, automatically retries via
        `/v1/chat/completions` (configurable via `OLLAMA_API_MODE` env var or config key)
-
-    See: test_ollama_toolcall_fix.py for comprehensive tests.
     """
 
     @staticmethod
@@ -194,8 +227,7 @@ class UnifiedLLMClient:
     def _coerce_tool_arguments(cls, args: Any) -> Dict[str, Any]:
         """Returnează argumentele unui tool_call ca dict.
 
-        Ollama /api/chat respinge cu 400 ("Value looks like object, but can't find
-        closing '}' symbol") orice arguments care nu e un obiect JSON. Acceptăm:
+        Ollama /api/chat respinge cu 400 (Value looks like object, but cant find closing symbol) orice arguments care nu e un obiect JSON. Acceptăm:
           - dict            -> se păstrează
           - string JSON     -> se parsează; dacă rezultă dict, îl folosim
           - string neparabil / orice alt tip -> {} (fail-safe, fără crash)
@@ -224,21 +256,8 @@ class UnifiedLLMClient:
     def _sanitize_message_for_ollama(cls, message: Dict[str, Any]) -> Dict[str, Any]:
         """Sanitizează un mesaj înainte de trimiterea către Ollama /api/chat.
 
-        Ollama așteaptă ca tool_calls['function']['arguments'] să fie un dict/object,
+        Ollama așteaptă ca tool_calls function arguments să fie un dict/object,
         nu un string JSON. Dacă arguments este string, îl parsează în dict (sau {} la eroare).
-
-        **Purpose**: Prevents 400 Bad Request errors from Ollama's native /api/chat endpoint
-        which expects tool_call arguments as parsed JSON objects, not escaped strings.
-
-        **Example**:
-            Input:  {"function": {"arguments": '{"key": "val"}'}}
-            Output: {"function": {"arguments": {"key": "val"}}}
-
-        Args:
-            message: Message dict potentially containing tool_calls with string args
-
-        Returns:
-            Sanitized message with all tool_call arguments as Python dicts
         """
         sanitized = dict(message) if isinstance(message, dict) else {}
         # content: null eșuează la unmarshaling în structul Go al Ollamei -> ""
@@ -414,17 +433,7 @@ class UnifiedLLMClient:
                                  format: Optional[Union[str, dict]] = None,
                                  max_tokens: Optional[int] = None) -> Dict[str, Any]:
         """Pas de chat prin endpoint-ul Ollama compatibil OpenAI (/v1/chat/completions).
-
-        Alternativă la /api/chat pentru cazurile în care parserul nativ respinge
-        formatul tool_calls (ex. 400 "Value looks like object, but can't find closing
-        '}' symbol"). Răspunsul este convertit înapoi în formatul intern al aplicației
-        (arguments -> dict) prin _normalize_tool_calls.
-
-        **Purpose**: Provides OpenAI-compatible interface when Ollama native endpoint
-        fails due to tool_call argument parsing issues. Automatically used via:
-        - Config: `ollama_api_mode: "openai"` 
-        - Env var: `OLLAMA_API_MODE=openai`
-        - Fallback: On 400 error from /api/chat
+        Alternativă la /api/chat pentru cazurile în care parserul nativ respinge formatul tool_calls.
 
         Args:
             ollama_url: Base URL (e.g., "http://llm:11434")
@@ -508,6 +517,16 @@ class UnifiedLLMClient:
             duration_ms=t_llm_dur,
             tokens_out_est=int(len(content) // 3.5),
             tool_calls_count=len(tool_calls)
+        )
+        _record_llm_trace(
+            model=active_model,
+            messages=openai_messages,
+            prompt_text="",
+            content=content,
+            reasoning=reasoning,
+            tool_calls=tool_calls,
+            duration_ms=t_llm_dur,
+            meta={"endpoint": "ollama_openai"}
         )
         return {"content": content, "tool_calls": tool_calls, "raw": msg}
 
@@ -840,6 +859,16 @@ class UnifiedLLMClient:
                 tokens_out_est=int(len(acc_content) // 3.5),
                 tool_calls_count=len(tool_calls)
             )
+            _record_llm_trace(
+                model=active_model,
+                messages=messages,
+                prompt_text="",
+                content=acc_content,
+                reasoning=acc_thinking.strip(),
+                tool_calls=tool_calls,
+                duration_ms=t_llm_dur,
+                meta={"endpoint": "ollama_native"}
+            )
             return {
                 "content": acc_content,
                 "tool_calls": tool_calls,
@@ -854,7 +883,7 @@ class UnifiedLLMClient:
         """Generare asincronă utilizată de Grinder / Document Processor."""
         cfg = cls.get_engine_config()
         engine = cfg.get("active_llm_engine", "ollama").lower()
-        active_model = model or cfg.get("specialist_processing") or cfg.get("active_model") or os.getenv("ACTIVE_MODEL", "")
+        active_model = model or cfg.get("active_model") or cfg.get("specialist_processing") or os.getenv("ACTIVE_MODEL", "")
         
         # Normalize Ollama model names to handle common naming variations
         if engine == "ollama" and active_model:
